@@ -8,6 +8,7 @@ from rich.console import Console
 
 from zotero_paperread.note import render_note, validate_note
 from zotero_paperread.pdf_extract import extract_pdf
+from zotero_paperread.workflow import prepare_item_bundle
 
 app = typer.Typer(help="Zotero-first paper reading utilities.")
 console = Console()
@@ -78,3 +79,14 @@ def validate_note_command(note_path: Path) -> None:
 def preview_note_command(note_path: Path) -> None:
     """Print a rendered note without writing to Zotero."""
     console.print(note_path.read_text(encoding="utf-8"))
+
+
+@app.command("prepare-item")
+def prepare_item_command(
+    details_json: Path,
+    workdir: Path = typer.Option(..., "--workdir", help="Directory for metadata, extraction, and context files."),
+    max_pages: int | None = typer.Option(None, "--max-pages", min=1, help="Extract at most this many PDF pages."),
+) -> None:
+    """Prepare a summarization bundle from raw Zotero item details JSON."""
+    payload = prepare_item_bundle(read_json(details_json), workdir=workdir, max_pages=max_pages)
+    typer.echo(json.dumps(payload, ensure_ascii=False))
