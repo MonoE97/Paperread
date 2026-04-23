@@ -1,0 +1,74 @@
+# [Codex Summary] {{ title }} - {{ generated_date }}
+
+## 元数据
+
+- **Zotero Key**: {{ key }}
+- **标题**: {{ title }}
+- **作者**: {{ creators }}
+- **日期**: {{ date }}
+- **DOI**: {{ doi }}
+- **URL**: {{ url }}
+- **Zotero 链接**: {{ zotero_url }}
+- **质量评分**: {{ quality_score }}
+
+## 核心结论
+
+{{ one_sentence_summary }}
+
+## 摘要翻译
+
+{{ abstract_translation }}
+
+## 关键要点
+
+{% for item in key_points -%}
+- {{ item }}
+{% endfor %}
+
+## 研究问题
+
+{{ research_question }}
+
+## 方法拆解
+
+{{ method }}
+
+## 实验与证据
+
+{{ experiments }}
+
+## 主要贡献
+
+{% for item in contributions -%}
+- {{ item }}
+{% endfor %}
+
+## 局限与风险
+
+{% for item in limitations -%}
+- {{ item }}
+{% endfor %}
+
+## AI+物理/材料启发
+
+{{ ai4s_relevance }}
+
+## 后续关键词
+
+{% for item in follow_up_keywords -%}
+- {{ item }}
+{% endfor %}
+
+## 抽取告警
+
+{% if extraction_warnings -%}
+{% for item in extraction_warnings -%}
+- {{ item }}
+{% endfor %}
+{% else -%}
+- none
+{% endif %}
+
+---
+
+Tags: codex-summary, paper-summary
