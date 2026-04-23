@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# uv and virtual environments
+.venv/
+
+# Local outputs and previews
+*.log
+tmp/
+.tmp/
+dist/
+build/
+*.pdf.txt
+*.extract.json
+*.summary.json
+*.note.md
