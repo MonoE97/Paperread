@@ -95,6 +95,11 @@ def _has_text(value: Any) -> bool:
     return bool(clean_required_text(value))
 
 
+def _is_write_ready_evidence_locator(value: Any) -> bool:
+    locator = clean_required_text(value)
+    return bool(re.match(r"^(?:context\.md|figure_context\.md)(?:$|[\s:#])", locator))
+
+
 def format_evidence_line(locator: str, summary: str) -> str:
     locator = flatten_inline_markdown_text(locator)
     summary = flatten_inline_markdown_text(summary)
@@ -164,7 +169,7 @@ def validate_write_ready_evidence(summary: dict[str, Any]) -> list[str]:
         has_locator = False
         if isinstance(evidence_items, list):
             for evidence in evidence_items[:3]:
-                if isinstance(evidence, dict) and _has_text(evidence.get("locator")):
+                if isinstance(evidence, dict) and _is_write_ready_evidence_locator(evidence.get("locator")):
                     has_locator = True
                     break
         if not has_locator:

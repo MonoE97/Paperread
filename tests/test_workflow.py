@@ -209,6 +209,36 @@ def test_prepare_item_bundle_handles_missing_pdf(tmp_path: Path) -> None:
     assert "Abstract only." in context
 
 
+def test_prepare_item_bundle_distinguishes_pdf_attachment_without_local_path(tmp_path: Path) -> None:
+    details = {
+        "key": "PDFNOPATH",
+        "title": "PDF Without Local Path",
+        "creators": [{"firstName": "Ada", "lastName": "Lovelace"}],
+        "date": "2025",
+        "DOI": "",
+        "url": "",
+        "zoteroUrl": "zotero://select/library/items/PDFNOPATH",
+        "abstractNote": "Abstract only.",
+        "attachments": [
+            {
+                "key": "PDFKEY",
+                "filename": "paper.pdf",
+                "contentType": "application/pdf",
+            }
+        ],
+    }
+
+    result = prepare_item_bundle(details, tmp_path / "bundle")
+
+    extract = json.loads(Path(result["extract_json"]).read_text(encoding="utf-8"))
+
+    assert result["has_pdf"] is False
+    assert "missing_pdf_path_in_item_details" in result["warnings"]
+    assert "missing_pdf_attachment" not in result["warnings"]
+    assert "missing_pdf_path_in_item_details" in extract["warnings"]
+    assert "missing_pdf_attachment" not in extract["warnings"]
+
+
 def test_prepare_item_bundle_keeps_base_bundle_when_figure_extraction_fails(tmp_path: Path) -> None:
     pdf_path = tmp_path / "paper.pdf"
     make_pdf(pdf_path, ["Abstract\nThis paper studies CSP with AI.", "Methods\nExtra page for truncation."])

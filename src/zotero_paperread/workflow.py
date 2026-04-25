@@ -57,6 +57,11 @@ def select_pdf_attachment(attachments: list[dict[str, Any]]) -> dict[str, Any] |
     return selected
 
 
+def has_pdf_attachment(attachments: list[dict[str, Any]]) -> bool:
+    """Return whether item details include any PDF attachment entry."""
+    return any(attachment.get("contentType") == "application/pdf" for attachment in attachments)
+
+
 def build_metadata(details: dict[str, Any]) -> dict[str, Any]:
     """Build normalized metadata for note rendering."""
     attachment = select_pdf_attachment(details.get("attachments", []))
@@ -191,15 +196,23 @@ def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int |
 
     metadata = build_metadata(details)
     pdf_path = metadata["pdf_path"]
+    attachments = details.get("attachments", [])
+    if not isinstance(attachments, list):
+        attachments = []
     if pdf_path:
         extract = extract_pdf(Path(pdf_path), max_pages=max_pages)
     else:
+        missing_pdf_warning = (
+            "missing_pdf_path_in_item_details"
+            if has_pdf_attachment([attachment for attachment in attachments if isinstance(attachment, dict)])
+            else "missing_pdf_attachment"
+        )
         extract = {
             "pdf_path": "",
             "page_count": 0,
             "extracted_pages": 0,
             "text": "",
-            "warnings": ["missing_pdf_attachment"],
+            "warnings": [missing_pdf_warning],
         }
 
     metadata_path = bundle_dir / "metadata.json"

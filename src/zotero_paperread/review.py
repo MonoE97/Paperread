@@ -47,6 +47,16 @@ def validate_review_payload(review: dict[str, Any]) -> list[str]:
     if not isinstance(trust_recommendation, str) or not trust_recommendation.strip():
         errors.append("trust_status_recommendation is required")
 
+    if "review_issues" not in review:
+        errors.append("review_issues is required")
+    elif not isinstance(review["review_issues"], list):
+        errors.append("review_issues must be a list")
+
+    if "improvement_requests" not in review:
+        errors.append("improvement_requests is required")
+    elif not isinstance(review["improvement_requests"], list):
+        errors.append("improvement_requests must be a list")
+
     return errors
 
 

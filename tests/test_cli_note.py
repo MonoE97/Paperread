@@ -516,6 +516,26 @@ def test_validate_trusted_summary_rejects_summary_only_evidence_without_locator(
     assert "evidence_summary[1] must include at least one evidence locator" in result.stdout
 
 
+def test_validate_trusted_summary_rejects_na_evidence_locator(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    write_ready_trusted_summary_with_evidence(
+        summary_path,
+        [
+            {
+                "claim": "The method is supported.",
+                "evidence": [{"type": "text", "locator": "N/A", "summary": "method evidence"}],
+                "confidence": "high",
+            }
+        ],
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["validate-trusted-summary", str(summary_path)])
+
+    assert result.exit_code == 1
+    assert "evidence_summary[1] must include at least one evidence locator" in result.stdout
+
+
 def test_validate_trusted_summary_passes_ready_summary(tmp_path: Path) -> None:
     summary_path = tmp_path / "summary.json"
     write_json(

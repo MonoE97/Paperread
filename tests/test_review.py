@@ -132,6 +132,36 @@ def test_apply_review_to_summary_rejects_non_bool_needs_improvement() -> None:
     assert summary["improvement_status"] == "needed"
 
 
+def test_apply_review_to_summary_rejects_missing_review_issues() -> None:
+    summary = {"one_sentence_summary": "ok", "improvement_status": "needed"}
+    review = {
+        "review_status": "passed",
+        "trust_status_recommendation": "trusted",
+        "needs_improvement": False,
+        "improvement_requests": [],
+    }
+
+    with pytest.raises(ValueError, match="review_issues"):
+        apply_review_to_summary(summary, review)
+
+    assert summary["improvement_status"] == "needed"
+
+
+def test_apply_review_to_summary_rejects_missing_improvement_requests() -> None:
+    summary = {"one_sentence_summary": "ok", "improvement_status": "needed"}
+    review = {
+        "review_status": "passed",
+        "review_issues": [],
+        "trust_status_recommendation": "trusted",
+        "needs_improvement": False,
+    }
+
+    with pytest.raises(ValueError, match="improvement_requests"):
+        apply_review_to_summary(summary, review)
+
+    assert summary["improvement_status"] == "needed"
+
+
 def test_apply_review_to_summary_rejects_missing_trust_recommendation_without_preserving_stale_trusted_state() -> None:
     summary = {
         "one_sentence_summary": "ok",
