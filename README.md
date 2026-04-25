@@ -93,6 +93,12 @@ uv run zotero-paperread preview-note runs/<date>/<paper-slug>/note.md
 
 `create-run` prints a JSON payload containing `run_dir`, `manifest_path`, `slug`, and `date`. Use the returned `run_dir` instead of guessing the final slug when there may already be a same-day run for the same title.
 
+## Trusted Notes
+
+The workflow asks Codex to classify paper type, assign trust status, attach compact evidence pointers, and run a second-pass note quality review before Zotero write-through. If review finds fixable omissions, Codex may perform one bounded improvement pass by re-reading only the current run directory artifacts.
+
+The rendered note includes `## 可信度与证据` with `paper_type`, `trust_status`, `review_status`, `improvement_status`, evidence pointers, review issues, and any improvement notes. This section is meant to make each note useful as a long-term knowledge-base entry without hiding extraction uncertainty.
+
 ## V2: Key Figure Extraction and Analysis
 
 - Primary path: resolve arXiv ID and extract source images or source-side figure PDFs when possible.

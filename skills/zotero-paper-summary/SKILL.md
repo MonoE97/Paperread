@@ -117,7 +117,27 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
   "follow_up_keywords": [],
   "note_labels": [],
   "quality_score": "",
-  "extraction_warnings": []
+  "extraction_warnings": [],
+  "paper_type": "research_article",
+  "trust_status": "usable_with_caveats",
+  "evidence_summary": [
+    {
+      "claim": "",
+      "evidence": [
+        {
+          "type": "text",
+          "locator": "page 1",
+          "summary": ""
+        }
+      ],
+      "confidence": "high"
+    }
+  ],
+  "trust_rationale": "",
+  "review_status": "not_reviewed",
+  "review_issues": [],
+  "improvement_status": "not_needed",
+  "improvement_notes": []
 }
 ```
 
@@ -135,6 +155,10 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
      - 它支撑了哪条核心结论或方法理解
    - `note_labels` 只写本文自动推断出的英文规范 key，不要包含固定系统标签 `codex-summary` 或 `paper-summary`。
    - `note_labels` 最多 4 个；使用 lowercase snake_case，例如 `metasurface`、`inverse_design`、`deep_learning`、`power_allocation`。
+   - `paper_type` 必须从 `research_article`、`review`、`perspective`、`benchmark`、`method_paper`、`dataset_paper`、`theory_paper`、`unknown` 中选择。
+   - `trust_status` 必须从 `trusted`、`usable_with_caveats`、`metadata_only`、`needs_manual_review` 中选择；默认用 `usable_with_caveats`，不要过度自信。
+   - `evidence_summary` 最多 5 条，每条结论最多列 3 个证据 locator；证据必须来自 `context.md` 或 `figure_context.md`。
+   - `trust_rationale` 必须解释可信状态和抽取告警之间的关系。
 
 8. 渲染和验证 note：
 
@@ -148,8 +172,34 @@ uv run zotero-paperread preview-note <run_dir>/note.md
    - 如果手动拆开执行，必须按 `render-note -> validate-note -> preview-note` 串行执行，不能并行调度。
    - 即使用户已经明确要求写入，也必须先完成 `preview-note`，确认目标条目标题和 note 预览都已经生成，再进入 Zotero 写入步骤。
 
-9. 写入 Zotero：
+9. 二次质量审查：
+   - 阅读 `<run_dir>/context.md`、`<run_dir>/figure_context.md`、`<run_dir>/summary.json` 和 `<run_dir>/note.md`。
+   - 生成 `<run_dir>/review.json`。
+   - 审查必须检查：
+     - 主要结论是否有 page 或 figure 证据
+     - 局限是否具体而不是泛泛而谈
+     - 论文类型是否合理
+     - 是否把背景知识写成本论文贡献
+     - 图分析是否来自真实 `figure_context.md`
+     - 是否因抽取告警需要降级可信状态
+   - `review.json` 必须包含 `review_status`、`review_issues`、`trust_status_recommendation`、`needs_improvement` 和 `improvement_requests`。
+
+10. 补充优化：
+   - 如果 `review.json` 中 `needs_improvement` 为 true，允许一次补充优化。
+   - 只允许重读当前 run 目录中的 `context.md`、`figure_context.md`、`extract.json`、`figures.json`。
+   - 可以更新 `summary.json` 中的方法、局限、证据、可信状态、审查状态和 `improvement_notes`。
+   - 不允许使用外部知识补证据。
+   - 补充后必须重新运行 `finalize-note`，再做一次质量审查。
+   - 自动补充最多一次。
+   - 如果现有抽取材料不足以修复问题，设置 `improvement_status` 为 `blocked`，并降低或保留保守的 `trust_status`。
+
+11. 写入 Zotero：
    - 只有用户明确要求“写入”“写入笔记”“写回 Zotero”“创建 note”“保存到 Zotero”等动作时执行。
+   - 写入 Zotero 前必须满足：
+     - `review_status` 为 `passed` 或 `passed_with_caveats`
+     - 没有待处理的 `needs_improvement`
+     - 已完成 `preview-note`
+   - 如果 `review_status` 为 `failed`，停止并报告审查问题，不写入 Zotero。
    - note 标题由模板生成：`[Codex Summary] <paper title> - YYYY-MM-DD`。
    - 调用 `write_note(action="create", parentKey=<item key>, content=<note markdown>, tags=["codex-summary","paper-summary"])`。
    - 成功后回读一次 `get_item_details`，确认子笔记已经挂载到目标条目下。
