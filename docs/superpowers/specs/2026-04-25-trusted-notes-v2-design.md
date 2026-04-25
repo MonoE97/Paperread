@@ -15,7 +15,8 @@ The design covers two phases:
 2. **Phase 2: Note Quality Review Layer**
    - review the generated note for unsupported claims, generic limitations, paper-type mismatch, and figure-analysis drift
    - emit a structured review result
-   - use that result to downgrade trust status or block write-through when necessary
+   - use that result to downgrade trust status, request targeted source re-reading, or block write-through when necessary
+   - allow one bounded improvement pass that re-reads the extracted source context and improves the original summary before final preview
 
 This spec does not implement section-by-section summarization, Better Notes graph integration, or relation graph construction. Those are later layers. This spec strengthens the credibility of each single-paper note first.
 
@@ -46,7 +47,8 @@ Trusted Notes V2 adds evidence and review discipline without making the workflow
 2. Make important conclusions traceable to page-level or figure-level evidence.
 3. Make paper type explicit so reviews, perspectives, theory papers, benchmarks, and research articles are not judged by the same template.
 4. Add a second-pass quality review before writing to Zotero.
-5. Keep the final note readable; do not expose bulky internal audit JSON unless needed.
+5. Allow the review pass to trigger one bounded source-grounded improvement pass when fixable omissions are found.
+6. Keep the final note readable; do not expose bulky internal audit JSON unless needed.
 
 ## Non-Goals
 
@@ -155,6 +157,27 @@ It checks whether the note is faithful to the extracted evidence.
 
 This review is not a peer review of the paper. It is a quality check on the generated note.
 
+## Improvement Pass
+
+When the review finds fixable omissions or weak sections, the workflow may run one bounded improvement pass before final preview and Zotero write-through.
+
+The improvement pass re-reads the already extracted source artifacts:
+
+- `context.md`
+- `figure_context.md`
+- `extract.json`
+- `figures.json`
+
+It may update:
+
+- `summary.json`
+- `note.md`
+- `review.json`
+
+It must not invent evidence outside the extracted source artifacts. If the missing evidence is not available in the extracted context, the pass must keep or lower the trust status instead of fabricating support.
+
+Only one automatic improvement pass is allowed in V2. This prevents infinite review-rewrite loops and keeps the workflow predictable.
+
 ---
 
 ## Summary Contract Additions
@@ -180,7 +203,9 @@ The generated `summary.json` should add these fields:
   ],
   "trust_rationale": "",
   "review_status": "not_reviewed",
-  "review_issues": []
+  "review_issues": [],
+  "improvement_status": "not_needed",
+  "improvement_notes": []
 }
 ```
 
@@ -249,6 +274,35 @@ Allowed severities:
 - `low`
 - `medium`
 - `high`
+
+### `improvement_status`
+
+Allowed values:
+
+- `not_needed`
+- `needed`
+- `completed`
+- `blocked`
+
+Before review runs, use `not_needed`.
+
+If review finds fixable omissions or weak sections, use `needed`.
+
+After the bounded improvement pass completes, use `completed`.
+
+If the review finds missing support but the extracted source artifacts do not contain enough evidence to fix the note, use `blocked` and lower the trust status.
+
+### `improvement_notes`
+
+A list of compact records describing what changed or why improvement was blocked:
+
+```json
+{
+  "issue": "The method section was too generic.",
+  "action": "Added page-grounded description of the optimization loop from context.md page 4.",
+  "source": "context.md"
+}
+```
 
 ---
 
@@ -369,7 +423,15 @@ Shape:
       "suggested_fix": "Tie limitations to dataset size, experimental setting, or model generalization if supported."
     }
   ],
-  "trust_status_recommendation": "usable_with_caveats"
+  "trust_status_recommendation": "usable_with_caveats",
+  "needs_improvement": true,
+  "improvement_requests": [
+    {
+      "target_section": "局限与风险",
+      "reason": "The current limitation is generic.",
+      "source_hint": "Look for dataset size, experimental setting, or model generalization constraints in context.md."
+    }
+  ]
 }
 ```
 
@@ -384,16 +446,54 @@ The review must check:
 5. whether figure analysis uses real extracted figures
 6. whether the note overstates performance or novelty
 7. whether extraction warnings should downgrade trust
+8. whether any issue is fixable by re-reading the extracted source artifacts
 
 ## Write-Through Gate
 
 When the user asks to write to Zotero:
 
-- if `review_status` is `passed` or `passed_with_caveats`, writing may proceed after preview
+- if `review_status` is `passed` or `passed_with_caveats` and no pending improvement is needed, writing may proceed after preview
+- if `review_status` is `passed_with_caveats` and `needs_improvement` is true, run the bounded improvement pass before final preview
 - if `review_status` is `failed`, stop and report the review issues
 - if `review_status` is `not_reviewed`, run the review before writing
 
 This keeps write-through notes from entering Zotero before the quality pass happens.
+
+## Improvement Pass Contract
+
+The improvement pass reads:
+
+- `review.json`
+- `summary.json`
+- `context.md`
+- `figure_context.md`
+- `extract.json`
+- `figures.json`
+
+It updates `summary.json` and regenerates `note.md` when the requested fixes can be grounded in extracted source artifacts.
+
+The pass may improve:
+
+- generic limitations
+- missing paper-type caveats
+- weak method descriptions
+- missing page or figure evidence
+- figure analysis that does not clearly explain why the figure matters
+- trust rationale that does not match extraction warnings
+
+The pass must not:
+
+- add claims without source support
+- use outside web knowledge
+- loop more than once automatically
+- overwrite previous Zotero notes
+
+After improvement:
+
+- set `improvement_status` to `completed` when changes were made
+- set `improvement_status` to `blocked` when requested fixes cannot be supported
+- run the quality review again
+- use the second review result as the final write-through gate
 
 ---
 
@@ -424,10 +524,11 @@ Updated flow:
 6. generate `summary.json` with `paper_type`, `trust_status`, and `evidence_summary`
 7. finalize note
 8. run the note quality review
-9. update `summary.json` or write `review.json`
-10. finalize note again if review changes visible fields
-11. preview note
-12. write to Zotero only when explicitly requested and review gate allows it
+9. if review requests fixable improvement, re-read extracted source artifacts and update `summary.json`
+10. finalize note again after improvement
+11. run the quality review one more time
+12. preview note
+13. write to Zotero only when explicitly requested and review gate allows it
 
 ---
 
@@ -438,6 +539,7 @@ Expected implementation areas:
 - `skills/zotero-paper-summary/SKILL.md`
   - require trusted-note fields in `summary.json`
   - add second-pass review instructions
+  - add one-pass improvement instructions when review finds fixable omissions
   - add write-through gate based on review status
 
 - `src/zotero_paperread/note.py`
@@ -457,7 +559,7 @@ Expected implementation areas:
 Possible later implementation areas:
 
 - `src/zotero_paperread/review.py`
-  - if the review layer becomes deterministic enough for Python validation
+  - if the review and improvement orchestration becomes deterministic enough for Python validation
 
 - `tests/test_review.py`
   - if `review.py` is added
@@ -472,8 +574,10 @@ The Trusted Notes V2 design is satisfied when:
 2. rendered notes contain `## 可信度与证据`
 3. `validate-note` requires the trust section
 4. existing summaries without trust fields still render with conservative defaults
-5. write-through analysis runs or checks the review step before writing to Zotero
-6. failed review status blocks Zotero write unless the user explicitly overrides in a later design
+5. review output can request a bounded improvement pass
+6. fixable review issues can update `summary.json` from extracted source artifacts before final preview
+7. write-through analysis runs or checks the review step before writing to Zotero
+8. failed review status blocks Zotero write unless the user explicitly overrides in a later design
 
 ---
 
