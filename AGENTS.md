@@ -58,4 +58,4 @@ uv run zotero-paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/zot
 
 - 默认先 dry-run。
 - 真实写入 Zotero 前，必须展示 note 预览和目标 Zotero item 标题。
-- 重复运行不覆盖旧 note，使用 `[Codex Summary] <paper title> - YYYY-MM-DD` 标题创建新版本。
+- 重复运行不覆盖旧 note；同日重复创建时使用 `[Codex Summary] <paper title> - YYYY-MM-DD (v2)`、`(v3)` 等标题后缀创建新版本。

@@ -1,6 +1,6 @@
 ---
 name: zotero-paper-summary
-description: 输入 Zotero 论文标题，使用 Zotero MCP 定位条目，抽取 PDF，生成中文结构化论文总结，并在明确写入时创建 Zotero 子笔记。
+description: Use when the user asks to summarize, analyze, preview, regenerate, or write a Zotero paper note from a Zotero title or title fragment.
 ---
 
 # Zotero Paper Summary
@@ -39,6 +39,7 @@ Natural-language write intent example:
 - 用 `zotero-mcp get_item_details` 获取元数据和 PDF attachment path。
 - 用本项目 Python CLI 抽取 PDF 与渲染 note。
 - 用 Zotero MCP 在显式写入步骤创建 Zotero 子笔记。
+- 如果当前会话没有注入原生 Zotero MCP 工具，不实现或调用 HTTP fallback；停止并说明这是 session/tool-injection 问题，建议新开会话或检查 MCP 注册。
 - 不修改 Zotero SQLite。
 - 不调用 Better Notes API。
 - 不修改 Better Notes 配置。
@@ -92,6 +93,9 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
      - `figures/`
    - `context.md` 是默认总结输入源，包含元数据、摘要、抽取告警和 PDF 正文。
    - `figure_context.md` 用于关键图片筛选与分析，包含 figure provenance、source attempts、warnings 和候选图摘要。
+   - `metadata.json` 中的 PDF 默认选择主论文；文件名、路径或标题含 appendix、supplement、supporting information 等低优先级信号的 PDF 会排在主文后面。
+   - `figure_context.md` 的每张图包含 `Caption Confidence`。caption confidence 低或 caption 缺失时，图分析必须保守表述。
+   - 如果 figure extraction 失败，`prepare-item` 仍保留文本 bundle，并在 warnings 中写入 `figure_extraction_failed` 和 `figure_extraction_error:<type>:<message>`；此时总结必须降低图证据权重。
    - 无 PDF 时也继续工作，只是在 `extract.json` 中记录 `missing_pdf_attachment`。
 
 6. 生成 summary JSON：
@@ -154,6 +158,8 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
    - 对 AI+物理/材料的启发必须独立成节，结合用户研究方向给出判断。
    - 如果条目是综述、Perspective、评论文章或方法综述，明确按“综述类文献”处理，不要虚构本文原创实验。
    - `figure_overview` 必须解释关键图在整篇论文中的证据角色。
+   - 优先分析 `figure_context.md` 中 priority score 高、caption confidence 高、source provenance 清楚的图。
+   - 对 embedded-image 或 low-confidence caption 的图，不要把 caption 推断当成确定事实。
    - `key_figures` 中每个对象都必须解释：
      - 这张图展示什么
      - 为什么它重要
@@ -167,13 +173,26 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
 
 8. 渲染和验证 note：
 
+   - 写完 `<run_dir>/summary.json` 后，先检查 JSON 可读性：
+
+```bash
+uv run zotero-paperread validate-summary-json <run_dir>/summary.json
+```
+
 ```bash
 uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --output <run_dir>/note.md
 uv run zotero-paperread preview-note <run_dir>/note.md
 ```
 
    - 生成的 `summary.json`、`note.md` 和预览输出都保留在同一个 run 目录里，便于审计和复查。
+   - `validate-summary-json` 只证明文件是可读 UTF-8 JSON 且顶层是 object，不代表语义字段已经完整正确。
    - 推荐使用 `finalize-note`，它会按正确顺序执行 `render-note -> validate-note`。
+   - 如果本次是同日新版本，把步骤 4 得到的 suffix 传给 `finalize-note`，例如：
+
+```bash
+uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --output <run_dir>/note.md --version-suffix " (v2)"
+```
+
    - 如果手动拆开执行，必须按 `render-note -> validate-note -> preview-note` 串行执行，不能并行调度。
    - 即使用户已经明确要求写入，也必须先完成 `preview-note`，确认目标条目标题和 note 预览都已经生成，再进入 Zotero 写入步骤。
 
@@ -186,6 +205,7 @@ uv run zotero-paperread preview-note <run_dir>/note.md
      - 论文类型是否合理
      - 是否把背景知识写成本论文贡献
      - 图分析是否来自真实 `figure_context.md`
+     - 是否过度相信低 `Caption Confidence`、embedded-image backfill、或 figure extraction warning
      - 是否因抽取告警需要降级可信状态
    - `review.json` 必须包含 `review_status`、`review_issues`、`trust_status_recommendation`、`needs_improvement` 和 `improvement_requests`。
 
