@@ -298,3 +298,32 @@ def test_prepare_item_command_reports_non_object_details_json(tmp_path: Path) ->
 
     assert result.exit_code == 1
     assert f"json_invalid: details JSON {details_path}: expected top-level JSON object" in result.stdout
+
+
+def test_next_version_suffix_command_reads_item_details(tmp_path: Path) -> None:
+    details_path = tmp_path / "item-details.json"
+    write_json(
+        details_path,
+        {
+            "notes": [
+                "<h1>[Codex Summary] Paper A - 2026-04-26</h1>",
+                "<h1>[Codex Summary] Paper A - 2026-04-26 (v2)</h1>",
+            ]
+        },
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "next-version-suffix",
+            str(details_path),
+            "--paper-title",
+            "Paper A",
+            "--generated-date",
+            "2026-04-26",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == " (v3)\n"

@@ -12,6 +12,7 @@ from zotero_paperread.note import render_note, validate_note
 from zotero_paperread.pdf_extract import extract_pdf
 from zotero_paperread.runs import allocate_run_dir, write_run_manifest
 from zotero_paperread.workflow import prepare_item_bundle
+from zotero_paperread.zotero_details import next_version_suffix_from_details
 
 app = typer.Typer(help="Zotero-first paper reading utilities.")
 console = Console()
@@ -211,6 +212,21 @@ def finalize_note_command(
         version_suffix=version_suffix,
     )
     validate_note_path_or_exit(output)
+
+
+@app.command("next-version-suffix")
+def next_version_suffix_command(
+    details_json: Path,
+    paper_title: str = typer.Option(..., "--paper-title", help="Paper title used in generated note titles."),
+    generated_date: str = typer.Option(..., "--generated-date", help="Generated note date in YYYY-MM-DD form."),
+) -> None:
+    """Print the next same-day generated-note title suffix."""
+    suffix = next_version_suffix_from_details(
+        read_json_or_exit(details_json, label="details JSON"),
+        paper_title=paper_title,
+        generated_date=generated_date,
+    )
+    typer.echo(suffix)
 
 
 @app.command("validate-note")
