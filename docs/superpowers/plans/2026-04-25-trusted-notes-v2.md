@@ -44,7 +44,7 @@ It does not implement section-level summarization, Better Notes integration, gra
 - Modify: `/Users/jwxi/Desktop/AIflow/Zotero_paperread/src/zotero_paperread/note.py`
 - Modify: `/Users/jwxi/Desktop/AIflow/Zotero_paperread/templates/zotero_note.md.j2`
 
-- [ ] **Step 1: Add failing tests for trust section rendering**
+- [x] **Step 1: Add failing tests for trust section rendering**
 
 Use `apply_patch` to update `/Users/jwxi/Desktop/AIflow/Zotero_paperread/tests/test_note.py` with:
 
@@ -104,7 +104,7 @@ def test_render_note_contains_trust_and_evidence_section() -> None:
     assert "Method section was too generic." in note
 ```
 
-- [ ] **Step 2: Run the new test and confirm it fails**
+- [x] **Step 2: Run the new test and confirm it fails**
 
 Run:
 
@@ -114,7 +114,7 @@ uv run pytest tests/test_note.py::test_render_note_contains_trust_and_evidence_s
 
 Expected: FAIL because the template does not yet render `## 可信度与证据`.
 
-- [ ] **Step 3: Implement trusted-note render helpers**
+- [x] **Step 3: Implement trusted-note render helpers**
 
 Use `apply_patch` to update `/Users/jwxi/Desktop/AIflow/Zotero_paperread/src/zotero_paperread/note.py`:
 
@@ -235,7 +235,7 @@ Then add these fields to the render context in `render_note()`:
 
 Also add `"可信度与证据"` to `REQUIRED_SECTIONS`.
 
-- [ ] **Step 4: Render the trust section in the template**
+- [x] **Step 4: Render the trust section in the template**
 
 Use `apply_patch` to insert this section in `/Users/jwxi/Desktop/AIflow/Zotero_paperread/templates/zotero_note.md.j2` after `## 元数据` and before `## 核心结论`:
 
@@ -278,7 +278,7 @@ Use `apply_patch` to insert this section in `/Users/jwxi/Desktop/AIflow/Zotero_p
 {% endif %}
 ```
 
-- [ ] **Step 5: Run the note tests**
+- [x] **Step 5: Run the note tests**
 
 Run:
 
@@ -288,7 +288,7 @@ uv run pytest tests/test_note.py -q
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit Task 1**
+- [x] **Step 6: Commit Task 1**
 
 Run:
 
@@ -306,7 +306,7 @@ Expected: one local commit.
 **Files:**
 - Modify: `/Users/jwxi/Desktop/AIflow/Zotero_paperread/tests/test_cli_note.py`
 
-- [ ] **Step 1: Add a CLI test for trusted-note summaries**
+- [x] **Step 1: Add a CLI test for trusted-note summaries**
 
 Use `apply_patch` to add this test to `/Users/jwxi/Desktop/AIflow/Zotero_paperread/tests/test_cli_note.py`:
 
@@ -360,7 +360,7 @@ def test_finalize_note_command_accepts_trusted_note_fields(tmp_path: Path) -> No
     assert "note_valid" in result.stdout
 ```
 
-- [ ] **Step 2: Run the CLI note test**
+- [x] **Step 2: Run the CLI note test**
 
 Run:
 
@@ -370,7 +370,7 @@ uv run pytest tests/test_cli_note.py::test_finalize_note_command_accepts_trusted
 
 Expected: PASS after Task 1.
 
-- [ ] **Step 3: Run all CLI note tests**
+- [x] **Step 3: Run all CLI note tests**
 
 Run:
 
@@ -380,7 +380,7 @@ uv run pytest tests/test_cli_note.py -q
 
 Expected: PASS.
 
-- [ ] **Step 4: Commit Task 2**
+- [x] **Step 4: Commit Task 2**
 
 Run:
 
@@ -399,7 +399,7 @@ Expected: one test-only commit.
 - Modify: `/Users/jwxi/Desktop/AIflow/Zotero_paperread/skills/zotero-paper-summary/SKILL.md`
 - Modify: `/Users/jwxi/Desktop/AIflow/Zotero_paperread/README.md`
 
-- [ ] **Step 1: Update the summary JSON contract in the skill**
+- [x] **Step 1: Update the summary JSON contract in the skill**
 
 Use `apply_patch` to update `/Users/jwxi/Desktop/AIflow/Zotero_paperread/skills/zotero-paper-summary/SKILL.md` so the summary JSON example includes:
 
@@ -426,7 +426,7 @@ Use `apply_patch` to update `/Users/jwxi/Desktop/AIflow/Zotero_paperread/skills/
 "improvement_notes": []
 ```
 
-- [ ] **Step 2: Add review instructions to the skill**
+- [x] **Step 2: Add review instructions to the skill**
 
 Use `apply_patch` to add a new workflow step after the first `finalize-note` step:
 
@@ -443,7 +443,7 @@ Use `apply_patch` to add a new workflow step after the first `finalize-note` ste
      - 是否因抽取告警需要降级可信状态
 ```
 
-- [ ] **Step 3: Add one-pass improvement instructions to the skill**
+- [x] **Step 3: Add one-pass improvement instructions to the skill**
 
 Use `apply_patch` to add:
 
@@ -457,7 +457,7 @@ Use `apply_patch` to add:
    - 自动补充最多一次。
 ```
 
-- [ ] **Step 4: Add write-through gate instructions**
+- [x] **Step 4: Add write-through gate instructions**
 
 Use `apply_patch` to update the write step:
 
@@ -469,7 +469,7 @@ Use `apply_patch` to update the write step:
 - 如果 `review_status` 为 `failed`，停止并报告审查问题，不写入 Zotero。
 ```
 
-- [ ] **Step 5: Update README trusted-note section**
+- [x] **Step 5: Update README trusted-note section**
 
 Use `apply_patch` to add a short section to `/Users/jwxi/Desktop/AIflow/Zotero_paperread/README.md`:
 
@@ -479,7 +479,7 @@ Use `apply_patch` to add a short section to `/Users/jwxi/Desktop/AIflow/Zotero_p
 The workflow now asks Codex to classify paper type, assign trust status, attach compact evidence pointers, and run a second-pass note quality review before Zotero write-through. If review finds fixable omissions, Codex may perform one bounded improvement pass by re-reading only the current run directory artifacts.
 ```
 
-- [ ] **Step 6: Verify docs mention the review and improvement gate**
+- [x] **Step 6: Verify docs mention the review and improvement gate**
 
 Run:
 
@@ -489,7 +489,7 @@ rg -n "二次质量审查|补充优化|review.json|needs_improvement|Trusted Not
 
 Expected: matching lines in both files.
 
-- [ ] **Step 7: Commit Task 3**
+- [x] **Step 7: Commit Task 3**
 
 Run:
 
@@ -509,7 +509,7 @@ Expected: one docs commit.
 - Read: `/Users/jwxi/Desktop/AIflow/Zotero_paperread/docs/superpowers/specs/2026-04-25-trusted-notes-v2-design.md`
 - Read: `/Users/jwxi/Desktop/AIflow/Zotero_paperread/docs/superpowers/plans/2026-04-25-trusted-notes-v2.md`
 
-- [ ] **Step 1: Run the full test suite**
+- [x] **Step 1: Run the full test suite**
 
 Run:
 
@@ -519,7 +519,7 @@ uv run pytest
 
 Expected: all tests pass.
 
-- [ ] **Step 2: Run CLI help**
+- [x] **Step 2: Run CLI help**
 
 Run:
 
@@ -529,7 +529,7 @@ uv run zotero-paperread --help
 
 Expected: command list prints successfully.
 
-- [ ] **Step 3: Run the minimal PDF extraction check**
+- [x] **Step 3: Run the minimal PDF extraction check**
 
 Run:
 
@@ -539,7 +539,7 @@ uv run zotero-paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/zot
 
 Expected: writes `/tmp/zotero-paperread-extract.json`.
 
-- [ ] **Step 4: Run spec and plan consistency checks**
+- [x] **Step 4: Run spec and plan consistency checks**
 
 Run:
 
@@ -552,7 +552,7 @@ Expected:
 - first command has no matches
 - second command shows relevant references across spec, plan, skill, and README
 
-- [ ] **Step 5: Commit any final fixes**
+- [x] **Step 5: Commit any final fixes**
 
 Run:
 
@@ -563,3 +563,22 @@ git status --short
 Expected: no unexpected files. If final fixes were needed, commit them with a specific message.
 
 Do not push unless the user explicitly asks.
+
+---
+
+## Execution Record
+
+Completed on 2026-04-25.
+
+Implementation commits:
+
+- `a533648 feat: render trust and evidence note section`
+- `135b49b test: cover trusted note finalization`
+- `24af607 docs: define trusted note review workflow`
+
+Verification completed:
+
+- `uv run pytest` -> 72 passed
+- `uv run zotero-paperread --help` -> passed
+- `uv run zotero-paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/zotero-paperread-extract.json` -> passed
+- Spec/plan/skill/README consistency scan -> passed
