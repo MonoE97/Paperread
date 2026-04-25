@@ -529,10 +529,23 @@ def render_quality_gate_image(path: Path, width: int, height: int, kind: str) ->
             page.draw_circle(point, 4, color=(0.8, 0.1, 0.1), fill=(0.8, 0.1, 0.1))
         page.insert_text((plot_area.x0 - 28, plot_area.y0 + 18), "y", fontsize=12)
         page.insert_text((plot_area.x1 - 16, plot_area.y1 + 24), "x", fontsize=12)
+    elif kind == "transparent-plot":
+        plot_area = fitz.Rect(54, 42, width - 36, height - 42)
+        page.draw_line(plot_area.bl, plot_area.tl, color=(0, 0, 0), width=3)
+        page.draw_line(plot_area.bl, plot_area.br, color=(0, 0, 0), width=3)
+        points = [
+            fitz.Point(plot_area.x0 + 12, plot_area.y1 - 24),
+            fitz.Point(plot_area.x0 + 96, plot_area.y1 - 116),
+            fitz.Point(plot_area.x0 + 190, plot_area.y1 - 72),
+            fitz.Point(plot_area.x0 + 284, plot_area.y0 + 54),
+            fitz.Point(plot_area.x1 - 18, plot_area.y0 + 30),
+        ]
+        for start, end in zip(points, points[1:]):
+            page.draw_line(start, end, color=(0, 0, 0), width=5)
     else:
         raise ValueError(f"unknown image kind: {kind}")
 
-    pixmap = page.get_pixmap(alpha=False)
+    pixmap = page.get_pixmap(alpha=kind == "transparent-plot")
     pixmap.save(path)
     doc.close()
 
@@ -580,6 +593,27 @@ def test_assess_image_quality_accepts_normal_plot_like_image(tmp_path: Path) -> 
     assert quality["status"] == "ok"
     assert quality["warnings"] == []
     assert quality["content_bbox_area_ratio"] >= 0.12
+
+
+def test_assess_image_quality_accepts_transparent_black_plot(tmp_path: Path) -> None:
+    image_path = tmp_path / "transparent-plot.png"
+    render_quality_gate_image(image_path, width=520, height=320, kind="transparent-plot")
+
+    quality = assess_image_quality(image_path)
+
+    assert quality["status"] == "ok"
+    assert "image_low_information" not in quality["warnings"]
+    assert quality["warnings"] == []
+
+
+def test_assess_image_quality_flags_unreadable_image(tmp_path: Path) -> None:
+    image_path = tmp_path / "corrupt.png"
+    image_path.write_bytes(b"not a png")
+
+    quality = assess_image_quality(image_path)
+
+    assert quality["status"] == "poor"
+    assert quality["warnings"] == ["image_unreadable"]
 
 
 def test_extract_figures_uses_tight_graphic_crop_and_1_based_pages(tmp_path: Path) -> None:

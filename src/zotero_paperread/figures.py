@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 import fitz
 
@@ -69,6 +69,8 @@ QUALITY_LOW_INFORMATION_RATIO = 0.001
 QUALITY_LOW_INFORMATION_PIXELS = 64
 QUALITY_SPARSE_CONTENT_BBOX_RATIO = 0.12
 QUALITY_BACKGROUND_DELTA = 24
+QUALITY_ALPHA_THRESHOLD = 8
+QUALITY_ALPHA_DELTA = 24
 CAPTION_CONTINUATION_START = re.compile(r"^\s*[\(\[]?[A-Za-z0-9]")
 LABEL_ONLY_CAPTION_CONTINUATION_START = re.compile(r"^\s*[\(\[]?[A-Za-z0-9]")
 CAPTION_TERMINAL_PUNCTUATION = (".", "!", "?", ":")
@@ -112,6 +114,7 @@ class FigureExtraction(TypedDict):
     extraction_confidence: float
     fallback_reason: str | None
     needs_fallback: bool
+    visual_quality: NotRequired[dict[str, Any]]
 
 
 class CaptionBlock(TypedDict):
@@ -277,12 +280,13 @@ def _content_pixel_bbox(pixmap: fitz.Pixmap) -> tuple[int, int, int, int, int]:
         return (0, 0, 0, 0, 0)
 
     stride = int(pixmap.n)
-    color_components = stride - 1 if pixmap.alpha and stride > 1 else stride
+    has_alpha = bool(pixmap.alpha and stride > 1)
+    color_components = stride - 1 if has_alpha else stride
     if stride <= 0 or color_components <= 0:
         return (0, 0, 0, 0, 0)
 
     samples = pixmap.samples
-    background = _background_pixel(samples, width, height, stride, color_components)
+    background = _background_pixel(samples, width, height, stride)
     x0 = width
     y0 = height
     x1 = -1
@@ -293,7 +297,7 @@ def _content_pixel_bbox(pixmap: fitz.Pixmap) -> tuple[int, int, int, int, int]:
         row_offset = y * width * stride
         for x in range(width):
             offset = row_offset + (x * stride)
-            if _pixel_delta(samples, offset, color_components, background) <= QUALITY_BACKGROUND_DELTA:
+            if not _is_content_pixel(samples, offset, color_components, background, has_alpha):
                 continue
             count += 1
             x0 = min(x0, x)
@@ -311,7 +315,6 @@ def _background_pixel(
     width: int,
     height: int,
     stride: int,
-    color_components: int,
 ) -> tuple[int, ...]:
     positions = (
         (0, 0),
@@ -322,12 +325,32 @@ def _background_pixel(
     pixels = []
     for x, y in positions:
         offset = ((y * width) + x) * stride
-        pixels.append(_pixel_tuple(samples, offset, color_components))
+        pixels.append(_pixel_tuple(samples, offset, stride))
     return tuple(sorted(values)[len(values) // 2] for values in zip(*pixels))
 
 
 def _pixel_tuple(samples: bytes, offset: int, color_components: int) -> tuple[int, ...]:
     return tuple(int(value) for value in samples[offset : offset + color_components])
+
+
+def _is_content_pixel(
+    samples: bytes,
+    offset: int,
+    color_components: int,
+    background: tuple[int, ...],
+    has_alpha: bool,
+) -> bool:
+    if has_alpha:
+        alpha = int(samples[offset + color_components])
+        if alpha <= QUALITY_ALPHA_THRESHOLD:
+            return False
+        background_alpha = background[color_components]
+        if abs(alpha - background_alpha) > QUALITY_ALPHA_DELTA:
+            return True
+    return (
+        _pixel_delta(samples, offset, color_components, background[:color_components])
+        > QUALITY_BACKGROUND_DELTA
+    )
 
 
 def _pixel_delta(
