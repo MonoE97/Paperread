@@ -30,7 +30,7 @@ Natural-language write intent example:
 
 把 Zotero 中的一篇论文转换为中文结构化研究笔记。默认只 dry-run；当用户明确要求“输出笔记”“写入笔记”“写回 Zotero”“创建 note”“保存到 Zotero”等动作时，执行分析、预览并创建 Zotero 子笔记。
 
-在本项目和用户约定中，“输出笔记”是 Zotero write-through 意图，不是单纯打印 Markdown；但仍必须通过写入门禁：先展示 note 预览和目标 Zotero item 标题（target Zotero item title），且只有 `zotero-mcp write_note` 可以执行真实写入。
+在本项目和用户约定中，“输出笔记”是 Zotero write-through 意图，不是单纯打印 Markdown；但仍必须通过完整写入门禁，且只有 `zotero-mcp write_note` 可以执行真实写入。
 
 ## 输入
 
@@ -51,6 +51,7 @@ zotero mcp search_library get_item_details get_content write_note annotations
 - 必需写工具：
   - 只有显式写入时才调用 `zotero-mcp write_note`
 - `annotations` 相关工具只是可选增强；核心必需工具是 `search_library`、`get_item_details`、`get_content` 和 `write_note`。
+- Known MCP behavior: `get_item_details` is available in `cookjohn/zotero-mcp` 1.4.7. If Codex does not show it initially, run a targeted tool search before assuming the MCP server lacks the tool.
 - 如果 `get_item_details` 初始不可见，不要手工拼 metadata；先用 `tool_search` 重新加载。只有 `tool_search` 后仍不可用，才停止并说明这是 Codex App 工具发现/注入问题。
 - 用本项目 Python CLI 抽取 PDF 与渲染 note。
 - 不修改 Zotero SQLite。
@@ -86,11 +87,11 @@ uv run zotero-paperread create-run --title "<title>" --item-key "<item_key>"
    - 如果存在标题以 `[Codex Summary]` 开头、包含 `codex-summary` tag、或明显是本 workflow 创建的 Codex summary note，则默认停止，不继续抽取、总结或写入。
    - 停止时告诉用户已存在的 Codex note 标题和 key；如果无法取得标题，至少返回 note key。
    - 只有当用户明确要求“继续分析”“重新生成”“强制分析”“即使已有也继续”等动作时，才继续执行。继续时仍然创建新版本，不覆盖旧 note。
-   - 如果用户明确要求继续创建新版本，根据已有 note 标题计算同日版本后缀：
+   - 如果用户明确要求继续创建新版本，最终写入门禁必须用当前 `<run_dir>/item-details.json` 调用 `next-version-suffix` 计算同日版本后缀：
      - 当日第一版：`[Codex Summary] <paper title> - YYYY-MM-DD`
      - 当日第二版：`[Codex Summary] <paper title> - YYYY-MM-DD (v2)`
      - 当日第三版：`[Codex Summary] <paper title> - YYYY-MM-DD (v3)`
-   - 调用 `finalize-note` 时用 `--version-suffix` 传入后缀；当日第一版传空后缀或省略该参数。
+   - 调用 `finalize-note` 时用 `--version-suffix` 传入后缀；当日第一版传空后缀。
 
 5. 准备 bundle：
    - 运行：
@@ -186,7 +187,7 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
    - `evidence_summary` 最多 5 条，每条结论最多列 3 个证据 locator；证据必须来自 `context.md` 或 `figure_context.md`。
    - `trust_rationale` 必须解释可信状态和抽取告警之间的关系。
 
-8. 渲染和验证 note：
+8. 初始渲染和验证 note（dry-run 审查输入）：
 
    - 写完 `<run_dir>/summary.json` 后，先检查 JSON 可读性：
 
@@ -209,7 +210,7 @@ uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.
 ```
 
    - 如果手动拆开执行，必须按 `render-note -> validate-note -> preview-note` 串行执行，不能并行调度。
-   - 即使用户已经明确要求写入，也必须先完成 `preview-note`，确认目标条目标题和 note 预览都已经生成，再进入 Zotero 写入步骤。
+   - 这是供二次质量审查读取的初始 dry-run note，不是最终 write-through gate。即使用户已经明确要求写入，也必须先完成 `preview-note`，确认目标条目标题和 note 预览都已经生成，再进入 Zotero 写入步骤。
 
 9. 二次质量审查：
    - 阅读 `<run_dir>/context.md`、`<run_dir>/figure_context.md`、`<run_dir>/summary.json` 和 `<run_dir>/note.md`。
@@ -223,15 +224,17 @@ uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.
      - 是否过度相信低 `Caption Confidence`、embedded-image backfill、或 figure extraction warning
      - 是否因抽取告警需要降级可信状态
    - `review.json` 必须包含 `review_status`、`review_issues`、`trust_status_recommendation`、`needs_improvement` 和 `improvement_requests`。
-   - 生成 `review.json` 后，必须先把审查门禁字段确定性合并回 `summary.json`。如果 `needs_improvement` 为 true，`validate-trusted-summary` 会阻断写入；完成第 10 步补充优化并生成新的 `review.json` 后，重复同一门禁序列。
+   - 生成 `review.json` 后，必须按下方最终写入门禁顺序把审查字段确定性合并回 `summary.json` 并重新生成 note。如果 `needs_improvement` 为 true，`validate-trusted-summary` 会阻断写入；完成第 10 步补充优化并生成新的 `review.json` 后，重复同一门禁序列。
 
 ```bash
+uv run zotero-paperread validate-summary-json <run_dir>/summary.json
 uv run zotero-paperread apply-review <run_dir>/summary.json <run_dir>/review.json
 uv run zotero-paperread validate-trusted-summary <run_dir>/summary.json
 PAPER_TITLE="<paper title>"
 GENERATED_DATE="<YYYY-MM-DD>"
 VERSION_SUFFIX="$(uv run zotero-paperread next-version-suffix <run_dir>/item-details.json --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE")"
 uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --generated-date "$GENERATED_DATE" --version-suffix "$VERSION_SUFFIX" --output <run_dir>/note.md
+uv run zotero-paperread preview-note <run_dir>/note.md
 ```
 
 10. 补充优化：
@@ -246,14 +249,19 @@ uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.
 11. 写入 Zotero：
    - 只有用户明确要求“输出笔记”“写入”“写入笔记”“写回 Zotero”“创建 note”“保存到 Zotero”等动作时执行；其中“输出笔记”是本项目和用户约定的 Zotero write-through 触发词。
    - 写入 Zotero 前必须满足：
-     - `review_status` 为 `passed` 或 `passed_with_caveats`
-     - 没有待处理的 `needs_improvement`
-     - `validate-trusted-summary` 已通过
-     - 已完成 `preview-note`
-     - 已展示 note 预览和目标 Zotero item 标题（target Zotero item title）
+
+```text
+review_status is passed or passed_with_caveats
+needs_improvement is false
+validate-trusted-summary passes
+same-day version suffix has been computed from current item-details.json
+preview-note has been shown
+target Zotero item title has been shown
+```
+
    - 如果 `review_status` 为 `failed`，停止并报告审查问题，不写入 Zotero。
    - note 标题由模板生成：`[Codex Summary] <paper title> - YYYY-MM-DD`，同日重复创建时追加 ` (v2)`、` (v3)` 等后缀。
-   - 真实写入只能调用 `zotero-mcp write_note`，调用形式为 `write_note(action="create", parentKey=<item key>, content=<note markdown>, tags=["codex-summary","paper-summary"])`。
+   - 真实写入仍必须来自用户明确写入意图，且只能调用 `zotero-mcp write_note`，调用形式为 `write_note(action="create", parentKey=<item key>, content=<note markdown>, tags=["codex-summary","paper-summary"])`。
    - 成功后回读一次 `get_item_details`，确认子笔记已经挂载到目标条目下。
 
 ## Better Notes 兼容

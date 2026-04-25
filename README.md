@@ -63,9 +63,9 @@ summarize-zotero-title "Crystal Structure Prediction Meets Artificial Intelligen
 
 The skill then performs Zotero lookup, run-directory creation, bundle preparation, figure-aware summary generation, note validation, and creates a Zotero child note only when the user message contains explicit write intent.
 
-In this project/user-specific convention, `输出笔记` also means Zotero write-through intent, not just printing Markdown. It still requires the existing write gates: note preview shown, target Zotero item title shown, and the write performed only through `zotero-mcp write_note`.
+In this project/user-specific convention, `输出笔记` also means Zotero write-through intent, not just printing Markdown. It still requires all write-through gates in the Trusted Notes section, and the write must be performed only through `zotero-mcp write_note`.
 
-Preferred note finalization command:
+For a dry-run note render, preferred note finalization command:
 
 ```text
 finalize-note -> preview-note
@@ -77,7 +77,9 @@ Same-day regenerated notes should not overwrite earlier notes. Use a date-only t
 
 ## MCP Tool Discovery
 
-Codex App may lazy-load MCP tool schemas. Before running a Zotero note workflow, use `tool_search` to load the full Zotero tool set with a targeted tool search for `search_library`, `get_item_details`, `get_content`, `write_note`, and `annotations`. `annotations` tools are optional enhancements; the required core tools are `search_library`, `get_item_details`, `get_content`, and `write_note`. If `get_item_details` is not initially visible, treat that as a tool discovery issue, not as missing Zotero metadata.
+Codex App may lazy-load MCP tool schemas. Before running a Zotero note workflow, use `tool_search` to load the full Zotero tool set with a targeted tool search for `search_library`, `get_item_details`, `get_content`, `write_note`, and `annotations`. `annotations` tools are optional enhancements; the required core tools are `search_library`, `get_item_details`, `get_content`, and `write_note`.
+
+Known MCP behavior: `get_item_details` is available in `cookjohn/zotero-mcp` 1.4.7. If Codex does not show it initially, run a targeted tool search before assuming the MCP server lacks the tool.
 
 ## Local Commands
 
@@ -95,7 +97,7 @@ uv run zotero-paperread validate-note runs/<date>/<paper-slug>/note.md
 uv run zotero-paperread preview-note runs/<date>/<paper-slug>/note.md
 ```
 
-The recommended manual sequence is:
+The recommended dry-run manual sequence is:
 
 ```bash
 uv run zotero-paperread create-run --title "<title>" --item-key "<item_key>"
@@ -113,18 +115,31 @@ uv run zotero-paperread preview-note runs/<date>/<paper-slug>/note.md
 
 The workflow asks Codex to classify paper type, assign trust status, attach compact evidence pointers, and run a second-pass note quality review before Zotero write-through. If review finds fixable omissions, Codex may perform one bounded improvement pass by re-reading only the current run directory artifacts.
 
-After generating `review.json`, merge the review gate fields into `summary.json` and validate write-readiness before finalizing the write-through note:
+After generating `review.json`, the final write-through gate order is:
 
 ```bash
+uv run zotero-paperread validate-summary-json <run_dir>/summary.json
 uv run zotero-paperread apply-review <run_dir>/summary.json <run_dir>/review.json
 uv run zotero-paperread validate-trusted-summary <run_dir>/summary.json
 PAPER_TITLE="<paper title>"
 GENERATED_DATE="<YYYY-MM-DD>"
 VERSION_SUFFIX="$(uv run zotero-paperread next-version-suffix <run_dir>/item-details.json --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE")"
 uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --generated-date "$GENERATED_DATE" --version-suffix "$VERSION_SUFFIX" --output <run_dir>/note.md
+uv run zotero-paperread preview-note <run_dir>/note.md
 ```
 
-For Zotero write-through, `validate-trusted-summary` must pass, `preview-note` must be shown, and the target Zotero item title must be shown before calling `zotero-mcp write_note`.
+Write to Zotero only if all of these are true:
+
+```text
+review_status is passed or passed_with_caveats
+needs_improvement is false
+validate-trusted-summary passes
+same-day version suffix has been computed from current item-details.json
+preview-note has been shown
+target Zotero item title has been shown
+```
+
+Actual Zotero write-through still requires explicit write intent and uses only `zotero-mcp write_note`.
 
 The rendered note includes `## 可信度与证据` with `paper_type`, `trust_status`, `review_status`, `improvement_status`, evidence pointers, review issues, and any improvement notes. This section is meant to make each note useful as a long-term knowledge-base entry without hiding extraction uncertainty.
 
@@ -145,7 +160,7 @@ The rendered note includes `## 可信度与证据` with `paper_type`, `trust_sta
 ## Safety
 
 - Dry-run is the default workflow.
-- Phrases like `输出笔记`, `写入笔记`, `写回 Zotero`, `创建 note`, and `保存到 Zotero` count as explicit write intent. `输出笔记` is a project/user-specific convention for Zotero write-through and still requires note preview, target Zotero item title display, and `zotero-mcp write_note` as the only write path.
+- Phrases like `输出笔记`, `写入笔记`, `写回 Zotero`, `创建 note`, and `保存到 Zotero` count as explicit write intent. `输出笔记` is a project/user-specific convention for Zotero write-through and still requires all Trusted Notes write-through gates plus `zotero-mcp write_note` as the only write path.
 - If a Zotero item already has a Codex summary note, the skill stops by default and reports the existing note. It only continues when the user explicitly asks to continue or regenerate.
 - Same-day regeneration creates a new title version such as `[Codex Summary] <paper title> - YYYY-MM-DD (v2)` instead of overwriting or reusing the first title.
 - Tests never write to Zotero.
