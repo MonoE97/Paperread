@@ -65,7 +65,13 @@ uv run zotero-paperread create-run --title "<title>" --item-key "<item_key>"
    - 读取 title、creators、date、DOI、url、zoteroUrl、attachments。
    - 将原始 item details 保存到返回的 run 目录中的 `item-details.json`。
 
-4. 准备 bundle：
+4. 检查已有 Codex 笔记：
+   - 在 item details 中检查已有 child notes、notes、children 或可见 note 元数据。
+   - 如果存在标题以 `[Codex Summary]` 开头、包含 `codex-summary` tag、或明显是本 workflow 创建的 Codex summary note，则默认停止，不继续抽取、总结或写入。
+   - 停止时告诉用户已存在的 Codex note 标题和 key；如果无法取得标题，至少返回 note key。
+   - 只有当用户明确要求“继续分析”“重新生成”“强制分析”“即使已有也继续”等动作时，才继续执行。继续时仍然创建新版本，不覆盖旧 note。
+
+5. 准备 bundle：
    - 运行：
 
 ```bash
@@ -83,7 +89,7 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
    - `figure_context.md` 用于关键图片筛选与分析，包含 figure provenance、source attempts、warnings 和候选图摘要。
    - 无 PDF 时也继续工作，只是在 `extract.json` 中记录 `missing_pdf_attachment`。
 
-5. 生成 summary JSON：
+6. 生成 summary JSON：
    - 输出必须包含这些字段：
 
 ```json
@@ -109,12 +115,13 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
   "limitations": [],
   "ai4s_relevance": "",
   "follow_up_keywords": [],
+  "note_labels": [],
   "quality_score": "",
   "extraction_warnings": []
 }
 ```
 
-6. 分析要求：
+7. 分析要求：
    - 参考 `evil-read-arxiv` 的 `paper-analyze` 思路，覆盖摘要翻译、研究背景、研究问题、方法、实验、贡献、局限、相关方向定位。
    - 参考 `extract-paper-images` 的思想，但改成 Zotero-first：优先使用 `figure_context.md` 中最重要的 1-4 张关键图做“图文联合分析”。
    - 公式使用 Markdown LaTeX：行内 `$...$`，块级 `$$...$$`。
@@ -126,8 +133,10 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
      - 这张图展示什么
      - 为什么它重要
      - 它支撑了哪条核心结论或方法理解
+   - `note_labels` 只写本文自动推断出的英文规范 key，不要包含固定系统标签 `codex-summary` 或 `paper-summary`。
+   - `note_labels` 最多 4 个；使用 lowercase snake_case，例如 `metasurface`、`inverse_design`、`deep_learning`、`power_allocation`。
 
-7. 渲染和验证 note：
+8. 渲染和验证 note：
 
 ```bash
 uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --output <run_dir>/note.md
@@ -139,7 +148,7 @@ uv run zotero-paperread preview-note <run_dir>/note.md
    - 如果手动拆开执行，必须按 `render-note -> validate-note -> preview-note` 串行执行，不能并行调度。
    - 即使用户已经明确要求写入，也必须先完成 `preview-note`，确认目标条目标题和 note 预览都已经生成，再进入 Zotero 写入步骤。
 
-8. 写入 Zotero：
+9. 写入 Zotero：
    - 只有用户明确要求“写入”“写入笔记”“写回 Zotero”“创建 note”“保存到 Zotero”等动作时执行。
    - note 标题由模板生成：`[Codex Summary] <paper title> - YYYY-MM-DD`。
    - 调用 `write_note(action="create", parentKey=<item key>, content=<note markdown>, tags=["codex-summary","paper-summary"])`。

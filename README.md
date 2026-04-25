@@ -35,8 +35,9 @@ Given a Zotero paper title, Codex can:
 4. extract PDF text with a local `uv`-managed Python CLI;
 5. extract figures and analyze key images when available;
 6. generate a Chinese structured paper summary with figure-aware analysis;
-7. preview and validate the note;
-8. create a Zotero child note only when explicitly requested.
+7. render a small set of normalized English key labels at the end of the note;
+8. preview and validate the note;
+9. create a Zotero child note only when explicitly requested.
 
 ## Codex Workflow
 
@@ -101,11 +102,13 @@ uv run zotero-paperread preview-note runs/<date>/<paper-slug>/note.md
 - Output: `figures/`, `figures.json`, `figure_context.md`.
 - Goal: improve scientific reading quality, not just embed pictures.
 - Current note behavior: figure analysis is written into the Zotero note even if inline image embedding is not enabled.
+- Current label behavior: the note ends with `## 本文标签`, containing `codex-summary`, `paper-summary`, and at most four inferred English key labels.
 
 ## Safety
 
 - Dry-run is the default workflow.
 - Phrases like `写入笔记`, `写回 Zotero`, `创建 note`, and `保存到 Zotero` count as explicit write intent.
+- If a Zotero item already has a Codex summary note, the skill stops by default and reports the existing note. It only continues when the user explicitly asks to continue or regenerate.
 - Tests never write to Zotero.
 - Zotero writes happen only through `zotero-mcp write_note`.
 - Better Notes is optional and not called directly.

@@ -1,5 +1,14 @@
 # Paper Relation Schema V3 Design
 
+**Status:** Deferred.
+
+This spec is preserved as the design record for a future paper-relation layer, but it is not the active implementation target. Review found that V3 still needs two product decisions before it is safe to implement:
+
+- where related-paper candidates must come from
+- where cross-run relation deduplication state should live
+
+Current development has shifted back to V2 hardening: render a small set of paper labels at the end of each note and prevent accidental duplicate analysis when a Zotero item already has a Codex summary note.
+
 ## Summary
 
 V3 extends the existing Zotero-first paper summary workflow with a paper-centric relation layer. The goal is not to build a full graph product yet. The goal is to let each analyzed paper emit a small, controlled set of normalized labels plus a few high-value related-paper links at the end of the generated note, while keeping the internal schema strict enough to support later graph integration.

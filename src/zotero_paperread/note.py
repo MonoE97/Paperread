@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -20,9 +21,41 @@ REQUIRED_SECTIONS = [
     "AI+物理/材料启发",
     "后续关键词",
     "抽取告警",
+    "本文标签",
 ]
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "templates"
+FIXED_NOTE_LABELS = ["codex-summary", "paper-summary"]
+MAX_INFERRED_NOTE_LABELS = 4
+
+
+def normalize_note_label(value: Any) -> str | None:
+    """Return an English-key style label suitable for note rendering."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    normalized = normalized.replace("&", " and ")
+    normalized = re.sub(r"[^a-z0-9]+", "_", normalized)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized or None
+
+
+def build_note_labels(summary: dict[str, Any]) -> list[str]:
+    """Build fixed Zotero labels plus a small set of normalized paper labels."""
+    labels = list(FIXED_NOTE_LABELS)
+    seen = set(labels)
+    raw_labels = summary.get("note_labels", [])
+    if not isinstance(raw_labels, list):
+        raw_labels = []
+    for raw_label in raw_labels:
+        label = normalize_note_label(raw_label)
+        if label is None or label in seen:
+            continue
+        labels.append(label)
+        seen.add(label)
+        if len(labels) - len(FIXED_NOTE_LABELS) >= MAX_INFERRED_NOTE_LABELS:
+            break
+    return labels
 
 
 def render_note(metadata: dict[str, Any], summary: dict[str, Any], generated_date: str | None = None) -> str:
@@ -58,6 +91,7 @@ def render_note(metadata: dict[str, Any], summary: dict[str, Any], generated_dat
         "ai4s_relevance": summary.get("ai4s_relevance", ""),
         "follow_up_keywords": summary.get("follow_up_keywords", []),
         "extraction_warnings": summary.get("extraction_warnings", []),
+        "note_labels": build_note_labels(summary),
     }
     return template.render(**context).strip() + "\n"
 

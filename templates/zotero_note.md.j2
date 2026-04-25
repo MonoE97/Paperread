@@ -85,6 +85,12 @@
 - none
 {% endif %}
 
+## 本文标签
+
+{% for item in note_labels -%}
+- {{ item }}
+{% endfor %}
+
 ---
 
 Tags: codex-summary, paper-summary

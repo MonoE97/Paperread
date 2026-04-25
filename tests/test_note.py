@@ -61,6 +61,32 @@ def test_render_note_contains_figure_sections() -> None:
     assert "Figure 1. Overall pipeline." in note
 
 
+def test_render_note_contains_normalized_note_labels_with_limit() -> None:
+    summary = {
+        **SUMMARY_WITH_FIGURES,
+        "note_labels": [
+            "Deep Learning",
+            "inverse-design",
+            "materials discovery",
+            "physics-informed ML",
+            "extra label should not render",
+            "deep_learning",
+        ],
+    }
+
+    note = render_note(METADATA, summary, generated_date="2026-04-23")
+
+    assert "## 本文标签" in note
+    assert "- codex-summary" in note
+    assert "- paper-summary" in note
+    assert "- deep_learning" in note
+    assert "- inverse_design" in note
+    assert "- materials_discovery" in note
+    assert "- physics_informed_ml" in note
+    assert "extra_label_should_not_render" not in note
+    assert note.count("- deep_learning") == 1
+
+
 def test_validate_note_accepts_complete_note() -> None:
     note = render_note(METADATA, SUMMARY_WITH_FIGURES, generated_date="2026-04-23")
 
