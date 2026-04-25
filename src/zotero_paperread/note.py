@@ -9,6 +9,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 REQUIRED_SECTIONS = [
     "元数据",
+    "可信度与证据",
     "核心结论",
     "摘要翻译",
     "关键要点",
@@ -27,6 +28,105 @@ REQUIRED_SECTIONS = [
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "templates"
 FIXED_NOTE_LABELS = ["codex-summary", "paper-summary"]
 MAX_INFERRED_NOTE_LABELS = 4
+VALID_PAPER_TYPES = {
+    "research_article",
+    "review",
+    "perspective",
+    "benchmark",
+    "method_paper",
+    "dataset_paper",
+    "theory_paper",
+    "unknown",
+}
+VALID_TRUST_STATUSES = {"trusted", "usable_with_caveats", "metadata_only", "needs_manual_review"}
+VALID_REVIEW_STATUSES = {"not_reviewed", "passed", "passed_with_caveats", "failed"}
+VALID_IMPROVEMENT_STATUSES = {"not_needed", "needed", "completed", "blocked"}
+
+
+def safe_choice(value: Any, allowed: set[str], default: str) -> str:
+    return value if isinstance(value, str) and value in allowed else default
+
+
+def clean_evidence_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    items = summary.get("evidence_summary", [])
+    if not isinstance(items, list):
+        return []
+    cleaned: list[dict[str, Any]] = []
+    for item in items[:5]:
+        if not isinstance(item, dict):
+            continue
+        claim = str(item.get("claim", "")).strip()
+        if not claim:
+            continue
+        evidence_items = item.get("evidence", [])
+        if not isinstance(evidence_items, list):
+            evidence_items = []
+        cleaned_evidence = []
+        for evidence in evidence_items[:3]:
+            if not isinstance(evidence, dict):
+                continue
+            locator = str(evidence.get("locator", "")).strip()
+            evidence_summary = str(evidence.get("summary", "")).strip()
+            evidence_type = str(evidence.get("type", "")).strip() or "text"
+            if locator or evidence_summary:
+                cleaned_evidence.append(
+                    {
+                        "type": evidence_type,
+                        "locator": locator,
+                        "summary": evidence_summary,
+                    }
+                )
+        cleaned.append(
+            {
+                "claim": claim,
+                "evidence": cleaned_evidence,
+                "confidence": str(item.get("confidence", "")).strip() or "unknown",
+            }
+        )
+    return cleaned
+
+
+def clean_issue_list(summary: dict[str, Any]) -> list[dict[str, str]]:
+    items = summary.get("review_issues", [])
+    if not isinstance(items, list):
+        return []
+    cleaned = []
+    for item in items[:5]:
+        if not isinstance(item, dict):
+            continue
+        issue = str(item.get("issue", "")).strip()
+        if not issue:
+            continue
+        cleaned.append(
+            {
+                "severity": str(item.get("severity", "")).strip() or "medium",
+                "issue": issue,
+                "suggested_fix": str(item.get("suggested_fix", "")).strip(),
+            }
+        )
+    return cleaned
+
+
+def clean_improvement_notes(summary: dict[str, Any]) -> list[dict[str, str]]:
+    items = summary.get("improvement_notes", [])
+    if not isinstance(items, list):
+        return []
+    cleaned = []
+    for item in items[:5]:
+        if not isinstance(item, dict):
+            continue
+        issue = str(item.get("issue", "")).strip()
+        action = str(item.get("action", "")).strip()
+        if not issue and not action:
+            continue
+        cleaned.append(
+            {
+                "issue": issue,
+                "action": action,
+                "source": str(item.get("source", "")).strip(),
+            }
+        )
+    return cleaned
 
 
 def normalize_note_label(value: Any) -> str | None:
@@ -78,6 +178,16 @@ def render_note(metadata: dict[str, Any], summary: dict[str, Any], generated_dat
         "url": metadata.get("url", ""),
         "zotero_url": metadata.get("zoteroUrl", ""),
         "quality_score": summary.get("quality_score", ""),
+        "paper_type": safe_choice(summary.get("paper_type"), VALID_PAPER_TYPES, "unknown"),
+        "trust_status": safe_choice(summary.get("trust_status"), VALID_TRUST_STATUSES, "usable_with_caveats"),
+        "trust_rationale": summary.get("trust_rationale", "") or "未提供可信度判断依据。",
+        "review_status": safe_choice(summary.get("review_status"), VALID_REVIEW_STATUSES, "not_reviewed"),
+        "review_issues": clean_issue_list(summary),
+        "evidence_summary": clean_evidence_summary(summary),
+        "improvement_status": safe_choice(
+            summary.get("improvement_status"), VALID_IMPROVEMENT_STATUSES, "not_needed"
+        ),
+        "improvement_notes": clean_improvement_notes(summary),
         "one_sentence_summary": summary.get("one_sentence_summary", ""),
         "abstract_translation": summary.get("abstract_translation", ""),
         "key_points": summary.get("key_points", []),

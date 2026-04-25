@@ -11,6 +11,43 @@
 - **Zotero 链接**: {{ zotero_url }}
 - **质量评分**: {{ quality_score }}
 
+## 可信度与证据
+
+- **论文类型**: {{ paper_type }}
+- **可信状态**: {{ trust_status }}
+- **审查状态**: {{ review_status }}
+- **改进状态**: {{ improvement_status }}
+- **判断依据**: {{ trust_rationale }}
+
+### 关键证据
+
+{% if evidence_summary -%}
+{% for item in evidence_summary -%}
+- 结论: {{ item.claim }}
+{% for evidence in item.evidence -%}
+  - 证据: {{ evidence.locator }}{% if evidence.summary %}; {{ evidence.summary }}{% endif %}
+{% endfor %}
+{% endfor %}
+{% else -%}
+- none
+{% endif %}
+
+{% if review_issues -%}
+### 审查问题
+
+{% for item in review_issues -%}
+- {{ item.severity }}: {{ item.issue }}{% if item.suggested_fix %} 建议: {{ item.suggested_fix }}{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if improvement_notes -%}
+### 补充优化记录
+
+{% for item in improvement_notes -%}
+- {{ item.issue }}{% if item.action %}: {{ item.action }}{% endif %}{% if item.source %} (source: {{ item.source }}){% endif %}
+{% endfor %}
+{% endif %}
+
 ## 核心结论
 
 {{ one_sentence_summary }}

@@ -41,6 +41,46 @@ SUMMARY_WITH_FIGURES = {
     ],
 }
 
+TRUSTED_FIELDS = {
+    "paper_type": "research_article",
+    "trust_status": "trusted",
+    "trust_rationale": "正文和关键图支持主要方法与实验结论。",
+    "review_status": "passed_with_caveats",
+    "evidence_summary": [
+        {
+            "claim": "The method uses a learned inverse-design model.",
+            "evidence": [
+                {
+                    "type": "text",
+                    "locator": "page 3 method section",
+                    "summary": "The method section describes the learned mapping from target response to structure parameters.",
+                },
+                {
+                    "type": "figure",
+                    "locator": "fig_p1_1",
+                    "summary": "The framework figure shows the optimization loop.",
+                },
+            ],
+            "confidence": "high",
+        }
+    ],
+    "review_issues": [
+        {
+            "severity": "low",
+            "issue": "Figure evidence is available but page evidence is brief.",
+            "suggested_fix": "Keep caveat in trust rationale.",
+        }
+    ],
+    "improvement_status": "completed",
+    "improvement_notes": [
+        {
+            "issue": "Method section was too generic.",
+            "action": "Added page-grounded method detail.",
+            "source": "context.md",
+        }
+    ],
+}
+
 
 def test_render_note_contains_required_sections() -> None:
     note = render_note(METADATA, SUMMARY, generated_date="2026-04-23")
@@ -59,6 +99,20 @@ def test_render_note_contains_figure_sections() -> None:
     assert "## 关键图片总览" in note
     assert "### fig_p1_1" in note
     assert "Figure 1. Overall pipeline." in note
+
+
+def test_render_note_contains_trust_and_evidence_section() -> None:
+    note = render_note(METADATA, {**SUMMARY_WITH_FIGURES, **TRUSTED_FIELDS}, generated_date="2026-04-23")
+
+    assert "## 可信度与证据" in note
+    assert "- **论文类型**: research_article" in note
+    assert "- **可信状态**: trusted" in note
+    assert "- **审查状态**: passed_with_caveats" in note
+    assert "- **改进状态**: completed" in note
+    assert "The method uses a learned inverse-design model." in note
+    assert "page 3 method section" in note
+    assert "fig_p1_1" in note
+    assert "Method section was too generic." in note
 
 
 def test_render_note_contains_normalized_note_labels_with_limit() -> None:
