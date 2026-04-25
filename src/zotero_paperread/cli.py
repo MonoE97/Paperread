@@ -23,8 +23,36 @@ def main() -> None:
     return None
 
 
-def read_json(path: Path) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
+def exit_with_json_error(message: str) -> None:
+    typer.echo(message)
+    raise typer.Exit(1)
+
+
+def format_unreadable_json_error(path: Path, *, label: str, reason: str) -> str:
+    return f"json_unreadable: {label} {path}: {reason}"
+
+
+def read_json_or_exit(path: Path, *, label: str) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        exit_with_json_error(f"json_missing: {label} {path}")
+    except IsADirectoryError:
+        exit_with_json_error(format_unreadable_json_error(path, label=label, reason="is a directory"))
+    except PermissionError:
+        exit_with_json_error(format_unreadable_json_error(path, label=label, reason="permission denied"))
+    except UnicodeDecodeError:
+        exit_with_json_error(format_unreadable_json_error(path, label=label, reason="not valid UTF-8 text"))
+    except json.JSONDecodeError as exc:
+        exit_with_json_error(
+            f"json_invalid: {label} {path} line {exc.lineno} column {exc.colno}: {exc.msg}"
+        )
+    except OSError as exc:
+        exit_with_json_error(format_unreadable_json_error(path, label=label, reason=str(exc)))
+
+    if not isinstance(payload, dict):
+        exit_with_json_error(f"json_invalid: {label} {path}: expected top-level JSON object")
+    return payload
 
 
 def resolve_base_dir(base_dir: Path) -> Path:
@@ -41,8 +69,8 @@ def render_note_to_path(
     version_suffix: str = "",
 ) -> None:
     note = render_note(
-        read_json(metadata_json),
-        read_json(summary_json),
+        read_json_or_exit(metadata_json, label="metadata JSON"),
+        read_json_or_exit(summary_json, label="summary JSON"),
         generated_date=generated_date,
         version_suffix=version_suffix,
     )
@@ -191,6 +219,13 @@ def validate_note_command(note_path: Path) -> None:
     validate_note_path_or_exit(note_path)
 
 
+@app.command("validate-summary-json")
+def validate_summary_json_command(summary_json: Path) -> None:
+    """Check that summary JSON is readable and has an object at the top level."""
+    read_json_or_exit(summary_json, label="summary JSON")
+    console.print("summary_json_readable_object")
+
+
 @app.command("preview-note")
 def preview_note_command(note_path: Path) -> None:
     """Print a rendered note without writing to Zotero."""
@@ -204,5 +239,9 @@ def prepare_item_command(
     max_pages: int | None = typer.Option(None, "--max-pages", min=1, help="Extract at most this many PDF pages."),
 ) -> None:
     """Prepare a summarization bundle from raw Zotero item details JSON."""
-    payload = prepare_item_bundle(read_json(details_json), workdir=workdir, max_pages=max_pages)
+    payload = prepare_item_bundle(
+        read_json_or_exit(details_json, label="details JSON"),
+        workdir=workdir,
+        max_pages=max_pages,
+    )
     typer.echo(json.dumps(payload, ensure_ascii=False))

@@ -184,3 +184,117 @@ def test_validate_note_command_reports_missing_note_file(tmp_path: Path) -> None
 
     assert result.exit_code == 1
     assert "note_missing:" in result.stdout
+
+
+def test_validate_summary_json_command_reports_invalid_json(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text('{"one_sentence_summary": "bad"', encoding="utf-8")
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["validate-summary-json", str(summary_path)])
+
+    assert result.exit_code == 1
+    assert "json_invalid:" in result.stdout
+    assert "summary JSON" in result.stdout
+    assert str(summary_path) in result.stdout
+    assert "line 1" in result.stdout
+    assert "column" in result.stdout
+
+
+def test_validate_summary_json_command_reports_missing_path(tmp_path: Path) -> None:
+    summary_path = tmp_path / "missing-summary.json"
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["validate-summary-json", str(summary_path)])
+
+    assert result.exit_code == 1
+    assert f"json_missing: summary JSON {summary_path}" in result.stdout
+
+
+def test_validate_summary_json_command_reports_directory_path(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary-dir"
+    summary_path.mkdir()
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["validate-summary-json", str(summary_path)])
+
+    assert result.exit_code == 1
+    assert f"json_unreadable: summary JSON {summary_path}" in result.stdout
+    assert "is a directory" in result.stdout.lower()
+
+
+def test_validate_summary_json_command_reports_non_utf8_content(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_bytes(b"\xff\xfe\x00\x00")
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["validate-summary-json", str(summary_path)])
+
+    assert result.exit_code == 1
+    assert f"json_unreadable: summary JSON {summary_path}" in result.stdout
+    assert "utf-8" in result.stdout.lower()
+
+
+def test_validate_summary_json_command_reports_non_object_top_level(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text('["not", "an", "object"]', encoding="utf-8")
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["validate-summary-json", str(summary_path)])
+
+    assert result.exit_code == 1
+    assert f"json_invalid: summary JSON {summary_path}: expected top-level JSON object" in result.stdout
+
+
+def test_validate_summary_json_command_success_output_does_not_imply_full_schema_validation(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    write_json(summary_path, {"one_sentence_summary": "ok"})
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["validate-summary-json", str(summary_path)])
+
+    assert result.exit_code == 0
+    assert "summary_json_readable_object" in result.stdout
+    assert "valid" not in result.stdout.lower()
+
+
+def test_finalize_note_command_reports_invalid_summary_json(tmp_path: Path) -> None:
+    metadata_path = tmp_path / "metadata.json"
+    summary_path = tmp_path / "summary.json"
+    output_path = tmp_path / "note.md"
+    write_json(metadata_path, {"key": "ABC123", "title": "Paper", "creators": "A", "date": "2026"})
+    summary_path.write_text('{"one_sentence_summary": "bad"', encoding="utf-8")
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["finalize-note", str(metadata_path), str(summary_path), "--output", str(output_path)])
+
+    assert result.exit_code == 1
+    assert "json_invalid:" in result.stdout
+    assert "summary JSON" in result.stdout
+    assert str(summary_path) in result.stdout
+    assert "line 1" in result.stdout
+    assert "column" in result.stdout
+    assert not output_path.exists()
+
+
+def test_prepare_item_command_reports_missing_details_json_path(tmp_path: Path) -> None:
+    details_path = tmp_path / "missing-details.json"
+    workdir = tmp_path / "bundle"
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["prepare-item", str(details_path), "--workdir", str(workdir)])
+
+    assert result.exit_code == 1
+    assert f"json_missing: details JSON {details_path}" in result.stdout
+
+
+def test_prepare_item_command_reports_non_object_details_json(tmp_path: Path) -> None:
+    details_path = tmp_path / "details.json"
+    workdir = tmp_path / "bundle"
+    details_path.write_text('["not", "an", "object"]', encoding="utf-8")
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["prepare-item", str(details_path), "--workdir", str(workdir)])
+
+    assert result.exit_code == 1
+    assert f"json_invalid: details JSON {details_path}: expected top-level JSON object" in result.stdout
