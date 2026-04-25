@@ -30,6 +30,8 @@ Natural-language write intent example:
 
 把 Zotero 中的一篇论文转换为中文结构化研究笔记。默认只 dry-run；当用户明确要求“输出笔记”“写入笔记”“写回 Zotero”“创建 note”“保存到 Zotero”等动作时，执行分析、预览并创建 Zotero 子笔记。
 
+在本项目和用户约定中，“输出笔记”是 Zotero write-through 意图，不是单纯打印 Markdown；但仍必须通过写入门禁：先展示 note 预览和目标 Zotero item 标题（target Zotero item title），且只有 `zotero-mcp write_note` 可以执行真实写入。
+
 ## 输入
 
 接受 Zotero 条目标题或标题片段。V2 仍只处理单篇论文，不处理 collection 批量任务。
@@ -48,6 +50,7 @@ zotero mcp search_library get_item_details get_content write_note annotations
   - `zotero-mcp get_content` 或本项目 `prepare-item` 的 PDF 抽取路径
 - 必需写工具：
   - 只有显式写入时才调用 `zotero-mcp write_note`
+- `annotations` 相关工具只是可选增强；核心必需工具是 `search_library`、`get_item_details`、`get_content` 和 `write_note`。
 - 如果 `get_item_details` 初始不可见，不要手工拼 metadata；先用 `tool_search` 重新加载。只有 `tool_search` 后仍不可用，才停止并说明这是 Codex App 工具发现/注入问题。
 - 用本项目 Python CLI 抽取 PDF 与渲染 note。
 - 不修改 Zotero SQLite。
@@ -231,14 +234,15 @@ uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.
    - 如果现有抽取材料不足以修复问题，设置 `improvement_status` 为 `blocked`，并降低或保留保守的 `trust_status`。
 
 11. 写入 Zotero：
-   - 只有用户明确要求“写入”“写入笔记”“写回 Zotero”“创建 note”“保存到 Zotero”等动作时执行。
+   - 只有用户明确要求“输出笔记”“写入”“写入笔记”“写回 Zotero”“创建 note”“保存到 Zotero”等动作时执行；其中“输出笔记”是本项目和用户约定的 Zotero write-through 触发词。
    - 写入 Zotero 前必须满足：
      - `review_status` 为 `passed` 或 `passed_with_caveats`
      - 没有待处理的 `needs_improvement`
      - 已完成 `preview-note`
+     - 已展示 note 预览和目标 Zotero item 标题（target Zotero item title）
    - 如果 `review_status` 为 `failed`，停止并报告审查问题，不写入 Zotero。
    - note 标题由模板生成：`[Codex Summary] <paper title> - YYYY-MM-DD`，同日重复创建时追加 ` (v2)`、` (v3)` 等后缀。
-   - 调用 `write_note(action="create", parentKey=<item key>, content=<note markdown>, tags=["codex-summary","paper-summary"])`。
+   - 真实写入只能调用 `zotero-mcp write_note`，调用形式为 `write_note(action="create", parentKey=<item key>, content=<note markdown>, tags=["codex-summary","paper-summary"])`。
    - 成功后回读一次 `get_item_details`，确认子笔记已经挂载到目标条目下。
 
 ## Better Notes 兼容

@@ -58,9 +58,12 @@ If the user wants the note written back immediately, the intended write-through 
 ```text
 summarize-zotero-title "Crystal Structure Prediction Meets Artificial Intelligence" and write to zotero
 请帮我分析这篇文献并写入笔记：Crystal Structure Prediction Meets Artificial Intelligence
+请对 Zotero 中的 Crystal Structure Prediction Meets Artificial Intelligence 文章进行分析并输出笔记
 ```
 
 The skill then performs Zotero lookup, run-directory creation, bundle preparation, figure-aware summary generation, note validation, and creates a Zotero child note only when the user message contains explicit write intent.
+
+In this project/user-specific convention, `输出笔记` also means Zotero write-through intent, not just printing Markdown. It still requires the existing write gates: note preview shown, target Zotero item title shown, and the write performed only through `zotero-mcp write_note`.
 
 Preferred note finalization command:
 
@@ -74,7 +77,7 @@ Same-day regenerated notes should not overwrite earlier notes. Use a date-only t
 
 ## MCP Tool Discovery
 
-Codex App may lazy-load MCP tool schemas. Before running a Zotero note workflow, load the full Zotero tool set with a targeted tool search for `search_library`, `get_item_details`, `get_content`, and `write_note`. If `get_item_details` is not initially visible, treat that as a tool discovery issue, not as missing Zotero metadata.
+Codex App may lazy-load MCP tool schemas. Before running a Zotero note workflow, use `tool_search` to load the full Zotero tool set with a targeted tool search for `search_library`, `get_item_details`, `get_content`, `write_note`, and `annotations`. `annotations` tools are optional enhancements; the required core tools are `search_library`, `get_item_details`, `get_content`, and `write_note`. If `get_item_details` is not initially visible, treat that as a tool discovery issue, not as missing Zotero metadata.
 
 ## Local Commands
 
@@ -129,7 +132,7 @@ The rendered note includes `## 可信度与证据` with `paper_type`, `trust_sta
 ## Safety
 
 - Dry-run is the default workflow.
-- Phrases like `写入笔记`, `写回 Zotero`, `创建 note`, and `保存到 Zotero` count as explicit write intent.
+- Phrases like `输出笔记`, `写入笔记`, `写回 Zotero`, `创建 note`, and `保存到 Zotero` count as explicit write intent. `输出笔记` is a project/user-specific convention for Zotero write-through and still requires note preview, target Zotero item title display, and `zotero-mcp write_note` as the only write path.
 - If a Zotero item already has a Codex summary note, the skill stops by default and reports the existing note. It only continues when the user explicitly asks to continue or regenerate.
 - Same-day regeneration creates a new title version such as `[Codex Summary] <paper title> - YYYY-MM-DD (v2)` instead of overwriting or reusing the first title.
 - Tests never write to Zotero.
