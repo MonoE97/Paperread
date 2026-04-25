@@ -22,12 +22,14 @@
 ### 关键证据
 
 {% if evidence_summary %}
+{% set ns = namespace(lines=[]) %}
 {% for item in evidence_summary %}
-- 结论: {{ item.claim }}
+{% set ns.lines = ns.lines + ["- 结论: " ~ item.claim] %}
 {% for evidence in item.evidence %}
-  - 证据: {{ evidence.locator }}{% if evidence.summary %}; {{ evidence.summary }}{% endif %}{{ "\n" }}
+{% set ns.lines = ns.lines + [evidence.line] %}
 {% endfor %}
 {% endfor %}
+{{ ns.lines | join('\n') }}
 {% else %}
 - none
 {% endif %}

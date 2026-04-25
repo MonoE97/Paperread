@@ -47,6 +47,41 @@ def safe_choice(value: Any, allowed: set[str], default: str) -> str:
     return value if isinstance(value, str) and value in allowed else default
 
 
+def safe_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def clean_string_list(value: Any) -> list[str]:
+    items = safe_list(value)
+    cleaned: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if text:
+            cleaned.append(text)
+    return cleaned
+
+
+def flatten_inline_markdown_text(value: str) -> str:
+    parts = []
+    for line in value.splitlines():
+        text = re.sub(r"[ \t]+", " ", line.strip())
+        if text:
+            parts.append(text)
+    return " ".join(parts)
+
+
+def format_evidence_line(locator: str, summary: str) -> str:
+    locator = flatten_inline_markdown_text(locator)
+    summary = flatten_inline_markdown_text(summary)
+    if locator and summary:
+        details = f"{locator}; {summary}"
+    else:
+        details = locator or summary
+    return f"  - 证据: {details}"
+
+
 def clean_evidence_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
     items = summary.get("evidence_summary", [])
     if not isinstance(items, list):
@@ -55,7 +90,7 @@ def clean_evidence_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
     for item in items[:5]:
         if not isinstance(item, dict):
             continue
-        claim = str(item.get("claim", "")).strip()
+        claim = flatten_inline_markdown_text(str(item.get("claim", "")))
         if not claim:
             continue
         evidence_items = item.get("evidence", [])
@@ -74,6 +109,7 @@ def clean_evidence_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
                         "type": evidence_type,
                         "locator": locator,
                         "summary": evidence_summary,
+                        "line": format_evidence_line(locator, evidence_summary),
                     }
                 )
         cleaned.append(
@@ -81,6 +117,25 @@ def clean_evidence_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
                 "claim": claim,
                 "evidence": cleaned_evidence,
                 "confidence": str(item.get("confidence", "")).strip() or "unknown",
+            }
+        )
+    return cleaned
+
+
+def clean_key_figures(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    items = safe_list(summary.get("key_figures", []))
+    cleaned: list[dict[str, Any]] = []
+    for item in items[:10]:
+        if not isinstance(item, dict):
+            continue
+        cleaned.append(
+            {
+                "figure_id": str(item.get("figure_id", "")).strip(),
+                "caption": str(item.get("caption", "")).strip(),
+                "page": item.get("page", ""),
+                "priority_score": item.get("priority_score", ""),
+                "why_it_matters": str(item.get("why_it_matters", "")).strip(),
+                "analysis": str(item.get("analysis", "")).strip(),
             }
         )
     return cleaned
@@ -232,17 +287,17 @@ def render_note(
         "improvement_notes": clean_improvement_notes(summary),
         "one_sentence_summary": summary.get("one_sentence_summary", ""),
         "abstract_translation": summary.get("abstract_translation", ""),
-        "key_points": summary.get("key_points", []),
+        "key_points": clean_string_list(summary.get("key_points", [])),
         "research_question": summary.get("research_question", ""),
         "method": summary.get("method", ""),
         "figure_overview": summary.get("figure_overview", ""),
-        "key_figures": summary.get("key_figures", []),
+        "key_figures": clean_key_figures(summary),
         "experiments": summary.get("experiments", ""),
-        "contributions": summary.get("contributions", []),
-        "limitations": summary.get("limitations", []),
+        "contributions": clean_string_list(summary.get("contributions", [])),
+        "limitations": clean_string_list(summary.get("limitations", [])),
         "ai4s_relevance": summary.get("ai4s_relevance", ""),
-        "follow_up_keywords": summary.get("follow_up_keywords", []),
-        "extraction_warnings": summary.get("extraction_warnings", []),
+        "follow_up_keywords": clean_string_list(summary.get("follow_up_keywords", [])),
+        "extraction_warnings": clean_string_list(summary.get("extraction_warnings", [])),
         "note_labels": build_note_labels(summary),
     }
     return template.render(**context).strip() + "\n"

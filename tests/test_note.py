@@ -143,6 +143,194 @@ def test_render_note_contains_trust_and_evidence_section() -> None:
     assert "\n  - 证据: fig_p1_1;" in note
 
 
+def test_render_note_keeps_evidence_bullets_contiguous() -> None:
+    summary = {
+        **SUMMARY_WITH_FIGURES,
+        **TRUSTED_FIELDS,
+        "evidence_summary": [
+            {
+                "claim": "The method uses a learned inverse-design model.",
+                "evidence": [
+                    {
+                        "type": "text",
+                        "locator": "page 3 method section",
+                        "summary": "The method section describes the learned mapping from target response to structure parameters.",
+                    },
+                    {
+                        "type": "figure",
+                        "locator": "fig_p1_1",
+                        "summary": "The framework figure shows the optimization loop.",
+                    },
+                ],
+                "confidence": "high",
+            },
+            {
+                "claim": "The experiments compare against multiple baselines.",
+                "evidence": [
+                    {
+                        "type": "text",
+                        "locator": "page 5 results section",
+                        "summary": "Table 2 compares the proposed model with three baselines.",
+                    }
+                ],
+                "confidence": "medium",
+            },
+        ],
+    }
+
+    note = render_note(METADATA, summary, generated_date="2026-04-23")
+
+    evidence_section = note.split("### 关键证据\n\n", maxsplit=1)[1].split("\n### 审查问题", maxsplit=1)[0]
+
+    assert (
+        evidence_section
+        == "- 结论: The method uses a learned inverse-design model.\n"
+        "  - 证据: page 3 method section; "
+        "The method section describes the learned mapping from target response to structure parameters.\n"
+        "  - 证据: fig_p1_1; The framework figure shows the optimization loop.\n"
+        "- 结论: The experiments compare against multiple baselines.\n"
+        "  - 证据: page 5 results section; Table 2 compares the proposed model with three baselines.\n"
+    )
+    assert "\n\n  - 证据:" not in evidence_section
+    assert "\n\n- 结论:" not in evidence_section
+
+
+def test_render_note_formats_evidence_lines_when_locator_or_summary_is_missing() -> None:
+    summary = {
+        **SUMMARY_WITH_FIGURES,
+        **TRUSTED_FIELDS,
+        "evidence_summary": [
+            {
+                "claim": "Mixed evidence coverage.",
+                "evidence": [
+                    {
+                        "type": "text",
+                        "locator": "",
+                        "summary": "Only summary is available.",
+                    },
+                    {
+                        "type": "figure",
+                        "locator": "fig_p1_2",
+                        "summary": "",
+                    },
+                ],
+                "confidence": "medium",
+            }
+        ],
+        "review_issues": [],
+        "improvement_notes": [],
+    }
+
+    note = render_note(METADATA, summary, generated_date="2026-04-23")
+    evidence_section = note.split("### 关键证据\n\n", maxsplit=1)[1].split("\n\n## 核心结论", maxsplit=1)[0].strip()
+
+    assert "- 证据: Only summary is available." in evidence_section
+    assert "- 证据: fig_p1_2" in evidence_section
+    assert "- 证据: ;" not in evidence_section
+
+
+def test_render_note_flattens_multiline_evidence_into_single_bullet() -> None:
+    summary = {
+        **SUMMARY_WITH_FIGURES,
+        **TRUSTED_FIELDS,
+        "evidence_summary": [
+            {
+                "claim": "Evidence text should not break Markdown list structure.",
+                "evidence": [
+                    {
+                        "type": "text",
+                        "locator": "page 4 results\n- nested locator bullet",
+                        "summary": "line 1 summary\n- nested summary bullet",
+                    }
+                ],
+                "confidence": "high",
+            }
+        ],
+        "review_issues": [],
+        "improvement_notes": [],
+    }
+
+    note = render_note(METADATA, summary, generated_date="2026-04-23")
+    evidence_section = note.split("### 关键证据\n\n", maxsplit=1)[1].split("\n\n## 核心结论", maxsplit=1)[0].strip()
+
+    assert (
+        evidence_section
+        == "- 结论: Evidence text should not break Markdown list structure.\n"
+        "  - 证据: page 4 results - nested locator bullet; line 1 summary - nested summary bullet"
+    )
+    assert "\n- nested locator bullet" not in evidence_section
+    assert "\n- nested summary bullet" not in evidence_section
+
+
+def test_render_note_flattens_multiline_claim_into_single_bullet() -> None:
+    summary = {
+        **SUMMARY_WITH_FIGURES,
+        **TRUSTED_FIELDS,
+        "evidence_summary": [
+            {
+                "claim": "Primary conclusion line\n- looks like a nested claim bullet",
+                "evidence": [
+                    {
+                        "type": "text",
+                        "locator": "page 6 discussion",
+                        "summary": "Supporting text stays on one evidence bullet.",
+                    }
+                ],
+                "confidence": "high",
+            }
+        ],
+        "review_issues": [],
+        "improvement_notes": [],
+    }
+
+    note = render_note(METADATA, summary, generated_date="2026-04-23")
+    evidence_section = note.split("### 关键证据\n\n", maxsplit=1)[1].split("\n\n## 核心结论", maxsplit=1)[0].strip()
+
+    assert (
+        evidence_section
+        == "- 结论: Primary conclusion line - looks like a nested claim bullet\n"
+        "  - 证据: page 6 discussion; Supporting text stays on one evidence bullet."
+    )
+    assert "\n- looks like a nested claim bullet" not in evidence_section
+
+
+def test_render_note_ignores_string_values_for_list_sections() -> None:
+    summary = {
+        **SUMMARY,
+        "key_points": "not-a-list",
+        "contributions": "not-a-list",
+        "limitations": "not-a-list",
+        "follow_up_keywords": "not-a-list",
+        "key_figures": "not-a-list",
+        "figure_overview": "图像概览。",
+    }
+
+    note = render_note(METADATA, summary, generated_date="2026-04-23")
+
+    assert "\n- n\n- o\n- t\n" not in note
+    assert "### n" not in note
+    figure_section = note.split("## 关键图片总览\n\n", maxsplit=1)[1].split("## 实验与证据", maxsplit=1)[0]
+
+    assert figure_section.strip() == "图像概览。"
+
+
+def test_render_note_keeps_evidence_section_stable_without_review_or_improvement_blocks() -> None:
+    summary = {
+        **SUMMARY_WITH_FIGURES,
+        **TRUSTED_FIELDS,
+        "review_issues": [],
+        "improvement_notes": [],
+    }
+
+    note = render_note(METADATA, summary, generated_date="2026-04-23")
+    evidence_section = note.split("### 关键证据\n\n", maxsplit=1)[1].split("\n\n## 核心结论", maxsplit=1)[0].strip()
+
+    assert evidence_section.endswith("  - 证据: fig_p1_1; The framework figure shows the optimization loop.")
+    assert "\n\n  - 证据:" not in evidence_section
+    assert "\n### 审查问题" not in note
+    assert "\n### 补充优化记录" not in note
+
+
 def test_render_note_contains_normalized_note_labels_with_limit() -> None:
     summary = {
         **SUMMARY_WITH_FIGURES,
