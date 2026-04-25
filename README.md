@@ -72,6 +72,10 @@ finalize-note -> preview-note
 
 Same-day regenerated notes should not overwrite earlier notes. Use a date-only title for the first note and pass `--version-suffix " (v2)"`, `--version-suffix " (v3)"`, etc. for later notes on the same date.
 
+## MCP Tool Discovery
+
+Codex App may lazy-load MCP tool schemas. Before running a Zotero note workflow, load the full Zotero tool set with a targeted tool search for `search_library`, `get_item_details`, `get_content`, and `write_note`. If `get_item_details` is not initially visible, treat that as a tool discovery issue, not as missing Zotero metadata.
+
 ## Local Commands
 
 ```bash

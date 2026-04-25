@@ -23,11 +23,12 @@ Natural-language write intent example:
 
 ```text
 请帮我分析这篇文献并写入笔记：<paper title>
+请对 Zotero 中的 <paper title> 文章进行分析并输出笔记
 ```
 
 ## 目标
 
-把 Zotero 中的一篇论文转换为中文结构化研究笔记。默认只 dry-run；当用户明确要求“写入笔记”“写回 Zotero”“创建 note”“保存到 Zotero”等动作时，执行分析并创建子笔记。
+把 Zotero 中的一篇论文转换为中文结构化研究笔记。默认只 dry-run；当用户明确要求“输出笔记”“写入笔记”“写回 Zotero”“创建 note”“保存到 Zotero”等动作时，执行分析、预览并创建 Zotero 子笔记。
 
 ## 输入
 
@@ -35,11 +36,20 @@ Natural-language write intent example:
 
 ## 工具边界
 
-- 用 `zotero-mcp search_library` 搜索条目。
-- 用 `zotero-mcp get_item_details` 获取元数据和 PDF attachment path。
+- 开始前先用 `tool_search` 精确加载 Zotero MCP 工具，至少查询：
+
+```text
+zotero mcp search_library get_item_details get_content write_note annotations
+```
+
+- 必需读工具：
+  - `zotero-mcp search_library`
+  - `zotero-mcp get_item_details`
+  - `zotero-mcp get_content` 或本项目 `prepare-item` 的 PDF 抽取路径
+- 必需写工具：
+  - 只有显式写入时才调用 `zotero-mcp write_note`
+- 如果 `get_item_details` 初始不可见，不要手工拼 metadata；先用 `tool_search` 重新加载。只有 `tool_search` 后仍不可用，才停止并说明这是 Codex App 工具发现/注入问题。
 - 用本项目 Python CLI 抽取 PDF 与渲染 note。
-- 用 Zotero MCP 在显式写入步骤创建 Zotero 子笔记。
-- 如果当前会话没有注入原生 Zotero MCP 工具，不实现或调用 HTTP fallback；停止并说明这是 session/tool-injection 问题，建议新开会话或检查 MCP 注册。
 - 不修改 Zotero SQLite。
 - 不调用 Better Notes API。
 - 不修改 Better Notes 配置。
@@ -63,8 +73,10 @@ uv run zotero-paperread create-run --title "<title>" --item-key "<item_key>"
    - `create-run` 负责建立该目录并写入 `run.json`，后续所有产物都留在这里。
 
 3. 获取条目详情：
-   - 读取 title、creators、date、DOI、url、zoteroUrl、attachments。
-   - 将原始 item details 保存到返回的 run 目录中的 `item-details.json`。
+   - 调用 `get_item_details(itemKey=<item_key>, mode="complete")`。
+   - 保存原始返回到 `<run_dir>/item-details.json`。
+   - 如果返回中 `attachments[].path` 已有本地 PDF 路径，直接交给 `prepare-item`。
+   - 如果没有 PDF path，但有 PDF attachment key，先报告 `missing_pdf_path_in_item_details`，不要直接猜 Zotero storage 路径；只有用户明确要求排障时才进行本机路径探测。
 
 4. 检查已有 Codex 笔记：
    - 在 item details 中检查已有 child notes、notes、children 或可见 note 元数据。
