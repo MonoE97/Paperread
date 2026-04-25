@@ -21,29 +21,29 @@
 
 ### 关键证据
 
-{% if evidence_summary -%}
-{% for item in evidence_summary -%}
+{% if evidence_summary %}
+{% for item in evidence_summary %}
 - 结论: {{ item.claim }}
-{% for evidence in item.evidence -%}
-  - 证据: {{ evidence.locator }}{% if evidence.summary %}; {{ evidence.summary }}{% endif %}
+{% for evidence in item.evidence %}
+  - 证据: {{ evidence.locator }}{% if evidence.summary %}; {{ evidence.summary }}{% endif %}{{ "\n" }}
 {% endfor %}
 {% endfor %}
-{% else -%}
+{% else %}
 - none
 {% endif %}
 
-{% if review_issues -%}
+{% if review_issues %}
 ### 审查问题
 
-{% for item in review_issues -%}
+{% for item in review_issues %}
 - {{ item.severity }}: {{ item.issue }}{% if item.suggested_fix %} 建议: {{ item.suggested_fix }}{% endif %}
 {% endfor %}
 {% endif %}
 
-{% if improvement_notes -%}
+{% if improvement_notes %}
 ### 补充优化记录
 
-{% for item in improvement_notes -%}
+{% for item in improvement_notes %}
 - {{ item.issue }}{% if item.action %}: {{ item.action }}{% endif %}{% if item.source %} (source: {{ item.source }}){% endif %}
 {% endfor %}
 {% endif %}

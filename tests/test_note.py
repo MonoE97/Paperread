@@ -113,6 +113,8 @@ def test_render_note_contains_trust_and_evidence_section() -> None:
     assert "page 3 method section" in note
     assert "fig_p1_1" in note
     assert "Method section was too generic." in note
+    assert "\n  - 证据: page 3 method section;" in note
+    assert "\n  - 证据: fig_p1_1;" in note
 
 
 def test_render_note_contains_normalized_note_labels_with_limit() -> None:
