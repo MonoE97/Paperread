@@ -578,3 +578,63 @@ def test_apply_review_command_updates_summary(tmp_path: Path) -> None:
     assert updated["trust_status"] == "trusted"
     assert updated["improvement_status"] == "not_needed"
     assert updated["improvement_notes"] == []
+
+
+def test_apply_review_command_rejects_invalid_review_without_modifying_summary(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    review_path = tmp_path / "review.json"
+    original_summary = {
+        "one_sentence_summary": "ok",
+        "trust_status": "trusted",
+        "review_status": "failed",
+        "improvement_status": "needed",
+        "improvement_notes": [{"issue": "Old issue", "action": "", "source": "previous review"}],
+    }
+    write_json(summary_path, original_summary)
+    write_json(
+        review_path,
+        {
+            "review_status": "passed",
+            "review_issues": [],
+            "trust_status_recommendation": "trusted",
+            "improvement_requests": [],
+        },
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["apply-review", str(summary_path), str(review_path)])
+
+    assert result.exit_code == 1
+    assert "review_payload_invalid:" in result.stdout
+    assert json.loads(summary_path.read_text(encoding="utf-8")) == original_summary
+
+
+def test_apply_review_command_output_creates_parent_dirs_and_leaves_original_unchanged(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    review_path = tmp_path / "review.json"
+    output_path = tmp_path / "nested" / "reviewed" / "summary.json"
+    original_summary = {"one_sentence_summary": "ok", "review_status": "not_reviewed"}
+    write_json(summary_path, original_summary)
+    write_json(
+        review_path,
+        {
+            "review_status": "passed",
+            "review_issues": [],
+            "trust_status_recommendation": "trusted",
+            "needs_improvement": False,
+            "improvement_requests": [],
+        },
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["apply-review", str(summary_path), str(review_path), "--output", str(output_path)],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(summary_path.read_text(encoding="utf-8")) == original_summary
+    updated = json.loads(output_path.read_text(encoding="utf-8"))
+    assert updated["review_status"] == "passed"
+    assert updated["trust_status"] == "trusted"
+    assert updated["improvement_status"] == "not_needed"

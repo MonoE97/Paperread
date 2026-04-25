@@ -1,3 +1,5 @@
+import pytest
+
 from zotero_paperread.review import apply_review_to_summary, review_allows_write
 
 
@@ -90,3 +92,68 @@ def test_review_allows_write() -> None:
     assert review_allows_write({"review_status": "passed_with_caveats", "needs_improvement": False}) is True
     assert review_allows_write({"review_status": "failed", "needs_improvement": False}) is False
     assert review_allows_write({"review_status": "passed", "needs_improvement": True}) is False
+
+
+def test_apply_review_to_summary_rejects_missing_needs_improvement_without_clearing_stale_state() -> None:
+    summary = {
+        "one_sentence_summary": "ok",
+        "review_status": "failed",
+        "trust_status": "needs_manual_review",
+        "improvement_status": "needed",
+        "improvement_notes": [{"issue": "Old issue", "action": "", "source": "previous review"}],
+    }
+    review = {
+        "review_status": "passed",
+        "review_issues": [],
+        "trust_status_recommendation": "trusted",
+        "improvement_requests": [],
+    }
+
+    with pytest.raises(ValueError, match="needs_improvement"):
+        apply_review_to_summary(summary, review)
+
+    assert summary["improvement_status"] == "needed"
+    assert summary["improvement_notes"] == [{"issue": "Old issue", "action": "", "source": "previous review"}]
+
+
+def test_apply_review_to_summary_rejects_non_bool_needs_improvement() -> None:
+    summary = {"one_sentence_summary": "ok", "improvement_status": "needed"}
+    review = {
+        "review_status": "passed",
+        "review_issues": [],
+        "trust_status_recommendation": "trusted",
+        "needs_improvement": "false",
+        "improvement_requests": [],
+    }
+
+    with pytest.raises(ValueError, match="needs_improvement"):
+        apply_review_to_summary(summary, review)
+
+    assert summary["improvement_status"] == "needed"
+
+
+def test_apply_review_to_summary_rejects_missing_trust_recommendation_without_preserving_stale_trusted_state() -> None:
+    summary = {
+        "one_sentence_summary": "ok",
+        "trust_status": "trusted",
+        "improvement_status": "needed",
+    }
+    review = {
+        "review_status": "passed",
+        "review_issues": [],
+        "needs_improvement": False,
+        "improvement_requests": [],
+    }
+
+    with pytest.raises(ValueError, match="trust_status_recommendation"):
+        apply_review_to_summary(summary, review)
+
+    assert summary["trust_status"] == "trusted"
+    assert summary["improvement_status"] == "needed"
+
+
+def test_review_allows_write_requires_exact_false_needs_improvement() -> None:
+    assert review_allows_write({"review_status": "passed"}) is False
+    assert review_allows_write({"review_status": "passed", "needs_improvement": None}) is False
+    assert review_allows_write({"review_status": "passed", "needs_improvement": 0}) is False
+    assert review_allows_write({"review_status": "passed", "needs_improvement": "false"}) is False

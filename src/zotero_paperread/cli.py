@@ -252,8 +252,13 @@ def apply_review_command(
     """Apply review gate fields to summary JSON deterministically."""
     summary = read_json_or_exit(summary_json, label="summary JSON")
     review = read_json_or_exit(review_json, label="review JSON")
-    updated = apply_review_to_summary(summary, review)
+    try:
+        updated = apply_review_to_summary(summary, review)
+    except ValueError as exc:
+        console.print(str(exc), soft_wrap=True)
+        raise typer.Exit(1)
     target = output or summary_json
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(updated, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     console.print(f"Wrote reviewed summary JSON: {target}")
 
