@@ -390,6 +390,44 @@ def test_validate_trusted_summary_fails_empty_core_content(tmp_path: Path) -> No
     assert "key_points must contain at least one item" in result.stdout
 
 
+def test_validate_trusted_summary_rejects_null_required_text_fields(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    write_json(
+        summary_path,
+        {
+            "one_sentence_summary": None,
+            "abstract_translation": "本文提出一个有限电场机器学习工作流。",
+            "key_points": ["Field-aware forces"],
+            "research_question": "How can finite-field interface simulations be accelerated?",
+            "method": "The method combines force learning and charge-response learning.",
+            "experiments": "The paper validates the workflow on Au/NaCl interfaces.",
+            "contributions": ["ML finite-field dynamics"],
+            "limitations": ["Single benchmark chemistry"],
+            "ai4s_relevance": "The decomposition is useful for field-driven AI4S simulations.",
+            "follow_up_keywords": ["finite-field MD"],
+            "paper_type": "method_paper",
+            "trust_status": "usable_with_caveats",
+            "trust_rationale": None,
+            "review_status": "passed",
+            "evidence_summary": [
+                {
+                    "claim": "The method is supported.",
+                    "evidence": [{"type": "text", "locator": "context.md page 2", "summary": "method evidence"}],
+                    "confidence": "high",
+                }
+            ],
+            "improvement_status": "not_needed",
+        },
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["validate-trusted-summary", str(summary_path)])
+
+    assert result.exit_code == 1
+    assert "trust_rationale is required" in result.stdout
+    assert "one_sentence_summary is required" in result.stdout
+
+
 def test_validate_trusted_summary_passes_ready_summary(tmp_path: Path) -> None:
     summary_path = tmp_path / "summary.json"
     write_json(

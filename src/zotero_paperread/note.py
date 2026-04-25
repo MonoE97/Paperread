@@ -87,6 +87,10 @@ def flatten_inline_markdown_text(value: str) -> str:
     return " ".join(parts)
 
 
+def clean_required_text(value: Any) -> str:
+    return flatten_inline_markdown_text(value) if isinstance(value, str) else ""
+
+
 def format_evidence_line(locator: str, summary: str) -> str:
     locator = flatten_inline_markdown_text(locator)
     summary = flatten_inline_markdown_text(summary)
@@ -214,11 +218,11 @@ def validate_trusted_summary(summary: dict[str, Any]) -> list[str]:
     if review_status not in WRITE_READY_REVIEW_STATUSES:
         errors.append("review_status must be passed or passed_with_caveats")
 
-    if not str(summary.get("trust_rationale", "")).strip():
+    if not clean_required_text(summary.get("trust_rationale", "")):
         errors.append("trust_rationale is required")
 
     for field_name, error_message in REQUIRED_WRITE_READY_TEXT_FIELDS.items():
-        value = flatten_inline_markdown_text(str(summary.get(field_name, "")))
+        value = clean_required_text(summary.get(field_name, ""))
         if not value:
             errors.append(error_message)
 
