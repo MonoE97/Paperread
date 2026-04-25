@@ -38,7 +38,7 @@
 ### 审查问题
 
 {% for item in review_issues %}
-- {{ item.severity }}: {{ item.issue }}{% if item.suggested_fix %} 建议: {{ item.suggested_fix }}{% endif %}
+- {{ item.severity }}: {{ item.issue }}{% if item.suggested_fix %} 建议: {{ item.suggested_fix }}{% endif %}{{ "\n" }}
 {% endfor %}
 {% endif %}
 
@@ -46,7 +46,7 @@
 ### 补充优化记录
 
 {% for item in improvement_notes %}
-- {{ item.issue }}{% if item.action %}: {{ item.action }}{% endif %}{% if item.source %} (source: {{ item.source }}){% endif %}
+- {{ item.issue }}{% if item.action %}: {{ item.action }}{% endif %}{% if item.source %} (source: {{ item.source }}){% endif %}{{ "\n" }}
 {% endfor %}
 {% endif %}
 

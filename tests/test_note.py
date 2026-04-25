@@ -262,6 +262,28 @@ def test_render_note_flattens_multiline_evidence_into_single_bullet() -> None:
     assert "\n- nested summary bullet" not in evidence_section
 
 
+def test_render_note_separates_review_issue_bullets() -> None:
+    note = render_note(
+        METADATA,
+        {
+            **SUMMARY_WITH_FIGURES,
+            **TRUSTED_FIELDS,
+            "review_issues": [
+                {"severity": "medium", "issue": "First issue.", "suggested_fix": "Fix first."},
+                {"severity": "low", "issue": "Second issue.", "suggested_fix": "Fix second."},
+            ],
+            "improvement_notes": [
+                {"issue": "First improvement.", "action": "Done.", "source": "review.json"},
+                {"issue": "Second improvement.", "action": "Done.", "source": "review.json"},
+            ],
+        },
+        generated_date="2026-04-26",
+    )
+
+    assert "- medium: First issue. 建议: Fix first.\n\n- low: Second issue." in note
+    assert "- First improvement.: Done. (source: review.json)\n\n- Second improvement." in note
+
+
 def test_render_note_flattens_multiline_claim_into_single_bullet() -> None:
     summary = {
         **SUMMARY_WITH_FIGURES,
