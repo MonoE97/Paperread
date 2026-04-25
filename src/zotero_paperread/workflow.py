@@ -8,6 +8,16 @@ from zotero_paperread.figures import extract_figures
 from zotero_paperread.pdf_extract import extract_pdf
 from zotero_paperread.runs import write_run_manifest
 
+LOW_PRIORITY_PDF_TERMS = (
+    "appendix",
+    "appendices",
+    "supplement",
+    "supplemental",
+    "supplementary",
+    "supporting information",
+    "supporting-information",
+)
+
 
 def format_creators(creators: list[dict[str, Any]]) -> str:
     """Convert Zotero creators into a compact display string."""
@@ -24,12 +34,27 @@ def format_creators(creators: list[dict[str, Any]]) -> str:
     return ", ".join(names)
 
 
+def _attachment_priority_key(index: int, attachment: dict[str, Any]) -> tuple[int, int]:
+    """Rank local PDF attachments while preserving stable fallback order."""
+    signals = " ".join(
+        str(attachment.get(field, "")).strip().lower()
+        for field in ("filename", "path", "title")
+    )
+    penalty = int(any(term in signals for term in LOW_PRIORITY_PDF_TERMS))
+    return (penalty, index)
+
+
 def select_pdf_attachment(attachments: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Select the first local PDF attachment from Zotero item details."""
-    for attachment in attachments:
-        if attachment.get("contentType") == "application/pdf" and attachment.get("path"):
-            return attachment
-    return None
+    """Select a local PDF attachment, preferring the main paper over appendices."""
+    candidates = [
+        (index, attachment)
+        for index, attachment in enumerate(attachments)
+        if attachment.get("contentType") == "application/pdf" and attachment.get("path")
+    ]
+    if not candidates:
+        return None
+    _, selected = min(candidates, key=lambda item: _attachment_priority_key(item[0], item[1]))
+    return selected
 
 
 def build_metadata(details: dict[str, Any]) -> dict[str, Any]:
@@ -95,6 +120,7 @@ def build_figure_context_markdown(figures_payload: dict[str, Any]) -> str:
                     [
                         f"### {figure.get('figure_id', 'unknown')}",
                         f"- Caption: {figure.get('caption', '') or '_No caption available._'}",
+                        f"- Caption Confidence: {figure.get('caption_confidence', 0.0)}",
                         f"- Page: {figure.get('page', '')}",
                         f"- Source: {figure.get('source', '')}",
                         f"- Image Path: {figure.get('image_path', '')}",
@@ -141,6 +167,21 @@ def clear_optional_figure_artifacts(bundle_dir: Path) -> None:
         path.unlink(missing_ok=True)
 
 
+def _build_figure_extraction_error_context(error: Exception) -> tuple[dict[str, str], str]:
+    """Capture a compact, deterministic summary for figure extraction failures."""
+    error_type = type(error).__name__
+    error_message = str(error).strip() or "no_message"
+    return (
+        {
+            "stage": "figure_extraction",
+            "status": "error",
+            "error_type": error_type,
+            "error_message": error_message,
+        },
+        f"figure_extraction_error:{error_type}:{error_message}",
+    )
+
+
 def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int | None = None) -> dict[str, Any]:
     """Prepare metadata, extraction, and context files from raw Zotero item details."""
     bundle_dir = Path(workdir).expanduser().resolve()
@@ -167,6 +208,7 @@ def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int |
     figure_context_path: Path | None = None
     figures_payload: dict[str, Any] | None = None
     source_attempts: list[dict[str, Any]] = []
+    figure_error_warning: str | None = None
 
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     extract_path.write_text(json.dumps(extract, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -180,8 +222,9 @@ def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int |
                 max_pages=max_pages,
                 item_details=details,
             )
-        except Exception:
-            source_attempts = [{"stage": "figure_extraction", "status": "error"}]
+        except Exception as error:
+            error_attempt, figure_error_warning = _build_figure_extraction_error_context(error)
+            source_attempts = [error_attempt]
             figures_payload = None
         else:
             source_attempts = list(figures_payload.get("source_attempts", []))
@@ -195,6 +238,8 @@ def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int |
     figure_warnings = list(figures_payload.get("warnings", [])) if figures_payload else []
     if pdf_path and figures_payload is None:
         figure_warnings.append("figure_extraction_failed")
+    if figure_error_warning:
+        figure_warnings.append(figure_error_warning)
     warnings = merge_warnings(list(extract.get("warnings", [])), figure_warnings)
     result = {
         "metadata_json": str(metadata_path),

@@ -54,6 +54,8 @@ SOURCE_FILENAME_PENALTY_PATTERNS = (
 )
 
 MAX_DIRECTIONAL_GAP = 160.0
+CAPTION_BACKFILL_MAX_DIRECTIONAL_GAP = 72.0
+CAPTION_BACKFILL_MIN_HORIZONTAL_OVERLAP_RATIO = 0.5
 UNION_GAP_TOLERANCE = 24.0
 STACKED_REGION_GAP_TOLERANCE = 48.0
 CAPTION_BUFFER = 8.0
@@ -91,6 +93,7 @@ FigureSource = Literal[
 class FigureExtraction(TypedDict):
     figure_id: str
     caption: str
+    caption_confidence: float
     caption_bbox: list[float]
     bbox: list[float]
     page: int
@@ -107,6 +110,12 @@ class FigureExtraction(TypedDict):
 class CaptionBlock(TypedDict):
     caption: str
     rect: fitz.Rect
+
+
+class CaptionBackfill(TypedDict):
+    block: CaptionBlock
+    confidence: float
+    caption_index: int | None
 
 
 class TextLine(TypedDict):
@@ -282,6 +291,7 @@ def _source_entries_to_candidates(entries: list[dict[str, Any]]) -> list[FigureE
             FigureExtraction(
                 figure_id=f"source-{index}-{image_path.stem}",
                 caption=caption,
+                caption_confidence=_source_caption_confidence(entry, caption),
                 caption_bbox=_rect_to_list(bbox),
                 bbox=_rect_to_list(bbox),
                 page=_normalize_page(entry.get("page")),
@@ -362,6 +372,7 @@ def _extract_pdf_candidates(
             vector_regions = _detect_graphic_regions(page)
             image_regions = _detect_embedded_image_regions(page)
             used_regions: list[fitz.Rect] = []
+            claimed_caption_indices: set[int] = set()
 
             for caption_index, caption in enumerate(captions):
                 bbox = _select_owned_bbox(
@@ -373,6 +384,7 @@ def _extract_pdf_candidates(
                 if bbox is None:
                     continue
                 used_regions.append(bbox)
+                claimed_caption_indices.add(caption_index)
                 results.append(
                     _rasterize_figure(
                         page=page,
@@ -389,7 +401,9 @@ def _extract_pdf_candidates(
                 _supplement_embedded_images(
                     page=page,
                     page_number=page_index + 1,
+                    captions=captions,
                     image_regions=image_regions,
+                    claimed_caption_indices=claimed_caption_indices,
                     used_regions=used_regions,
                     output_root=output_root,
                 )
@@ -401,7 +415,9 @@ def _extract_pdf_candidates(
 def _supplement_embedded_images(
     page: fitz.Page,
     page_number: int,
+    captions: list[CaptionBlock],
     image_regions: list[fitz.Rect],
+    claimed_caption_indices: set[int],
     used_regions: list[fitz.Rect],
     output_root: Path,
 ) -> list[FigureExtraction]:
@@ -410,17 +426,25 @@ def _supplement_embedded_images(
     for region in image_regions:
         if any(_rect_overlap_ratio(region, used) > 0.8 for used in used_regions):
             continue
+        backfill = _backfill_caption_for_region(
+            region,
+            captions,
+            claimed_caption_indices=claimed_caption_indices,
+        )
         supplements.append(
             _rasterize_figure(
                 page=page,
                 page_number=page_number,
                 figure_index=1000 + supplement_index,
-                caption=CaptionBlock(caption="", rect=region),
+                caption=backfill["block"],
                 bbox=region,
                 output_root=output_root,
                 source="embedded-image",
+                caption_confidence=backfill["confidence"],
             )
         )
+        if backfill["caption_index"] is not None:
+            claimed_caption_indices.add(backfill["caption_index"])
         supplement_index += 1
     return supplements
 
@@ -588,6 +612,7 @@ def _rasterize_figure(
     bbox: fitz.Rect,
     output_root: Path,
     source: str,
+    caption_confidence: float | None = None,
 ) -> FigureExtraction:
     image_path = output_root / f"figure-p{page_number}-{figure_index}.png"
     pixmap = page.get_pixmap(clip=bbox, dpi=144, alpha=False)
@@ -601,6 +626,7 @@ def _rasterize_figure(
     return FigureExtraction(
         figure_id=f"p{page_number}-f{figure_index}",
         caption=caption["caption"],
+        caption_confidence=_caption_confidence(source, caption, caption_confidence),
         caption_bbox=_rect_to_list(caption["rect"]),
         bbox=_rect_to_list(bbox),
         page=max(page_number, 1),
@@ -971,6 +997,117 @@ def _source_caption(entry: dict[str, Any]) -> str:
     if isinstance(rel_path, str):
         return Path(rel_path).stem.replace("_", " ")
     return ""
+
+
+def _source_caption_confidence(entry: dict[str, Any], caption: str) -> float:
+    if caption == "":
+        return 0.0
+    explicit_caption = entry.get("caption")
+    if isinstance(explicit_caption, str) and explicit_caption.strip():
+        return 0.98
+    return 0.2
+
+
+def _backfill_caption_for_region(
+    region: fitz.Rect,
+    captions: list[CaptionBlock],
+    *,
+    claimed_caption_indices: set[int] | None = None,
+) -> CaptionBackfill:
+    if not captions:
+        return CaptionBackfill(
+            block=CaptionBlock(caption="", rect=region),
+            confidence=0.0,
+            caption_index=None,
+        )
+
+    matches = [
+        _caption_backfill_match(region, caption_index, caption)
+        for caption_index, caption in enumerate(captions)
+        if claimed_caption_indices is None or caption_index not in claimed_caption_indices
+    ]
+    valid_matches = [match for match in matches if match is not None]
+    if len(valid_matches) != 1:
+        return CaptionBackfill(
+            block=CaptionBlock(caption="", rect=region),
+            confidence=0.0,
+            caption_index=None,
+        )
+
+    matched = valid_matches[0]
+    return CaptionBackfill(
+        block=CaptionBlock(
+            caption=matched["caption"]["caption"],
+            rect=fitz.Rect(matched["caption"]["rect"]),
+        ),
+        confidence=matched["confidence"],
+        caption_index=matched["caption_index"],
+    )
+
+
+def _caption_backfill_match(
+    region: fitz.Rect,
+    caption_index: int,
+    caption: CaptionBlock,
+) -> dict[str, Any] | None:
+    direction_gap = _caption_region_directional_gap(caption["rect"], region)
+    if direction_gap is None or direction_gap > CAPTION_BACKFILL_MAX_DIRECTIONAL_GAP:
+        return None
+
+    overlap_ratio = _caption_region_horizontal_overlap_ratio(caption["rect"], region)
+    if overlap_ratio < CAPTION_BACKFILL_MIN_HORIZONTAL_OVERLAP_RATIO:
+        return None
+
+    gap_score = 1.0 - (direction_gap / CAPTION_BACKFILL_MAX_DIRECTIONAL_GAP)
+    confidence = round(0.2 + (0.2 * overlap_ratio) + (0.2 * gap_score), 4)
+    return {
+        "caption": caption,
+        "caption_index": caption_index,
+        "confidence": confidence,
+    }
+
+
+def _caption_region_directional_gap(
+    caption_rect: fitz.Rect,
+    region: fitz.Rect,
+) -> float | None:
+    if caption_rect.y1 <= region.y0:
+        return region.y0 - caption_rect.y1
+    if region.y1 <= caption_rect.y0:
+        return caption_rect.y0 - region.y1
+    return None
+
+
+def _caption_region_horizontal_overlap_ratio(
+    caption_rect: fitz.Rect,
+    region: fitz.Rect,
+) -> float:
+    overlap = _horizontal_overlap(caption_rect, region)
+    min_width = min(caption_rect.width, region.width)
+    if min_width <= 0:
+        return 0.0
+    return overlap / min_width
+
+
+def _caption_region_distance(caption_rect: fitz.Rect, region: fitz.Rect) -> float:
+    directional_gap = _caption_region_directional_gap(caption_rect, region)
+    if directional_gap is None:
+        return 0.0
+    return directional_gap
+
+
+def _caption_confidence(
+    source: str,
+    caption: CaptionBlock,
+    explicit_confidence: float | None = None,
+) -> float:
+    if explicit_confidence is not None:
+        return explicit_confidence
+    if caption["caption"] == "":
+        return 0.0
+    if source == "embedded-image":
+        return 0.0
+    return 0.95
 
 
 def _rect_overlap_ratio(left: fitz.Rect, right: fitz.Rect) -> float:

@@ -5,6 +5,7 @@ import fitz
 import pytest
 
 from zotero_paperread.figures import _detect_captions, extract_figures
+from zotero_paperread.workflow import build_figure_context_markdown
 
 
 def _selected(payload: dict) -> list[dict]:
@@ -192,6 +193,99 @@ def make_raster_image_pdf(path: Path) -> None:
         "Fig. 4. Raster result comparison.",
         fontsize=12,
     )
+
+    doc.save(path)
+    doc.close()
+
+
+def make_raster_image_with_far_caption_pdf(path: Path) -> None:
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGP8z8Dwn4GBgYGJAQoAHxcCAr7c87sAAAAASUVORK5CYII="
+    )
+    doc = fitz.open()
+    page = doc.new_page(width=360, height=420)
+    page.insert_image(fitz.Rect(70, 60, 210, 150), stream=png_bytes)
+    page.insert_text(
+        (70, 320),
+        "Figure 12. Caption is too far away to backfill.",
+        fontsize=12,
+    )
+
+    doc.save(path)
+    doc.close()
+
+
+def make_embedded_image_with_multiple_nearby_captions_pdf(path: Path) -> None:
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGP8z8Dwn4GBgYGJAQoAHxcCAr7c87sAAAAASUVORK5CYII="
+    )
+    doc = fitz.open()
+    page = doc.new_page(width=500, height=260)
+    page.insert_image(fitz.Rect(110, 50, 390, 140), stream=png_bytes)
+    page.insert_textbox(
+        fitz.Rect(90, 165, 240, 205),
+        "Figure 1. Left caption.",
+        fontsize=12,
+    )
+    page.insert_textbox(
+        fitz.Rect(260, 165, 410, 205),
+        "Figure 2. Right caption.",
+        fontsize=12,
+    )
+
+    doc.save(path)
+    doc.close()
+
+
+def make_mixed_deterministic_and_captionless_embedded_pdf(path: Path) -> None:
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGP8z8Dwn4GBgYGJAQoAHxcCAr7c87sAAAAASUVORK5CYII="
+    )
+    doc = fitz.open()
+    page = doc.new_page(width=520, height=280)
+    page.draw_rect(fitz.Rect(40, 50, 200, 140), color=(0, 0, 0), fill=(0.8, 0.8, 0.8))
+    page.insert_textbox(
+        fitz.Rect(40, 165, 220, 205),
+        "Figure 3. Left deterministic figure.",
+        fontsize=12,
+    )
+    page.insert_image(fitz.Rect(300, 50, 460, 140), stream=png_bytes)
+
+    doc.save(path)
+    doc.close()
+
+
+def make_claimed_caption_above_embedded_image_pdf(path: Path) -> None:
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGP8z8Dwn4GBgYGJAQoAHxcCAr7c87sAAAAASUVORK5CYII="
+    )
+    doc = fitz.open()
+    page = doc.new_page(width=420, height=360)
+    page.draw_rect(fitz.Rect(80, 40, 260, 120), color=(0, 0, 0), fill=(0.8, 0.8, 0.8))
+    page.insert_textbox(
+        fitz.Rect(80, 140, 320, 170),
+        "Figure 8. Upper deterministic figure.",
+        fontsize=12,
+    )
+    page.insert_image(fitz.Rect(80, 190, 260, 270), stream=png_bytes)
+
+    doc.save(path)
+    doc.close()
+
+
+def make_embedded_images_sharing_single_nearby_caption_pdf(path: Path) -> None:
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGP8z8Dwn4GBgYGJAQoAHxcCAr7c87sAAAAASUVORK5CYII="
+    )
+    doc = fitz.open()
+    page = doc.new_page(width=420, height=360)
+    page.insert_image(fitz.Rect(100, 40, 280, 110), stream=png_bytes)
+    page.insert_text(
+        (100, 150),
+        "Figure 11. Shared caption.",
+        fontsize=12,
+    )
+    page.insert_image(fitz.Rect(100, 180, 280, 250), stream=png_bytes)
 
     doc.save(path)
     doc.close()
@@ -522,11 +616,36 @@ def test_extract_figures_detects_raster_image_regions(tmp_path: Path) -> None:
 
     assert len(figures) == 1
     figure = figures[0]
-    assert figure["caption"] == ""
+    assert figure["caption"] == "Fig. 4. Raster result comparison."
+    assert figure["caption_confidence"] > 0.0
+    assert figure["caption_confidence"] < 0.95
     assert figure["bbox"] == [70.0, 60.0, 210.0, 150.0]
     assert figure["page"] == 1
     assert figure["source"] == "embedded-image"
     assert Path(figure["image_path"]).exists()
+
+
+def test_extract_figures_backfills_caption_for_captionless_embedded_image_from_same_page(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pdf_path = tmp_path / "raster-caption-backfill.pdf"
+    output_dir = tmp_path / "images"
+    make_raster_image_pdf(pdf_path)
+    monkeypatch.setattr(
+        "zotero_paperread.figures._detect_graphic_regions",
+        lambda page: [],
+    )
+
+    payload = extract_figures(pdf_path, output_dir)
+
+    assert payload["candidate_count"] == 1
+    figure = _selected(payload)[0]
+    assert figure["source"] == "embedded-image"
+    assert figure["caption"] == "Fig. 4. Raster result comparison."
+    assert figure["caption_confidence"] > 0.0
+    assert figure["caption_confidence"] < 0.95
+    assert figure["page"] == 1
 
 
 def test_extract_figures_keeps_embedded_image_regions_as_late_supplement(
@@ -546,8 +665,140 @@ def test_extract_figures_keeps_embedded_image_regions_as_late_supplement(
     assert payload["candidate_count"] == 1
     figure = _selected(payload)[0]
     assert figure["source"] == "embedded-image"
-    assert figure["caption"] == ""
+    assert figure["caption"] == "Fig. 4. Raster result comparison."
+    assert figure["caption_confidence"] > 0.0
     assert figure["page"] == 1
+
+
+def test_build_figure_context_markdown_includes_caption_confidence() -> None:
+    markdown = build_figure_context_markdown(
+        {
+            "pdf_path": "/tmp/paper.pdf",
+            "candidate_count": 1,
+            "warnings": [],
+            "source_attempts": [],
+            "selected_figures": [
+                {
+                    "figure_id": "p1-f1",
+                    "caption": "Figure 1. Example.",
+                    "caption_confidence": 0.72,
+                    "page": 1,
+                    "source": "embedded-image",
+                    "image_path": "/tmp/figure.png",
+                    "priority_score": 0.05,
+                    "needs_fallback": False,
+                }
+            ],
+        }
+    )
+
+    assert "- Caption Confidence: 0.72" in markdown
+
+
+def test_extract_figures_does_not_backfill_when_multiple_same_page_captions_match(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pdf_path = tmp_path / "ambiguous-captions.pdf"
+    output_dir = tmp_path / "images"
+    make_embedded_image_with_multiple_nearby_captions_pdf(pdf_path)
+    monkeypatch.setattr(
+        "zotero_paperread.figures._detect_graphic_regions",
+        lambda page: [],
+    )
+
+    payload = extract_figures(pdf_path, output_dir)
+
+    assert payload["candidate_count"] == 1
+    figure = _selected(payload)[0]
+    assert figure["source"] == "embedded-image"
+    assert figure["caption"] == ""
+    assert figure["caption_confidence"] == 0.0
+
+
+def test_extract_figures_keeps_embedded_image_when_deterministic_neighbor_has_caption(
+    tmp_path: Path,
+) -> None:
+    pdf_path = tmp_path / "mixed-deterministic-embedded.pdf"
+    output_dir = tmp_path / "images"
+    make_mixed_deterministic_and_captionless_embedded_pdf(pdf_path)
+
+    payload = extract_figures(pdf_path, output_dir, top_k=3)
+
+    figures = _selected(payload)
+    assert len(figures) == 2
+    assert [figure["source"] for figure in figures] == [
+        "deterministic-pdf",
+        "embedded-image",
+    ]
+    assert figures[0]["caption"] == "Figure 3. Left deterministic figure."
+    assert figures[1]["caption"] == ""
+    assert figures[1]["caption_confidence"] == 0.0
+
+
+def test_extract_figures_does_not_backfill_embedded_image_with_caption_claimed_by_deterministic_figure(
+    tmp_path: Path,
+) -> None:
+    pdf_path = tmp_path / "claimed-caption-above-embedded.pdf"
+    output_dir = tmp_path / "images"
+    make_claimed_caption_above_embedded_image_pdf(pdf_path)
+
+    payload = extract_figures(pdf_path, output_dir, top_k=3)
+
+    figures = _selected(payload)
+    assert len(figures) == 2
+    assert [figure["source"] for figure in figures] == [
+        "deterministic-pdf",
+        "embedded-image",
+    ]
+    assert figures[0]["caption"] == "Figure 8. Upper deterministic figure."
+    assert figures[1]["caption"] == ""
+    assert figures[1]["caption_confidence"] == 0.0
+
+
+def test_extract_figures_claims_backfilled_caption_only_once_across_embedded_supplements(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pdf_path = tmp_path / "shared-caption-embedded-supplements.pdf"
+    output_dir = tmp_path / "images"
+    make_embedded_images_sharing_single_nearby_caption_pdf(pdf_path)
+    monkeypatch.setattr(
+        "zotero_paperread.figures._detect_graphic_regions",
+        lambda page: [],
+    )
+
+    payload = extract_figures(pdf_path, output_dir, top_k=3)
+
+    figures = _selected(payload)
+    assert len(figures) == 2
+    assert [figure["caption"] for figure in figures] == [
+        "Figure 11. Shared caption.",
+        "",
+    ]
+    assert figures[0]["caption_confidence"] > 0.0
+    assert figures[1]["caption_confidence"] == 0.0
+
+
+def test_extract_figures_does_not_backfill_from_far_caption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pdf_path = tmp_path / "far-caption.pdf"
+    output_dir = tmp_path / "images"
+    make_raster_image_with_far_caption_pdf(pdf_path)
+    monkeypatch.setattr(
+        "zotero_paperread.figures._detect_graphic_regions",
+        lambda page: [],
+    )
+
+    payload = extract_figures(pdf_path, output_dir)
+
+    assert payload["candidate_count"] == 1
+    figure = _selected(payload)[0]
+    assert figure["source"] == "embedded-image"
+    assert figure["caption"] == ""
+    assert figure["caption_confidence"] == 0.0
 
 
 def test_extract_figures_accepts_fig_without_period(tmp_path: Path) -> None:

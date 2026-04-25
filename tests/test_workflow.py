@@ -16,6 +16,74 @@ def make_pdf(path: Path, pages: list[str]) -> None:
     doc.close()
 
 
+def test_select_pdf_attachment_prefers_main_paper_over_appendix() -> None:
+    attachments = [
+        {
+            "key": "APPENDIX",
+            "filename": "paper-appendix.pdf",
+            "contentType": "application/pdf",
+            "path": "/tmp/paper-appendix.pdf",
+        },
+        {
+            "key": "MAINPDF",
+            "filename": "paper.pdf",
+            "contentType": "application/pdf",
+            "path": "/tmp/paper.pdf",
+        },
+    ]
+
+    selected = workflow.select_pdf_attachment(attachments)
+
+    assert selected is not None
+    assert selected["key"] == "MAINPDF"
+
+
+def test_select_pdf_attachment_prefers_main_paper_when_low_priority_signal_is_in_title_and_path() -> None:
+    attachments = [
+        {
+            "key": "SUPPLEMENT",
+            "filename": "paper-assets.pdf",
+            "title": "Supporting Information",
+            "contentType": "application/pdf",
+            "path": "/tmp/library/supporting-information/paper-assets.pdf",
+        },
+        {
+            "key": "MAINPDF",
+            "filename": "paper-assets.pdf",
+            "title": "Main Article PDF",
+            "contentType": "application/pdf",
+            "path": "/tmp/library/paper-assets.pdf",
+        },
+    ]
+
+    selected = workflow.select_pdf_attachment(attachments)
+
+    assert selected is not None
+    assert selected["key"] == "MAINPDF"
+
+
+def test_select_pdf_attachment_falls_back_to_first_valid_pdf_without_signals() -> None:
+    attachments = [
+        {
+            "key": "FIRSTPDF",
+            "filename": "scan-part-1.pdf",
+            "contentType": "application/pdf",
+            "path": "/tmp/scan-part-1.pdf",
+        },
+        {
+            "key": "SECONDPDF",
+            "filename": "scan-part-2.pdf",
+            "contentType": "application/pdf",
+            "path": "/tmp/scan-part-2.pdf",
+        },
+    ]
+
+    selected = workflow.select_pdf_attachment(attachments)
+
+    assert selected is not None
+    assert selected["key"] == "FIRSTPDF"
+
+
 def test_prepare_item_bundle_writes_metadata_extract_and_context(tmp_path: Path) -> None:
     pdf_path = tmp_path / "paper.pdf"
     make_pdf(pdf_path, ["Abstract\nThis paper studies CSP with AI.", "Methods\nDiffusion and GAN models."])
@@ -181,8 +249,19 @@ def test_prepare_item_bundle_keeps_base_bundle_when_figure_extraction_fails(tmp_
     assert result["figures_json"] is None
     assert result["figure_context_md"] is None
     assert result["arxiv_id"] is None
-    assert result["warnings"] == ["truncated_to_1_pages", "figure_extraction_failed"]
-    assert result["source_attempts"] == [{"stage": "figure_extraction", "status": "error"}]
+    assert result["warnings"] == [
+        "truncated_to_1_pages",
+        "figure_extraction_failed",
+        "figure_extraction_error:RuntimeError:boom",
+    ]
+    assert result["source_attempts"] == [
+        {
+            "stage": "figure_extraction",
+            "status": "error",
+            "error_type": "RuntimeError",
+            "error_message": "boom",
+        }
+    ]
     assert metadata["title"] == details["title"]
     assert extract["warnings"] == ["truncated_to_1_pages"]
     assert "This paper studies CSP with AI." in context
