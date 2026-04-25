@@ -72,14 +72,25 @@ finalize-note -> preview-note
 ```bash
 uv run zotero-paperread --help
 uv run zotero-paperread create-run --title "<title>" --item-key "<item_key>"
-uv run zotero-paperread prepare-item /tmp/item-details.json --workdir /tmp/zotero-paperread-run --max-pages 15
-uv run zotero-paperread extract-pdf path/to/paper.pdf --output /tmp/extract.json
-uv run zotero-paperread extract-figures path/to/paper.pdf --output-dir /tmp/figures --top-k 4 --max-pages 15
-uv run zotero-paperread render-note /tmp/metadata.json /tmp/summary.json --output /tmp/note.md
-uv run zotero-paperread finalize-note /tmp/metadata.json /tmp/summary.json --output /tmp/note.md
-uv run zotero-paperread validate-note /tmp/note.md
-uv run zotero-paperread preview-note /tmp/note.md
+uv run zotero-paperread prepare-item runs/<date>/<paper-slug>/item-details.json --workdir runs/<date>/<paper-slug> --max-pages 15
+uv run zotero-paperread extract-pdf path/to/paper.pdf --output runs/<date>/<paper-slug>/extract.json
+uv run zotero-paperread extract-figures path/to/paper.pdf --output-dir runs/<date>/<paper-slug>/figures --top-k 4 --max-pages 15
+uv run zotero-paperread render-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md
+uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md
+uv run zotero-paperread validate-note runs/<date>/<paper-slug>/note.md
+uv run zotero-paperread preview-note runs/<date>/<paper-slug>/note.md
 ```
+
+The recommended manual sequence is:
+
+```bash
+uv run zotero-paperread create-run --title "<title>" --item-key "<item_key>"
+uv run zotero-paperread prepare-item runs/<date>/<paper-slug>/item-details.json --workdir runs/<date>/<paper-slug> --max-pages 15
+uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md
+uv run zotero-paperread preview-note runs/<date>/<paper-slug>/note.md
+```
+
+`create-run` prints a JSON payload containing `run_dir`, `manifest_path`, `slug`, and `date`. Use the returned `run_dir` instead of guessing the final slug when there may already be a same-day run for the same title.
 
 ## V2: Key Figure Extraction and Analysis
 

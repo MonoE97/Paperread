@@ -137,6 +137,7 @@ uv run zotero-paperread preview-note <run_dir>/note.md
    - 生成的 `summary.json`、`note.md` 和预览输出都保留在同一个 run 目录里，便于审计和复查。
    - 推荐使用 `finalize-note`，它会按正确顺序执行 `render-note -> validate-note`。
    - 如果手动拆开执行，必须按 `render-note -> validate-note -> preview-note` 串行执行，不能并行调度。
+   - 即使用户已经明确要求写入，也必须先完成 `preview-note`，确认目标条目标题和 note 预览都已经生成，再进入 Zotero 写入步骤。
 
 8. 写入 Zotero：
    - 只有用户明确要求“写入”“写入笔记”“写回 Zotero”“创建 note”“保存到 Zotero”等动作时执行。
