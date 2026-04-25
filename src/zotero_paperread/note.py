@@ -91,6 +91,10 @@ def clean_required_text(value: Any) -> str:
     return flatten_inline_markdown_text(value) if isinstance(value, str) else ""
 
 
+def _has_text(value: Any) -> bool:
+    return bool(clean_required_text(value))
+
+
 def format_evidence_line(locator: str, summary: str) -> str:
     locator = flatten_inline_markdown_text(locator)
     summary = flatten_inline_markdown_text(summary)
@@ -139,6 +143,36 @@ def clean_evidence_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return cleaned
+
+
+def validate_write_ready_evidence(summary: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    items = summary.get("evidence_summary", [])
+    if not isinstance(items, list):
+        return ["evidence_summary must contain at least one claim"]
+
+    valid_claim_count = 0
+    for index, item in enumerate(items[:5], start=1):
+        if not isinstance(item, dict):
+            continue
+        if not _has_text(item.get("claim")):
+            errors.append(f"evidence_summary[{index}] claim is required")
+            continue
+
+        valid_claim_count += 1
+        evidence_items = item.get("evidence", [])
+        has_locator = False
+        if isinstance(evidence_items, list):
+            for evidence in evidence_items[:3]:
+                if isinstance(evidence, dict) and _has_text(evidence.get("locator")):
+                    has_locator = True
+                    break
+        if not has_locator:
+            errors.append(f"evidence_summary[{index}] must include at least one evidence locator")
+
+    if valid_claim_count == 0:
+        errors.insert(0, "evidence_summary must contain at least one claim")
+    return errors
 
 
 def clean_key_figures(summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -230,12 +264,7 @@ def validate_trusted_summary(summary: dict[str, Any]) -> list[str]:
         if not clean_string_list(summary.get(field_name, [])):
             errors.append(error_message)
 
-    evidence = clean_evidence_summary(summary)
-    if not evidence:
-        errors.append("evidence_summary must contain at least one claim")
-    for index, item in enumerate(evidence, start=1):
-        if not item["evidence"]:
-            errors.append(f"evidence_summary[{index}] must include at least one evidence locator")
+    errors.extend(validate_write_ready_evidence(summary))
 
     improvement_status = safe_choice(
         summary.get("improvement_status"),

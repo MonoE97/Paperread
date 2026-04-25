@@ -248,7 +248,7 @@ def validate_trusted_summary_command(summary_json: Path) -> None:
     errors = validate_trusted_summary(read_json_or_exit(summary_json, label="summary JSON"))
     if errors:
         for error in errors:
-            console.print(f"trusted_summary_invalid: {error}")
+            console.print(f"trusted_summary_invalid: {error}", soft_wrap=True)
         raise typer.Exit(1)
     console.print("trusted_summary_valid")
 

@@ -428,6 +428,94 @@ def test_validate_trusted_summary_rejects_null_required_text_fields(tmp_path: Pa
     assert "one_sentence_summary is required" in result.stdout
 
 
+def write_ready_trusted_summary_with_evidence(
+    path: Path,
+    evidence_summary: list[dict],
+) -> None:
+    write_json(
+        path,
+        {
+            "one_sentence_summary": "This paper proposes a field-aware ML workflow.",
+            "abstract_translation": "本文提出一个有限电场机器学习工作流。",
+            "key_points": ["Field-aware forces", "Charge response model"],
+            "research_question": "How can finite-field interface simulations be accelerated?",
+            "method": "The method combines force learning and charge-response learning.",
+            "experiments": "The paper validates the workflow on Au/NaCl interfaces.",
+            "contributions": ["ML finite-field dynamics", "ML charge response"],
+            "limitations": ["Single benchmark chemistry"],
+            "ai4s_relevance": "The decomposition is useful for field-driven AI4S simulations.",
+            "follow_up_keywords": ["finite-field MD"],
+            "paper_type": "method_paper",
+            "trust_status": "usable_with_caveats",
+            "trust_rationale": "Text extraction is complete and figure evidence is caveated.",
+            "review_status": "passed_with_caveats",
+            "evidence_summary": evidence_summary,
+            "review_issues": [],
+            "improvement_status": "completed",
+        },
+    )
+
+
+def test_validate_trusted_summary_rejects_null_evidence_claim(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    write_ready_trusted_summary_with_evidence(
+        summary_path,
+        [
+            {
+                "claim": None,
+                "evidence": [{"type": "text", "locator": "context.md page 2", "summary": "method evidence"}],
+                "confidence": "high",
+            }
+        ],
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["validate-trusted-summary", str(summary_path)])
+
+    assert result.exit_code == 1
+    assert "evidence_summary[1] claim is required" in result.stdout
+
+
+def test_validate_trusted_summary_rejects_null_evidence_locator_and_summary(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    write_ready_trusted_summary_with_evidence(
+        summary_path,
+        [
+            {
+                "claim": "The method is supported.",
+                "evidence": [{"type": "text", "locator": None, "summary": None}],
+                "confidence": "high",
+            }
+        ],
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["validate-trusted-summary", str(summary_path)])
+
+    assert result.exit_code == 1
+    assert "evidence_summary[1] must include at least one evidence locator" in result.stdout
+
+
+def test_validate_trusted_summary_rejects_summary_only_evidence_without_locator(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    write_ready_trusted_summary_with_evidence(
+        summary_path,
+        [
+            {
+                "claim": "The method is supported.",
+                "evidence": [{"type": "text", "summary": "method evidence"}],
+                "confidence": "high",
+            }
+        ],
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["validate-trusted-summary", str(summary_path)])
+
+    assert result.exit_code == 1
+    assert "evidence_summary[1] must include at least one evidence locator" in result.stdout
+
+
 def test_validate_trusted_summary_passes_ready_summary(tmp_path: Path) -> None:
     summary_path = tmp_path / "summary.json"
     write_json(
