@@ -1,0 +1,204 @@
+from __future__ import annotations
+
+import re
+import shutil
+import tarfile
+import urllib.error
+import urllib.request
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+import fitz
+
+ARXIV_ID_PATTERN = re.compile(
+    r"(?<!\d)(?:arxiv:)?(?P<id>(?:\d{4}\.\d{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7}))(?:v\d+)?(?!\d)",
+    re.IGNORECASE,
+)
+SOURCE_DIR_NAMES = ("pics", "figures", "fig", "images", "img")
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".webp"}
+PDF_SUFFIXES = {".pdf"}
+
+
+def resolve_arxiv_id(details: dict[str, Any], pdf_path: Path | None = None) -> str | None:
+    for key in ("url", "archiveLocation", "extra"):
+        arxiv_id = _extract_arxiv_id(details.get(key))
+        if arxiv_id is not None:
+            return arxiv_id
+
+    attachments = details.get("attachments", [])
+    if isinstance(attachments, list):
+        for attachment in attachments:
+            if not isinstance(attachment, dict):
+                continue
+            arxiv_id = _extract_arxiv_id(attachment.get("filename"))
+            if arxiv_id is not None:
+                return arxiv_id
+
+    if pdf_path is not None:
+        return _extract_arxiv_id(pdf_path.name)
+    return None
+
+
+def download_arxiv_source(arxiv_id: str, workdir: Path) -> Path | None:
+    destination_root = Path(workdir).expanduser().resolve()
+    destination_root.mkdir(parents=True, exist_ok=True)
+    source_root = destination_root / arxiv_id
+    if source_root.exists():
+        return source_root
+
+    archive_path = destination_root / f"{arxiv_id}.tar.gz"
+    temp_root = destination_root / f".{arxiv_id}.tmp"
+    url = f"https://arxiv.org/e-print/{arxiv_id}"
+
+    if temp_root.exists():
+        shutil.rmtree(temp_root)
+
+    try:
+        with urllib.request.urlopen(url) as response:
+            archive_path.write_bytes(response.read())
+        extract_source_package(archive_path, temp_root)
+        temp_root.replace(source_root)
+        return source_root
+    except (OSError, tarfile.TarError, urllib.error.URLError, ValueError):
+        shutil.rmtree(temp_root, ignore_errors=True)
+        return None
+    finally:
+        archive_path.unlink(missing_ok=True)
+
+
+def extract_source_package(archive_path: Path, output_dir: Path) -> Path:
+    archive = Path(archive_path).expanduser().resolve()
+    destination = Path(output_dir).expanduser()
+    destination.mkdir(parents=True, exist_ok=True)
+
+    written_paths: list[Path] = []
+    try:
+        with tarfile.open(archive) as package:
+            for member in package.getmembers():
+                relative_path = _safe_member_path(member)
+                target_path = destination / relative_path
+                if member.isdir():
+                    target_path.mkdir(parents=True, exist_ok=True)
+                    continue
+
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                extracted = package.extractfile(member)
+                if extracted is None:
+                    raise ValueError(f"unsafe tar member: {member.name}")
+                with target_path.open("wb") as handle:
+                    shutil.copyfileobj(extracted, handle)
+                written_paths.append(target_path)
+    except Exception:
+        for path in reversed(written_paths):
+            path.unlink(missing_ok=True)
+        raise
+
+    return destination
+
+
+def collect_source_figures(source_root: Path, output_dir: Path) -> list[dict[str, Any]]:
+    root = Path(source_root).expanduser().resolve()
+    destination = Path(output_dir).expanduser()
+    destination.mkdir(parents=True, exist_ok=True)
+
+    candidates: dict[str, Path] = {}
+    for child in root.iterdir():
+        if child.is_file() and _is_supported_figure(child):
+            candidates[child.name] = child
+
+    for child in sorted(root.rglob("*")):
+        if not child.is_file() or not _is_supported_figure(child):
+            continue
+        if not _is_figure_path(child.relative_to(root)):
+            continue
+        rel_path = child.relative_to(root).as_posix()
+        candidates[rel_path] = child
+
+    figures: list[dict[str, Any]] = []
+    for rel_path, source_path in sorted(candidates.items()):
+        copied_name = _copied_name(rel_path)
+        copied_path = destination / copied_name
+        shutil.copy2(source_path, copied_path)
+        figures.append(
+            {
+                "rel_path": rel_path,
+                "media_type": "pdf" if source_path.suffix.lower() in PDF_SUFFIXES else "image",
+                "image_path": str(copied_path),
+                "source_path": str(source_path),
+                "source": "arxiv-source",
+            }
+        )
+
+    return figures
+
+
+def render_source_figure_pdfs(
+    source_figures: list[dict[str, Any]],
+    output_dir: Path,
+) -> list[dict[str, Any]]:
+    destination = Path(output_dir).expanduser()
+    destination.mkdir(parents=True, exist_ok=True)
+
+    rendered: list[dict[str, Any]] = []
+    for figure in source_figures:
+        figure_path = Path(str(figure["image_path"]))
+        if figure_path.suffix.lower() != ".pdf":
+            continue
+
+        image_name = _rendered_pdf_name(figure, figure_path)
+        image_path = destination / image_name
+        with fitz.open(figure_path) as doc:
+            page = doc.load_page(0)
+            pixmap = page.get_pixmap()
+            pixmap.save(image_path)
+
+        rendered.append(
+            {
+                **figure,
+                "media_type": "image",
+                "image_path": str(image_path),
+                "source": "pdf-figure",
+            }
+        )
+
+    return rendered
+
+
+def _extract_arxiv_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    match = ARXIV_ID_PATTERN.search(value)
+    if match is None:
+        return None
+    return match.group("id").lower()
+
+
+def _safe_member_path(member: tarfile.TarInfo) -> Path:
+    if member.issym() or member.islnk():
+        raise ValueError(f"unsafe symlink member: {member.name}")
+
+    member_path = PurePosixPath(member.name)
+    if member_path.is_absolute() or ".." in member_path.parts:
+        raise ValueError(f"unsafe tar member path: {member.name}")
+
+    return Path(*member_path.parts)
+
+
+def _is_supported_figure(path: Path) -> bool:
+    suffix = path.suffix.lower()
+    return suffix in IMAGE_SUFFIXES or suffix in PDF_SUFFIXES
+
+
+def _is_figure_path(rel_path: Path) -> bool:
+    return any(part.lower() in SOURCE_DIR_NAMES for part in rel_path.parts[:-1])
+
+
+def _copied_name(rel_path: str) -> str:
+    return rel_path.replace("/", "__")
+
+
+def _rendered_pdf_name(figure: dict[str, Any], figure_path: Path) -> str:
+    rel_path = figure.get("rel_path")
+    if isinstance(rel_path, str) and rel_path:
+        return f"{Path(_copied_name(rel_path)).stem}.png"
+    return f"{figure_path.stem}.png"

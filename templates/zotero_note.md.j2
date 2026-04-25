@@ -33,6 +33,22 @@
 
 {{ method }}
 
+## 关键图片总览
+
+{{ figure_overview }}
+
+{% for item in key_figures -%}
+### {{ item.figure_id }}
+
+- **Caption**: {{ item.caption }}
+- **Page**: {{ item.page }}
+- **Priority Score**: {{ item.priority_score }}
+- **Why It Matters**: {{ item.why_it_matters }}
+
+{{ item.analysis }}
+
+{% endfor %}
+
 ## 实验与证据
 
 {{ experiments }}

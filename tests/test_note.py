@@ -26,6 +26,21 @@ SUMMARY = {
     "extraction_warnings": [],
 }
 
+SUMMARY_WITH_FIGURES = {
+    **SUMMARY,
+    "figure_overview": "论文的关键证据主要集中在框架图和定量对比图。",
+    "key_figures": [
+        {
+            "figure_id": "fig_p1_1",
+            "caption": "Figure 1. Overall pipeline.",
+            "page": 1,
+            "priority_score": 5.2,
+            "why_it_matters": "这张图定义了整篇论文的方法对象和信息流。",
+            "analysis": "图 1 展示了从输入结构到扩散采样再到性质打分的主链路。",
+        }
+    ],
+}
+
 
 def test_render_note_contains_required_sections() -> None:
     note = render_note(METADATA, SUMMARY, generated_date="2026-04-23")
@@ -38,12 +53,28 @@ def test_render_note_contains_required_sections() -> None:
     assert "zotero://select/library/items/ABC123" in note
 
 
+def test_render_note_contains_figure_sections() -> None:
+    note = render_note(METADATA, SUMMARY_WITH_FIGURES, generated_date="2026-04-23")
+
+    assert "## 关键图片总览" in note
+    assert "### fig_p1_1" in note
+    assert "Figure 1. Overall pipeline." in note
+
+
 def test_validate_note_accepts_complete_note() -> None:
-    note = render_note(METADATA, SUMMARY, generated_date="2026-04-23")
+    note = render_note(METADATA, SUMMARY_WITH_FIGURES, generated_date="2026-04-23")
 
     errors = validate_note(note)
 
     assert errors == []
+
+
+def test_validate_note_requires_figure_overview_section() -> None:
+    note = render_note(METADATA, SUMMARY_WITH_FIGURES, generated_date="2026-04-23")
+
+    errors = validate_note(note.replace("## 关键图片总览", "## 图片"))
+
+    assert "missing_section: 关键图片总览" in errors
 
 
 def test_validate_note_rejects_missing_required_section() -> None:

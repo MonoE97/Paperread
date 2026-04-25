@@ -54,6 +54,17 @@ def test_pdf_to_note_dry_run(tmp_path: Path) -> None:
                 "key_points": ["面向固态电池材料", "结合图学习和物理约束"],
                 "research_question": "如何在材料性质预测中融合物理先验？",
                 "method": "方法结合 graph learning 和 physical constraints。",
+                "figure_overview": "关键图集中在框架图和结果对比图。",
+                "key_figures": [
+                    {
+                        "figure_id": "fig_p1_1",
+                        "caption": "Figure 1. Framework overview.",
+                        "page": 1,
+                        "priority_score": 4.8,
+                        "why_it_matters": "它定义了本文方法的核心链路。",
+                        "analysis": "该图解释了模型模块之间的依赖关系和训练信息流。",
+                    }
+                ],
                 "experiments": "实验在 held-out compositions 上验证预测精度。",
                 "contributions": ["提出物理约束预测框架", "验证泛化性能"],
                 "limitations": ["测试 PDF 是最小夹具，不代表真实论文复杂度"],
