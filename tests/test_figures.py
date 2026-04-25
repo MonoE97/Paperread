@@ -4,7 +4,7 @@ import base64
 import fitz
 import pytest
 
-from zotero_paperread.figures import _detect_captions, extract_figures
+from zotero_paperread.figures import _detect_captions, assess_image_quality, extract_figures
 from zotero_paperread.workflow import build_figure_context_markdown
 
 
@@ -494,6 +494,94 @@ def make_embedded_image_only_pdf(path: Path) -> None:
     doc.close()
 
 
+def render_quality_gate_image(path: Path, width: int, height: int, kind: str) -> None:
+    doc = fitz.open()
+    page = doc.new_page(width=width, height=height)
+
+    if kind == "tiny":
+        page.draw_rect(
+            fitz.Rect(4, 4, width - 4, height - 4),
+            color=(0, 0, 0),
+            fill=(0.8, 0.8, 0.8),
+        )
+    elif kind == "article-header":
+        page.insert_text((24, 32), "Article", fontsize=18)
+    elif kind == "formula-strip":
+        page.insert_text(
+            (64, height / 2),
+            "E = E0 + kBT ln(c/c0)",
+            fontsize=16,
+        )
+    elif kind == "plot":
+        plot_area = fitz.Rect(54, 42, width - 36, height - 42)
+        page.draw_line(plot_area.bl, plot_area.tl, color=(0, 0, 0), width=1.5)
+        page.draw_line(plot_area.bl, plot_area.br, color=(0, 0, 0), width=1.5)
+        points = [
+            fitz.Point(plot_area.x0 + 12, plot_area.y1 - 24),
+            fitz.Point(plot_area.x0 + 78, plot_area.y1 - 92),
+            fitz.Point(plot_area.x0 + 148, plot_area.y1 - 66),
+            fitz.Point(plot_area.x0 + 224, plot_area.y0 + 48),
+            fitz.Point(plot_area.x1 - 18, plot_area.y0 + 30),
+        ]
+        for start, end in zip(points, points[1:]):
+            page.draw_line(start, end, color=(0.1, 0.2, 0.8), width=3)
+        for point in points:
+            page.draw_circle(point, 4, color=(0.8, 0.1, 0.1), fill=(0.8, 0.1, 0.1))
+        page.insert_text((plot_area.x0 - 28, plot_area.y0 + 18), "y", fontsize=12)
+        page.insert_text((plot_area.x1 - 16, plot_area.y1 + 24), "x", fontsize=12)
+    else:
+        raise ValueError(f"unknown image kind: {kind}")
+
+    pixmap = page.get_pixmap(alpha=False)
+    pixmap.save(path)
+    doc.close()
+
+
+def test_assess_image_quality_flags_tiny_image(tmp_path: Path) -> None:
+    image_path = tmp_path / "tiny.png"
+    render_quality_gate_image(image_path, width=40, height=40, kind="tiny")
+
+    quality = assess_image_quality(image_path)
+
+    assert quality["status"] == "poor"
+    assert "image_too_small" in quality["warnings"]
+    assert quality["width"] == 40
+    assert quality["height"] == 40
+
+
+def test_assess_image_quality_flags_normal_size_text_only_header(tmp_path: Path) -> None:
+    image_path = tmp_path / "article-header.png"
+    render_quality_gate_image(image_path, width=480, height=260, kind="article-header")
+
+    quality = assess_image_quality(image_path)
+
+    assert quality["status"] == "poor"
+    assert quality["warnings"] == ["image_content_area_too_sparse"]
+    assert quality["content_bbox_area_ratio"] < 0.12
+
+
+def test_assess_image_quality_flags_formula_strip(tmp_path: Path) -> None:
+    image_path = tmp_path / "formula-strip.png"
+    render_quality_gate_image(image_path, width=520, height=240, kind="formula-strip")
+
+    quality = assess_image_quality(image_path)
+
+    assert quality["status"] == "poor"
+    assert quality["warnings"] == ["image_content_area_too_sparse"]
+    assert quality["content_bbox_area_ratio"] < 0.12
+
+
+def test_assess_image_quality_accepts_normal_plot_like_image(tmp_path: Path) -> None:
+    image_path = tmp_path / "plot.png"
+    render_quality_gate_image(image_path, width=520, height=320, kind="plot")
+
+    quality = assess_image_quality(image_path)
+
+    assert quality["status"] == "ok"
+    assert quality["warnings"] == []
+    assert quality["content_bbox_area_ratio"] >= 0.12
+
+
 def test_extract_figures_uses_tight_graphic_crop_and_1_based_pages(tmp_path: Path) -> None:
     pdf_path = tmp_path / "figures.pdf"
     output_dir = tmp_path / "images"
@@ -687,12 +775,14 @@ def test_build_figure_context_markdown_includes_caption_confidence() -> None:
                     "image_path": "/tmp/figure.png",
                     "priority_score": 0.05,
                     "needs_fallback": False,
+                    "visual_quality": {"status": "ok", "warnings": []},
                 }
             ],
         }
     )
 
     assert "- Caption Confidence: 0.72" in markdown
+    assert '- Visual Quality: {"status": "ok", "warnings": []}' in markdown
 
 
 def test_extract_figures_does_not_backfill_when_multiple_same_page_captions_match(
@@ -1010,6 +1100,9 @@ def test_extract_figures_surfaces_low_confidence_geometry(tmp_path: Path) -> Non
     assert figure["needs_fallback"] is True
     assert figure["extraction_confidence"] < 0.5
     assert figure["fallback_reason"] == "low_confidence_geometry"
+    assert figure["visual_quality"]["status"] == "poor"
+    assert "image_too_small" in figure["visual_quality"]["warnings"]
+    assert f"figure_visual_quality:{figure['figure_id']}:image_too_small" in payload["warnings"]
 
 
 def test_extract_figures_ranks_source_figures_above_embedded_image_supplements_when_scores_tie(

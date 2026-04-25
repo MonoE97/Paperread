@@ -62,6 +62,13 @@ CAPTION_BUFFER = 8.0
 MIN_REGION_SIDE = 4.0
 MAX_DEGENERATE_ASPECT = 30.0
 LOW_CONFIDENCE_THRESHOLD = 0.5
+QUALITY_MIN_WIDTH = 80
+QUALITY_MIN_HEIGHT = 80
+QUALITY_MIN_AREA = 10000
+QUALITY_LOW_INFORMATION_RATIO = 0.001
+QUALITY_LOW_INFORMATION_PIXELS = 64
+QUALITY_SPARSE_CONTENT_BBOX_RATIO = 0.12
+QUALITY_BACKGROUND_DELTA = 24
 CAPTION_CONTINUATION_START = re.compile(r"^\s*[\(\[]?[A-Za-z0-9]")
 LABEL_ONLY_CAPTION_CONTINUATION_START = re.compile(r"^\s*[\(\[]?[A-Za-z0-9]")
 CAPTION_TERMINAL_PUNCTUATION = (".", "!", "?", ":")
@@ -167,6 +174,14 @@ def extract_figures(
     ranking_pool.sort(key=_ranking_key)
 
     selected = ranking_pool[: max(top_k, 0)]
+    for item in selected:
+        quality = assess_image_quality(Path(item["image_path"]))
+        item["visual_quality"] = quality
+        for warning in quality["warnings"]:
+            item["needs_fallback"] = True
+            item["fallback_reason"] = item.get("fallback_reason") or "visual_quality"
+            warnings.append(f"figure_visual_quality:{item['figure_id']}:{warning}")
+
     if enable_ocr_fallback and any(item["needs_fallback"] for item in selected):
         if not ocr_fallback_available():
             warnings.append("ocr_fallback_unavailable")
@@ -177,12 +192,152 @@ def extract_figures(
         "candidate_count": len(ranking_pool),
         "selected_figures": selected,
         "source_attempts": source_attempts,
-        "warnings": warnings,
+        "warnings": _dedupe_strings(warnings),
     }
 
 
 def ocr_fallback_available() -> bool:
     return False
+
+
+def assess_image_quality(image_path: Path) -> dict[str, Any]:
+    """Assess whether a rendered figure crop contains enough visual content."""
+    try:
+        pixmap = _load_quality_pixmap(Path(image_path).expanduser())
+    except Exception:
+        return {
+            "status": "poor",
+            "warnings": ["image_unreadable"],
+            "width": 0,
+            "height": 0,
+            "content_ratio": 0.0,
+            "content_bbox_area_ratio": 0.0,
+            "content_pixels": 0,
+            "content_bbox": [],
+        }
+
+    width = int(pixmap.width)
+    height = int(pixmap.height)
+    image_area = max(width * height, 0)
+    x0, y0, x1, y1, content_pixels = _content_pixel_bbox(pixmap)
+
+    if content_pixels > 0:
+        content_width = max(x1 - x0 + 1, 0)
+        content_height = max(y1 - y0 + 1, 0)
+        content_bbox_area = content_width * content_height
+        content_bbox = [x0, y0, x1, y1]
+    else:
+        content_bbox_area = 0
+        content_bbox = []
+
+    content_ratio = content_pixels / image_area if image_area > 0 else 0.0
+    content_bbox_area_ratio = content_bbox_area / image_area if image_area > 0 else 0.0
+
+    warnings: list[str] = []
+    if width < QUALITY_MIN_WIDTH or height < QUALITY_MIN_HEIGHT or image_area < QUALITY_MIN_AREA:
+        warnings.append("image_too_small")
+    if (
+        content_pixels < QUALITY_LOW_INFORMATION_PIXELS
+        or content_ratio < QUALITY_LOW_INFORMATION_RATIO
+    ):
+        warnings.append("image_low_information")
+    if (
+        "image_too_small" not in warnings
+        and "image_low_information" not in warnings
+        and content_bbox_area_ratio < QUALITY_SPARSE_CONTENT_BBOX_RATIO
+    ):
+        warnings.append("image_content_area_too_sparse")
+
+    warnings = _dedupe_strings(warnings)
+    return {
+        "status": "poor" if warnings else "ok",
+        "warnings": warnings,
+        "width": width,
+        "height": height,
+        "content_ratio": round(content_ratio, 6),
+        "content_bbox_area_ratio": round(content_bbox_area_ratio, 6),
+        "content_pixels": content_pixels,
+        "content_bbox": content_bbox,
+    }
+
+
+def _load_quality_pixmap(image_path: Path) -> fitz.Pixmap:
+    if image_path.suffix.lower() == ".pdf":
+        with fitz.open(image_path) as doc:
+            if doc.page_count < 1:
+                raise ValueError("PDF has no pages")
+            return doc.load_page(0).get_pixmap(alpha=False)
+    return fitz.Pixmap(str(image_path))
+
+
+def _content_pixel_bbox(pixmap: fitz.Pixmap) -> tuple[int, int, int, int, int]:
+    width = int(pixmap.width)
+    height = int(pixmap.height)
+    if width <= 0 or height <= 0:
+        return (0, 0, 0, 0, 0)
+
+    stride = int(pixmap.n)
+    color_components = stride - 1 if pixmap.alpha and stride > 1 else stride
+    if stride <= 0 or color_components <= 0:
+        return (0, 0, 0, 0, 0)
+
+    samples = pixmap.samples
+    background = _background_pixel(samples, width, height, stride, color_components)
+    x0 = width
+    y0 = height
+    x1 = -1
+    y1 = -1
+    count = 0
+
+    for y in range(height):
+        row_offset = y * width * stride
+        for x in range(width):
+            offset = row_offset + (x * stride)
+            if _pixel_delta(samples, offset, color_components, background) <= QUALITY_BACKGROUND_DELTA:
+                continue
+            count += 1
+            x0 = min(x0, x)
+            y0 = min(y0, y)
+            x1 = max(x1, x)
+            y1 = max(y1, y)
+
+    if count == 0:
+        return (0, 0, 0, 0, 0)
+    return (x0, y0, x1, y1, count)
+
+
+def _background_pixel(
+    samples: bytes,
+    width: int,
+    height: int,
+    stride: int,
+    color_components: int,
+) -> tuple[int, ...]:
+    positions = (
+        (0, 0),
+        (max(width - 1, 0), 0),
+        (0, max(height - 1, 0)),
+        (max(width - 1, 0), max(height - 1, 0)),
+    )
+    pixels = []
+    for x, y in positions:
+        offset = ((y * width) + x) * stride
+        pixels.append(_pixel_tuple(samples, offset, color_components))
+    return tuple(sorted(values)[len(values) // 2] for values in zip(*pixels))
+
+
+def _pixel_tuple(samples: bytes, offset: int, color_components: int) -> tuple[int, ...]:
+    return tuple(int(value) for value in samples[offset : offset + color_components])
+
+
+def _pixel_delta(
+    samples: bytes,
+    offset: int,
+    color_components: int,
+    background: tuple[int, ...],
+) -> int:
+    pixel = samples[offset : offset + color_components]
+    return max(abs(int(value) - background[index]) for index, value in enumerate(pixel))
 
 
 def _collect_source_candidates(
@@ -704,6 +859,10 @@ def _dedupe_regions(regions: list[fitz.Rect]) -> list[fitz.Rect]:
         seen.add(key)
         deduped.append(region)
     return deduped
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values))
 
 
 def _line_text(line: dict) -> str:
