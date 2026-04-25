@@ -1,3 +1,4 @@
+import zotero_paperread.note as note_module
 from zotero_paperread.note import render_note, validate_note
 
 
@@ -91,6 +92,31 @@ def test_render_note_contains_required_sections() -> None:
     assert "## 方法拆解" in note
     assert "## AI+物理/材料启发" in note
     assert "zotero://select/library/items/ABC123" in note
+
+
+def test_render_note_uses_date_only_for_first_version_suffix() -> None:
+    note = render_note(METADATA, SUMMARY, generated_date="2026-04-25", version_suffix="")
+
+    assert "# [Codex Summary] A Useful Materials Paper - 2026-04-25" in note
+
+
+def test_render_note_appends_same_day_version_suffix() -> None:
+    note = render_note(METADATA, SUMMARY, generated_date="2026-04-25", version_suffix=" (v2)")
+
+    assert "# [Codex Summary] A Useful Materials Paper - 2026-04-25 (v2)" in note
+
+
+def test_next_same_day_version_suffix_skips_existing_versions() -> None:
+    suffix = note_module.next_same_day_version_suffix(
+        [
+            "[Codex Summary] A Useful Materials Paper - 2026-04-25",
+            "[Codex Summary] A Useful Materials Paper - 2026-04-25 (v2)",
+        ],
+        paper_title="A Useful Materials Paper",
+        generated_date="2026-04-25",
+    )
+
+    assert suffix == " (v3)"
 
 
 def test_render_note_contains_figure_sections() -> None:

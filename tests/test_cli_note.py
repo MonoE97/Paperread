@@ -73,6 +73,49 @@ def test_finalize_note_command_writes_and_validates_markdown(tmp_path: Path) -> 
     assert "note_valid" in result.stdout
 
 
+def test_finalize_note_command_applies_version_suffix(tmp_path: Path) -> None:
+    metadata_path = tmp_path / "metadata.json"
+    summary_path = tmp_path / "summary.json"
+    output_path = tmp_path / "note.md"
+    write_json(metadata_path, {"key": "ABC123", "title": "Paper", "creators": "A", "date": "2026"})
+    write_json(
+        summary_path,
+        {
+            "one_sentence_summary": "一句话总结。",
+            "abstract_translation": "摘要翻译。",
+            "key_points": ["要点"],
+            "research_question": "问题",
+            "method": "方法",
+            "experiments": "实验",
+            "contributions": ["贡献"],
+            "limitations": ["局限"],
+            "ai4s_relevance": "启发",
+            "follow_up_keywords": ["keyword"],
+            "quality_score": "8/10",
+            "extraction_warnings": [],
+        },
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "finalize-note",
+            str(metadata_path),
+            str(summary_path),
+            "--output",
+            str(output_path),
+            "--generated-date",
+            "2026-04-25",
+            "--version-suffix",
+            " (v2)",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "# [Codex Summary] Paper - 2026-04-25 (v2)" in output_path.read_text(encoding="utf-8")
+
+
 def test_finalize_note_command_accepts_trusted_note_fields(tmp_path: Path) -> None:
     metadata_path = tmp_path / "metadata.json"
     summary_path = tmp_path / "summary.json"

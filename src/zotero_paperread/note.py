@@ -158,7 +158,47 @@ def build_note_labels(summary: dict[str, Any]) -> list[str]:
     return labels
 
 
-def render_note(metadata: dict[str, Any], summary: dict[str, Any], generated_date: str | None = None) -> str:
+def build_note_title(
+    metadata: dict[str, Any],
+    generated_date: str,
+    *,
+    version_suffix: str = "",
+) -> str:
+    """Build the Zotero child-note title used by the Markdown template."""
+    title = str(metadata.get("title", "")).strip()
+    return f"[Codex Summary] {title} - {generated_date}{version_suffix}"
+
+
+def next_same_day_version_suffix(
+    existing_titles: list[str],
+    *,
+    paper_title: str,
+    generated_date: str,
+) -> str:
+    """Return the next same-day title suffix without overwriting old notes."""
+    base = f"[Codex Summary] {paper_title} - {generated_date}"
+    used_versions: set[int] = set()
+    pattern = re.compile(rf"^{re.escape(base)} \(v(?P<version>\d+)\)$")
+    for title in existing_titles:
+        if title == base:
+            used_versions.add(1)
+            continue
+        match = pattern.match(title)
+        if match:
+            used_versions.add(int(match.group("version")))
+    version = 1
+    while version in used_versions:
+        version += 1
+    return "" if version == 1 else f" (v{version})"
+
+
+def render_note(
+    metadata: dict[str, Any],
+    summary: dict[str, Any],
+    generated_date: str | None = None,
+    *,
+    version_suffix: str = "",
+) -> str:
     """Render a Zotero/Better Notes friendly Markdown note."""
     env = Environment(
         loader=FileSystemLoader(TEMPLATE_DIR),
@@ -168,8 +208,10 @@ def render_note(metadata: dict[str, Any], summary: dict[str, Any], generated_dat
         lstrip_blocks=True,
     )
     template = env.get_template("zotero_note.md.j2")
+    resolved_date = generated_date or date.today().isoformat()
     context = {
-        "generated_date": generated_date or date.today().isoformat(),
+        "note_title": build_note_title(metadata, resolved_date, version_suffix=version_suffix),
+        "generated_date": resolved_date,
         "key": metadata.get("key", ""),
         "title": metadata.get("title", ""),
         "creators": metadata.get("creators", ""),

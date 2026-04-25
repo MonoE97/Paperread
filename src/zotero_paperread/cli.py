@@ -38,8 +38,14 @@ def render_note_to_path(
     summary_json: Path,
     output: Path,
     generated_date: str | None = None,
+    version_suffix: str = "",
 ) -> None:
-    note = render_note(read_json(metadata_json), read_json(summary_json), generated_date=generated_date)
+    note = render_note(
+        read_json(metadata_json),
+        read_json(summary_json),
+        generated_date=generated_date,
+        version_suffix=version_suffix,
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(note, encoding="utf-8")
     console.print(f"Wrote note Markdown: {output}")
@@ -148,9 +154,16 @@ def render_note_command(
     summary_json: Path,
     output: Path = typer.Option(..., "--output", "-o", help="Write Markdown note to this file."),
     generated_date: str | None = typer.Option(None, "--generated-date", help="Override generated date."),
+    version_suffix: str = typer.Option("", "--version-suffix", help="Append a suffix such as ' (v2)' to the note title."),
 ) -> None:
     """Render a Zotero note from metadata and summary JSON."""
-    render_note_to_path(metadata_json, summary_json, output, generated_date=generated_date)
+    render_note_to_path(
+        metadata_json,
+        summary_json,
+        output,
+        generated_date=generated_date,
+        version_suffix=version_suffix,
+    )
 
 
 @app.command("finalize-note")
@@ -159,9 +172,16 @@ def finalize_note_command(
     summary_json: Path,
     output: Path = typer.Option(..., "--output", "-o", help="Write Markdown note to this file."),
     generated_date: str | None = typer.Option(None, "--generated-date", help="Override generated date."),
+    version_suffix: str = typer.Option("", "--version-suffix", help="Append a suffix such as ' (v2)' to the note title."),
 ) -> None:
     """Render and validate a Zotero note sequentially."""
-    render_note_to_path(metadata_json, summary_json, output, generated_date=generated_date)
+    render_note_to_path(
+        metadata_json,
+        summary_json,
+        output,
+        generated_date=generated_date,
+        version_suffix=version_suffix,
+    )
     validate_note_path_or_exit(output)
 
 

@@ -70,6 +70,11 @@ uv run zotero-paperread create-run --title "<title>" --item-key "<item_key>"
    - 如果存在标题以 `[Codex Summary]` 开头、包含 `codex-summary` tag、或明显是本 workflow 创建的 Codex summary note，则默认停止，不继续抽取、总结或写入。
    - 停止时告诉用户已存在的 Codex note 标题和 key；如果无法取得标题，至少返回 note key。
    - 只有当用户明确要求“继续分析”“重新生成”“强制分析”“即使已有也继续”等动作时，才继续执行。继续时仍然创建新版本，不覆盖旧 note。
+   - 如果用户明确要求继续创建新版本，根据已有 note 标题计算同日版本后缀：
+     - 当日第一版：`[Codex Summary] <paper title> - YYYY-MM-DD`
+     - 当日第二版：`[Codex Summary] <paper title> - YYYY-MM-DD (v2)`
+     - 当日第三版：`[Codex Summary] <paper title> - YYYY-MM-DD (v3)`
+   - 调用 `finalize-note` 时用 `--version-suffix` 传入后缀；当日第一版传空后缀或省略该参数。
 
 5. 准备 bundle：
    - 运行：
@@ -200,7 +205,7 @@ uv run zotero-paperread preview-note <run_dir>/note.md
      - 没有待处理的 `needs_improvement`
      - 已完成 `preview-note`
    - 如果 `review_status` 为 `failed`，停止并报告审查问题，不写入 Zotero。
-   - note 标题由模板生成：`[Codex Summary] <paper title> - YYYY-MM-DD`。
+   - note 标题由模板生成：`[Codex Summary] <paper title> - YYYY-MM-DD`，同日重复创建时追加 ` (v2)`、` (v3)` 等后缀。
    - 调用 `write_note(action="create", parentKey=<item key>, content=<note markdown>, tags=["codex-summary","paper-summary"])`。
    - 成功后回读一次 `get_item_details`，确认子笔记已经挂载到目标条目下。
 
