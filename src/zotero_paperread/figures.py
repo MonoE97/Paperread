@@ -24,6 +24,14 @@ CAPTION_SCORE_PATTERNS = (
     (re.compile(r"\bresults?\b"), 2.0),
 )
 
+SCIENTIFIC_FIGURE_SCORE_PATTERNS = (
+    (re.compile(r"\bcapacitance\b"), 3.0),
+    (re.compile(r"\bcharge (density|response)\b"), 3.0),
+    (re.compile(r"\bconcentration distributions?\b"), 2.5),
+    (re.compile(r"\bpmfs?\b"), 2.5),
+    (re.compile(r"\bions?\b|\bcations?\b|\banions?\b"), 1.0),
+)
+
 CAPTION_PENALTY_PATTERNS = (
     (re.compile(r"\bqualitative\b"), -1.0),
     (re.compile(r"\bexamples?\b"), -0.5),
@@ -839,12 +847,18 @@ def _priority_score(caption: str, bbox: fitz.Rect) -> float:
         if pattern.search(lowered):
             score += weight
 
+    score += _scientific_caption_score(lowered)
+
     for pattern, weight in CAPTION_PENALTY_PATTERNS:
         if pattern.search(lowered):
             score += weight
 
     score += min(bbox.get_area() / 100000.0, 2.0)
     return round(score, 4)
+
+
+def _scientific_caption_score(caption: str) -> float:
+    return sum(weight for pattern, weight in SCIENTIFIC_FIGURE_SCORE_PATTERNS if pattern.search(caption))
 
 
 def _normalize_page(value: Any) -> int:

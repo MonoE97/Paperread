@@ -53,6 +53,79 @@ def make_ranking_pdf(path: Path) -> None:
     doc.close()
 
 
+def make_charge_response_like_pdf(path: Path) -> None:
+    doc = fitz.open()
+    page = doc.new_page(width=560, height=720)
+    page.draw_rect(fitz.Rect(40, 40, 510, 210), color=(0, 0, 0), fill=(0.96, 0.96, 0.96))
+    page.insert_textbox(
+        fitz.Rect(40, 230, 510, 270),
+        "Figure 1. Overview results from representative configurations.",
+        fontsize=12,
+    )
+    page.draw_rect(fitz.Rect(40, 300, 510, 470), color=(0, 0, 0), fill=(0.96, 0.96, 0.96))
+    page.insert_textbox(
+        fitz.Rect(40, 490, 510, 530),
+        "Figure 2. Comparison results from repeated simulations.",
+        fontsize=12,
+    )
+    page.draw_rect(fitz.Rect(55, 545, 245, 650), color=(0, 0, 0), fill=(0.95, 0.95, 0.95))
+    page.draw_rect(fitz.Rect(285, 545, 475, 650), color=(0, 0, 0), fill=(0.95, 0.95, 0.95))
+    for x0 in (80, 310):
+        page.draw_line(fitz.Point(x0, 625), fitz.Point(x0 + 135, 565), color=(0.2, 0.2, 0.8), width=2)
+        page.draw_line(fitz.Point(x0, 625), fitz.Point(x0 + 135, 600), color=(0.8, 0.2, 0.2), width=2)
+    page.insert_textbox(
+        fitz.Rect(55, 665, 475, 715),
+        "Figure 3. (a) Response of charge density averaged over the xy plane and (b) the cell potential-dependent differential capacitance.",
+        fontsize=12,
+    )
+    doc.save(path)
+    doc.close()
+
+
+def make_ion_distribution_like_pdf(path: Path) -> None:
+    doc = fitz.open()
+    page = doc.new_page(width=560, height=820)
+    page.draw_rect(fitz.Rect(40, 40, 510, 210), color=(0, 0, 0), fill=(0.96, 0.96, 0.96))
+    page.insert_textbox(
+        fitz.Rect(40, 230, 510, 270),
+        "Figure 1. Overview results from representative configurations.",
+        fontsize=12,
+    )
+    page.draw_rect(fitz.Rect(40, 300, 510, 470), color=(0, 0, 0), fill=(0.96, 0.96, 0.96))
+    page.insert_textbox(
+        fitz.Rect(40, 490, 510, 530),
+        "Figure 2. Comparison results from repeated simulations.",
+        fontsize=12,
+    )
+    panel_rects = [
+        fitz.Rect(45, 550, 235, 625),
+        fitz.Rect(285, 550, 475, 625),
+        fitz.Rect(45, 640, 235, 715),
+        fitz.Rect(285, 640, 475, 715),
+    ]
+    for rect in panel_rects:
+        page.draw_rect(rect, color=(0, 0, 0), fill=(0.96, 0.96, 0.96))
+        page.draw_line(
+            fitz.Point(rect.x0 + 20, rect.y1 - 20),
+            fitz.Point(rect.x1 - 20, rect.y0 + 25),
+            color=(0.1, 0.5, 0.1),
+            width=2,
+        )
+        page.draw_line(
+            fitz.Point(rect.x0 + 20, rect.y1 - 30),
+            fitz.Point(rect.x1 - 20, rect.y0 + 60),
+            color=(0.7, 0.2, 0.2),
+            width=2,
+        )
+    page.insert_textbox(
+        fitz.Rect(45, 725, 475, 805),
+        "Figure 4. Concentration distributions and PMFs of cations (Na+) and anions (Cl-) as a function of the distance to the electrode.",
+        fontsize=12,
+    )
+    doc.save(path)
+    doc.close()
+
+
 def make_multi_panel_pdf(path: Path) -> None:
     doc = fitz.open()
     page = doc.new_page(width=420, height=320)
@@ -364,6 +437,28 @@ def test_extract_figures_ranks_pipeline_then_table_then_qualitative(tmp_path: Pa
     ]
     assert figures[0]["page"] == 1
     assert figures[0]["priority_score"] > figures[1]["priority_score"]
+
+
+def test_extract_figures_prefers_charge_response_plot_with_caption(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "charge-response.pdf"
+    output_dir = tmp_path / "images"
+    make_charge_response_like_pdf(pdf_path)
+
+    payload = extract_figures(pdf_path, output_dir, top_k=2)
+
+    captions = [figure["caption"] for figure in payload["selected_figures"]]
+    assert any("Figure 3." in caption for caption in captions)
+
+
+def test_extract_figures_prefers_ion_distribution_plot_with_caption(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "ion-distribution.pdf"
+    output_dir = tmp_path / "images"
+    make_ion_distribution_like_pdf(pdf_path)
+
+    payload = extract_figures(pdf_path, output_dir, top_k=2)
+
+    captions = [figure["caption"] for figure in payload["selected_figures"]]
+    assert any("Figure 4." in caption for caption in captions)
 
 
 def test_extract_figures_unions_multi_panel_regions(tmp_path: Path) -> None:
