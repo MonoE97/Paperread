@@ -8,7 +8,7 @@ import typer
 from rich.console import Console
 
 from zotero_paperread.figures import extract_figures
-from zotero_paperread.note import render_note, validate_note
+from zotero_paperread.note import render_note, validate_note, validate_trusted_summary
 from zotero_paperread.pdf_extract import extract_pdf
 from zotero_paperread.runs import allocate_run_dir, write_run_manifest
 from zotero_paperread.workflow import prepare_item_bundle
@@ -240,6 +240,17 @@ def validate_summary_json_command(summary_json: Path) -> None:
     """Check that summary JSON is readable and has an object at the top level."""
     read_json_or_exit(summary_json, label="summary JSON")
     console.print("summary_json_readable_object")
+
+
+@app.command("validate-trusted-summary")
+def validate_trusted_summary_command(summary_json: Path) -> None:
+    """Validate semantic write-readiness fields in summary JSON."""
+    errors = validate_trusted_summary(read_json_or_exit(summary_json, label="summary JSON"))
+    if errors:
+        for error in errors:
+            console.print(f"trusted_summary_invalid: {error}")
+        raise typer.Exit(1)
+    console.print("trusted_summary_valid")
 
 
 @app.command("preview-note")

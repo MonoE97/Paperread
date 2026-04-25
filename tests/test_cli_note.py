@@ -327,3 +327,102 @@ def test_next_version_suffix_command_reads_item_details(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert result.stdout == " (v3)\n"
+
+
+def test_validate_trusted_summary_fails_without_review_gate(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    write_json(
+        summary_path,
+        {
+            "one_sentence_summary": "ok",
+            "paper_type": "research_article",
+            "trust_status": "usable_with_caveats",
+            "review_status": "not_reviewed",
+            "evidence_summary": [],
+        },
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["validate-trusted-summary", str(summary_path)])
+
+    assert result.exit_code == 1
+    assert "trusted_summary_invalid:" in result.stdout
+    assert "review_status must be passed or passed_with_caveats" in result.stdout
+    assert "evidence_summary must contain at least one claim" in result.stdout
+
+
+def test_validate_trusted_summary_fails_empty_core_content(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    write_json(
+        summary_path,
+        {
+            "one_sentence_summary": "",
+            "abstract_translation": "",
+            "key_points": [],
+            "research_question": "",
+            "method": "",
+            "experiments": "",
+            "contributions": [],
+            "limitations": [],
+            "ai4s_relevance": "",
+            "follow_up_keywords": [],
+            "paper_type": "method_paper",
+            "trust_status": "usable_with_caveats",
+            "trust_rationale": "Evidence was checked.",
+            "review_status": "passed",
+            "evidence_summary": [
+                {
+                    "claim": "The method is supported.",
+                    "evidence": [{"type": "text", "locator": "context.md page 2", "summary": "method evidence"}],
+                    "confidence": "high",
+                }
+            ],
+            "improvement_status": "not_needed",
+        },
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["validate-trusted-summary", str(summary_path)])
+
+    assert result.exit_code == 1
+    assert "one_sentence_summary is required" in result.stdout
+    assert "method is required" in result.stdout
+    assert "key_points must contain at least one item" in result.stdout
+
+
+def test_validate_trusted_summary_passes_ready_summary(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    write_json(
+        summary_path,
+        {
+            "one_sentence_summary": "This paper proposes a field-aware ML workflow.",
+            "abstract_translation": "本文提出一个有限电场机器学习工作流。",
+            "key_points": ["Field-aware forces", "Charge response model"],
+            "research_question": "How can finite-field interface simulations be accelerated?",
+            "method": "The method combines force learning and charge-response learning.",
+            "experiments": "The paper validates the workflow on Au/NaCl interfaces.",
+            "contributions": ["ML finite-field dynamics", "ML charge response"],
+            "limitations": ["Single benchmark chemistry"],
+            "ai4s_relevance": "The decomposition is useful for field-driven AI4S simulations.",
+            "follow_up_keywords": ["finite-field MD"],
+            "paper_type": "method_paper",
+            "trust_status": "usable_with_caveats",
+            "trust_rationale": "Text extraction is complete and figure evidence is caveated.",
+            "review_status": "passed_with_caveats",
+            "evidence_summary": [
+                {
+                    "claim": "The method is supported.",
+                    "evidence": [{"type": "text", "locator": "context.md page 2", "summary": "method evidence"}],
+                    "confidence": "high",
+                }
+            ],
+            "review_issues": [],
+            "improvement_status": "completed",
+        },
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["validate-trusted-summary", str(summary_path)])
+
+    assert result.exit_code == 0
+    assert "trusted_summary_valid" in result.stdout

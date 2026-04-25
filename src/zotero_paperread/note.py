@@ -41,6 +41,21 @@ VALID_PAPER_TYPES = {
 VALID_TRUST_STATUSES = {"trusted", "usable_with_caveats", "metadata_only", "needs_manual_review"}
 VALID_REVIEW_STATUSES = {"not_reviewed", "passed", "passed_with_caveats", "failed"}
 VALID_IMPROVEMENT_STATUSES = {"not_needed", "needed", "completed", "blocked"}
+WRITE_READY_REVIEW_STATUSES = {"passed", "passed_with_caveats"}
+REQUIRED_WRITE_READY_TEXT_FIELDS = {
+    "one_sentence_summary": "one_sentence_summary is required",
+    "abstract_translation": "abstract_translation is required",
+    "research_question": "research_question is required",
+    "method": "method is required",
+    "experiments": "experiments is required",
+    "ai4s_relevance": "ai4s_relevance is required",
+}
+REQUIRED_WRITE_READY_LIST_FIELDS = {
+    "key_points": "key_points must contain at least one item",
+    "contributions": "contributions must contain at least one item",
+    "limitations": "limitations must contain at least one item",
+    "follow_up_keywords": "follow_up_keywords must contain at least one item",
+}
 
 
 def safe_choice(value: Any, allowed: set[str], default: str) -> str:
@@ -182,6 +197,51 @@ def clean_improvement_notes(summary: dict[str, Any]) -> list[dict[str, str]]:
             }
         )
     return cleaned
+
+
+def validate_trusted_summary(summary: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+
+    paper_type = safe_choice(summary.get("paper_type"), VALID_PAPER_TYPES, "unknown")
+    if paper_type == "unknown":
+        errors.append("paper_type must be a known paper type")
+
+    trust_status = safe_choice(summary.get("trust_status"), VALID_TRUST_STATUSES, "needs_manual_review")
+    if trust_status in {"metadata_only", "needs_manual_review"}:
+        errors.append("trust_status is not write-ready")
+
+    review_status = safe_choice(summary.get("review_status"), VALID_REVIEW_STATUSES, "not_reviewed")
+    if review_status not in WRITE_READY_REVIEW_STATUSES:
+        errors.append("review_status must be passed or passed_with_caveats")
+
+    if not str(summary.get("trust_rationale", "")).strip():
+        errors.append("trust_rationale is required")
+
+    for field_name, error_message in REQUIRED_WRITE_READY_TEXT_FIELDS.items():
+        value = flatten_inline_markdown_text(str(summary.get(field_name, "")))
+        if not value:
+            errors.append(error_message)
+
+    for field_name, error_message in REQUIRED_WRITE_READY_LIST_FIELDS.items():
+        if not clean_string_list(summary.get(field_name, [])):
+            errors.append(error_message)
+
+    evidence = clean_evidence_summary(summary)
+    if not evidence:
+        errors.append("evidence_summary must contain at least one claim")
+    for index, item in enumerate(evidence, start=1):
+        if not item["evidence"]:
+            errors.append(f"evidence_summary[{index}] must include at least one evidence locator")
+
+    improvement_status = safe_choice(
+        summary.get("improvement_status"),
+        VALID_IMPROVEMENT_STATUSES,
+        "needed",
+    )
+    if improvement_status in {"needed", "blocked"}:
+        errors.append("improvement_status must not be needed or blocked for write-through")
+
+    return errors
 
 
 def normalize_note_label(value: Any) -> str | None:
