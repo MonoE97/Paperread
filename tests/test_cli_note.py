@@ -552,3 +552,29 @@ def test_validate_trusted_summary_passes_ready_summary(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "trusted_summary_valid" in result.stdout
+
+
+def test_apply_review_command_updates_summary(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    review_path = tmp_path / "review.json"
+    write_json(summary_path, {"one_sentence_summary": "ok", "review_status": "not_reviewed"})
+    write_json(
+        review_path,
+        {
+            "review_status": "passed",
+            "review_issues": [],
+            "trust_status_recommendation": "trusted",
+            "needs_improvement": False,
+            "improvement_requests": [],
+        },
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["apply-review", str(summary_path), str(review_path)])
+
+    assert result.exit_code == 0
+    updated = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert updated["review_status"] == "passed"
+    assert updated["trust_status"] == "trusted"
+    assert updated["improvement_status"] == "not_needed"
+    assert updated["improvement_notes"] == []

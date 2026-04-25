@@ -1,0 +1,92 @@
+from zotero_paperread.review import apply_review_to_summary, review_allows_write
+
+
+def test_apply_review_to_summary_copies_gate_fields() -> None:
+    summary = {"one_sentence_summary": "ok", "review_status": "not_reviewed"}
+    review = {
+        "review_status": "passed_with_caveats",
+        "review_issues": [{"severity": "low", "issue": "minor", "suggested_fix": "none"}],
+        "trust_status_recommendation": "usable_with_caveats",
+        "needs_improvement": False,
+        "improvement_requests": [],
+    }
+
+    updated = apply_review_to_summary(summary, review)
+
+    assert updated["review_status"] == "passed_with_caveats"
+    assert updated["review_issues"] == review["review_issues"]
+    assert updated["trust_status"] == "usable_with_caveats"
+    assert updated["improvement_status"] == "not_needed"
+
+
+def test_apply_review_to_summary_clears_stale_improvement_state() -> None:
+    summary = {
+        "one_sentence_summary": "ok",
+        "review_status": "failed",
+        "improvement_status": "needed",
+        "improvement_notes": [{"issue": "Old issue", "action": "", "source": "previous review"}],
+    }
+    review = {
+        "review_status": "passed",
+        "review_issues": [],
+        "trust_status_recommendation": "trusted",
+        "needs_improvement": False,
+        "improvement_requests": [],
+    }
+
+    updated = apply_review_to_summary(summary, review)
+
+    assert updated["review_status"] == "passed"
+    assert updated["improvement_status"] == "not_needed"
+    assert updated["improvement_notes"] == []
+
+
+def test_apply_review_to_summary_marks_needed_improvement() -> None:
+    summary = {"one_sentence_summary": "ok"}
+    review = {
+        "review_status": "failed",
+        "review_issues": [{"severity": "high", "issue": "missing evidence"}],
+        "trust_status_recommendation": "needs_manual_review",
+        "needs_improvement": True,
+        "improvement_requests": ["Add evidence locators."],
+    }
+
+    updated = apply_review_to_summary(summary, review)
+
+    assert updated["review_status"] == "failed"
+    assert updated["trust_status"] == "needs_manual_review"
+    assert updated["improvement_status"] == "needed"
+    assert updated["improvement_notes"] == [
+        {
+            "issue": "Add evidence locators.",
+            "action": "",
+            "source": "review.json",
+        }
+    ]
+
+
+def test_apply_review_to_summary_preserves_completed_improvement_state() -> None:
+    summary = {
+        "one_sentence_summary": "ok",
+        "improvement_status": "completed",
+        "improvement_notes": [{"issue": "Missing locator", "action": "Added page 2.", "source": "review.json"}],
+    }
+    review = {
+        "review_status": "passed",
+        "review_issues": [],
+        "trust_status_recommendation": "trusted",
+        "needs_improvement": False,
+        "improvement_requests": [],
+    }
+
+    updated = apply_review_to_summary(summary, review)
+
+    assert updated["improvement_status"] == "completed"
+    assert updated["improvement_notes"] == summary["improvement_notes"]
+
+
+def test_review_allows_write() -> None:
+    assert review_allows_write({"review_status": "passed", "needs_improvement": False}) is True
+    assert review_allows_write({"review_status": "passed_with_caveats", "needs_improvement": False}) is True
+    assert review_allows_write({"review_status": "failed", "needs_improvement": False}) is False
+    assert review_allows_write({"review_status": "passed", "needs_improvement": True}) is False

@@ -10,6 +10,7 @@ from rich.console import Console
 from zotero_paperread.figures import extract_figures
 from zotero_paperread.note import render_note, validate_note, validate_trusted_summary
 from zotero_paperread.pdf_extract import extract_pdf
+from zotero_paperread.review import apply_review_to_summary
 from zotero_paperread.runs import allocate_run_dir, write_run_manifest
 from zotero_paperread.workflow import prepare_item_bundle
 from zotero_paperread.zotero_details import next_version_suffix_from_details
@@ -240,6 +241,21 @@ def validate_summary_json_command(summary_json: Path) -> None:
     """Check that summary JSON is readable and has an object at the top level."""
     read_json_or_exit(summary_json, label="summary JSON")
     console.print("summary_json_readable_object")
+
+
+@app.command("apply-review")
+def apply_review_command(
+    summary_json: Path,
+    review_json: Path,
+    output: Path | None = typer.Option(None, "--output", "-o", help="Write updated summary JSON."),
+) -> None:
+    """Apply review gate fields to summary JSON deterministically."""
+    summary = read_json_or_exit(summary_json, label="summary JSON")
+    review = read_json_or_exit(review_json, label="review JSON")
+    updated = apply_review_to_summary(summary, review)
+    target = output or summary_json
+    target.write_text(json.dumps(updated, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    console.print(f"Wrote reviewed summary JSON: {target}")
 
 
 @app.command("validate-trusted-summary")

@@ -223,6 +223,16 @@ uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.
      - 是否过度相信低 `Caption Confidence`、embedded-image backfill、或 figure extraction warning
      - 是否因抽取告警需要降级可信状态
    - `review.json` 必须包含 `review_status`、`review_issues`、`trust_status_recommendation`、`needs_improvement` 和 `improvement_requests`。
+   - 生成 `review.json` 后，必须先把审查门禁字段确定性合并回 `summary.json`。如果 `needs_improvement` 为 true，`validate-trusted-summary` 会阻断写入；完成第 10 步补充优化并生成新的 `review.json` 后，重复同一门禁序列。
+
+```bash
+uv run zotero-paperread apply-review <run_dir>/summary.json <run_dir>/review.json
+uv run zotero-paperread validate-trusted-summary <run_dir>/summary.json
+PAPER_TITLE="<paper title>"
+GENERATED_DATE="<YYYY-MM-DD>"
+VERSION_SUFFIX="$(uv run zotero-paperread next-version-suffix <run_dir>/item-details.json --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE")"
+uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --generated-date "$GENERATED_DATE" --version-suffix "$VERSION_SUFFIX" --output <run_dir>/note.md
+```
 
 10. 补充优化：
    - 如果 `review.json` 中 `needs_improvement` 为 true，允许一次补充优化。
@@ -238,6 +248,7 @@ uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.
    - 写入 Zotero 前必须满足：
      - `review_status` 为 `passed` 或 `passed_with_caveats`
      - 没有待处理的 `needs_improvement`
+     - `validate-trusted-summary` 已通过
      - 已完成 `preview-note`
      - 已展示 note 预览和目标 Zotero item 标题（target Zotero item title）
    - 如果 `review_status` 为 `failed`，停止并报告审查问题，不写入 Zotero。

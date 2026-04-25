@@ -113,6 +113,19 @@ uv run zotero-paperread preview-note runs/<date>/<paper-slug>/note.md
 
 The workflow asks Codex to classify paper type, assign trust status, attach compact evidence pointers, and run a second-pass note quality review before Zotero write-through. If review finds fixable omissions, Codex may perform one bounded improvement pass by re-reading only the current run directory artifacts.
 
+After generating `review.json`, merge the review gate fields into `summary.json` and validate write-readiness before finalizing the write-through note:
+
+```bash
+uv run zotero-paperread apply-review <run_dir>/summary.json <run_dir>/review.json
+uv run zotero-paperread validate-trusted-summary <run_dir>/summary.json
+PAPER_TITLE="<paper title>"
+GENERATED_DATE="<YYYY-MM-DD>"
+VERSION_SUFFIX="$(uv run zotero-paperread next-version-suffix <run_dir>/item-details.json --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE")"
+uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --generated-date "$GENERATED_DATE" --version-suffix "$VERSION_SUFFIX" --output <run_dir>/note.md
+```
+
+For Zotero write-through, `validate-trusted-summary` must pass, `preview-note` must be shown, and the target Zotero item title must be shown before calling `zotero-mcp write_note`.
+
 The rendered note includes `## 可信度与证据` with `paper_type`, `trust_status`, `review_status`, `improvement_status`, evidence pointers, review issues, and any improvement notes. This section is meant to make each note useful as a long-term knowledge-base entry without hiding extraction uncertainty.
 
 ## V2: Key Figure Extraction and Analysis
