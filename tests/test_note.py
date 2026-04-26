@@ -366,7 +366,7 @@ def test_render_note_keeps_evidence_section_stable_without_review_or_improvement
     assert "\n## 补充优化记录" not in note
 
 
-def test_render_note_omits_note_labels_section_and_keeps_trailing_fixed_tags() -> None:
+def test_render_note_moves_normalized_note_labels_to_trailing_tags() -> None:
     summary = {
         **SUMMARY_WITH_FIGURES,
         "note_labels": [
@@ -382,7 +382,10 @@ def test_render_note_omits_note_labels_section_and_keeps_trailing_fixed_tags() -
     note = render_note(METADATA, summary, generated_date="2026-04-23")
 
     assert "## 本文标签" not in note
-    assert "\nTags: codex-summary, paper-summary" in note
+    assert (
+        "\nTags: codex-summary, paper-summary, deep_learning, inverse_design, "
+        "materials_discovery, physics_informed_ml\n"
+    ) in note
     assert "- codex-summary" not in note
     assert "- paper-summary" not in note
     assert "- deep_learning" not in note
@@ -390,6 +393,7 @@ def test_render_note_omits_note_labels_section_and_keeps_trailing_fixed_tags() -
     assert "- materials_discovery" not in note
     assert "- physics_informed_ml" not in note
     assert "extra_label_should_not_render" not in note
+    assert note.count("deep_learning") == 1
 
 
 def test_validate_note_accepts_complete_note() -> None:
