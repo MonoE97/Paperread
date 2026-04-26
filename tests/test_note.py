@@ -141,6 +141,19 @@ def test_render_note_contains_trust_and_evidence_section() -> None:
     assert "Method section was too generic." in note
     assert "\n  - 证据: page 3 method section;" in note
     assert "\n  - 证据: fig_p1_1;" in note
+    trust_section = note.split("## 可信度与证据\n\n", maxsplit=1)[1].split("\n\n## 核心结论", maxsplit=1)[0]
+    assert "关键证据" not in trust_section
+    assert "审查问题" not in trust_section
+
+
+def test_render_note_places_evidence_and_review_before_trailing_tags() -> None:
+    note = render_note(METADATA, {**SUMMARY_WITH_FIGURES, **TRUSTED_FIELDS}, generated_date="2026-04-23")
+
+    assert "## 本文标签" not in note
+    assert note.count("\nTags: codex-summary, paper-summary") == 1
+    assert note.index("## 抽取告警") < note.index("## 关键证据")
+    assert note.index("## 关键证据") < note.index("## 审查问题")
+    assert note.index("## 审查问题") < note.index("---\n\nTags: codex-summary, paper-summary")
 
 
 def test_render_note_keeps_evidence_bullets_contiguous() -> None:
@@ -180,7 +193,7 @@ def test_render_note_keeps_evidence_bullets_contiguous() -> None:
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
 
-    evidence_section = note.split("### 关键证据\n\n", maxsplit=1)[1].split("\n### 审查问题", maxsplit=1)[0]
+    evidence_section = note.split("## 关键证据\n\n", maxsplit=1)[1].split("\n\n## 审查问题", maxsplit=1)[0]
 
     assert (
         evidence_section
@@ -189,7 +202,7 @@ def test_render_note_keeps_evidence_bullets_contiguous() -> None:
         "The method section describes the learned mapping from target response to structure parameters.\n"
         "  - 证据: fig_p1_1; The framework figure shows the optimization loop.\n"
         "- 结论: The experiments compare against multiple baselines.\n"
-        "  - 证据: page 5 results section; Table 2 compares the proposed model with three baselines.\n"
+        "  - 证据: page 5 results section; Table 2 compares the proposed model with three baselines."
     )
     assert "\n\n  - 证据:" not in evidence_section
     assert "\n\n- 结论:" not in evidence_section
@@ -222,7 +235,7 @@ def test_render_note_formats_evidence_lines_when_locator_or_summary_is_missing()
     }
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
-    evidence_section = note.split("### 关键证据\n\n", maxsplit=1)[1].split("\n\n## 核心结论", maxsplit=1)[0].strip()
+    evidence_section = note.split("## 关键证据\n\n", maxsplit=1)[1].split("\n\n---", maxsplit=1)[0].strip()
 
     assert "- 证据: Only summary is available." in evidence_section
     assert "- 证据: fig_p1_2" in evidence_section
@@ -251,7 +264,7 @@ def test_render_note_flattens_multiline_evidence_into_single_bullet() -> None:
     }
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
-    evidence_section = note.split("### 关键证据\n\n", maxsplit=1)[1].split("\n\n## 核心结论", maxsplit=1)[0].strip()
+    evidence_section = note.split("## 关键证据\n\n", maxsplit=1)[1].split("\n\n---", maxsplit=1)[0].strip()
 
     assert (
         evidence_section
@@ -306,7 +319,7 @@ def test_render_note_flattens_multiline_claim_into_single_bullet() -> None:
     }
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
-    evidence_section = note.split("### 关键证据\n\n", maxsplit=1)[1].split("\n\n## 核心结论", maxsplit=1)[0].strip()
+    evidence_section = note.split("## 关键证据\n\n", maxsplit=1)[1].split("\n\n---", maxsplit=1)[0].strip()
 
     assert (
         evidence_section
@@ -345,15 +358,15 @@ def test_render_note_keeps_evidence_section_stable_without_review_or_improvement
     }
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
-    evidence_section = note.split("### 关键证据\n\n", maxsplit=1)[1].split("\n\n## 核心结论", maxsplit=1)[0].strip()
+    evidence_section = note.split("## 关键证据\n\n", maxsplit=1)[1].split("\n\n---", maxsplit=1)[0].strip()
 
     assert evidence_section.endswith("  - 证据: fig_p1_1; The framework figure shows the optimization loop.")
     assert "\n\n  - 证据:" not in evidence_section
-    assert "\n### 审查问题" not in note
-    assert "\n### 补充优化记录" not in note
+    assert "\n## 审查问题" not in note
+    assert "\n## 补充优化记录" not in note
 
 
-def test_render_note_contains_normalized_note_labels_with_limit() -> None:
+def test_render_note_omits_note_labels_section_and_keeps_trailing_fixed_tags() -> None:
     summary = {
         **SUMMARY_WITH_FIGURES,
         "note_labels": [
@@ -368,15 +381,15 @@ def test_render_note_contains_normalized_note_labels_with_limit() -> None:
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
 
-    assert "## 本文标签" in note
-    assert "- codex-summary" in note
-    assert "- paper-summary" in note
-    assert "- deep_learning" in note
-    assert "- inverse_design" in note
-    assert "- materials_discovery" in note
-    assert "- physics_informed_ml" in note
+    assert "## 本文标签" not in note
+    assert "\nTags: codex-summary, paper-summary" in note
+    assert "- codex-summary" not in note
+    assert "- paper-summary" not in note
+    assert "- deep_learning" not in note
+    assert "- inverse_design" not in note
+    assert "- materials_discovery" not in note
+    assert "- physics_informed_ml" not in note
     assert "extra_label_should_not_render" not in note
-    assert note.count("- deep_learning") == 1
 
 
 def test_validate_note_accepts_complete_note() -> None:

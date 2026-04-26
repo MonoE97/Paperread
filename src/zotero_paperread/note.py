@@ -22,7 +22,7 @@ REQUIRED_SECTIONS = [
     "AI+物理/材料启发",
     "后续关键词",
     "抽取告警",
-    "本文标签",
+    "关键证据",
 ]
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "templates"
