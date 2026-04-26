@@ -234,6 +234,7 @@ PAPER_TITLE="<paper title>"
 GENERATED_DATE="<YYYY-MM-DD>"
 VERSION_SUFFIX="$(uv run zotero-paperread next-version-suffix <run_dir>/item-details.json --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE")"
 uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --generated-date "$GENERATED_DATE" --version-suffix "$VERSION_SUFFIX" --output <run_dir>/note.md
+NOTE_TAGS_JSON="$(uv run zotero-paperread note-tags <run_dir>/summary.json)"
 uv run zotero-paperread preview-note <run_dir>/note.md
 ```
 
@@ -255,13 +256,15 @@ review_status is passed or passed_with_caveats
 needs_improvement is false
 validate-trusted-summary passes
 same-day version suffix has been computed from current item-details.json
+Zotero note tags have been computed from current summary.json using `note-tags`
 preview-note has been shown
 target Zotero item title has been shown
 ```
 
    - 如果 `review_status` 为 `failed`，停止并报告审查问题，不写入 Zotero。
    - note 标题由模板生成：`[Codex Summary] <paper title> - YYYY-MM-DD`，同日重复创建时追加 ` (v2)`、` (v3)` 等后缀。
-   - 真实写入仍必须来自用户明确写入意图，且只能调用 `zotero-mcp write_note`，调用形式为 `write_note(action="create", parentKey=<item key>, content=<note markdown>, tags=["codex-summary","paper-summary"])`。
+   - note 正文末尾 `Tags:` 和 Zotero note metadata tags 必须使用同一套标签：固定标签 `codex-summary`、`paper-summary`，加上 `summary.json` 中 `note_labels` 归一化后的最多 4 个推断标签。
+   - 真实写入仍必须来自用户明确写入意图，且只能调用 `zotero-mcp write_note`。调用前用 `uv run zotero-paperread note-tags <run_dir>/summary.json` 得到 JSON 标签数组，解析后传给 `write_note(action="create", parentKey=<item key>, content=<note markdown>, tags=<parsed note-tags list>)`。
    - 成功后回读一次 `get_item_details`，确认子笔记已经挂载到目标条目下。
 
 ## Better Notes 兼容

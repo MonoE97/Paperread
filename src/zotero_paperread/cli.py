@@ -8,7 +8,7 @@ import typer
 from rich.console import Console
 
 from zotero_paperread.figures import extract_figures
-from zotero_paperread.note import render_note, validate_note, validate_trusted_summary
+from zotero_paperread.note import build_note_labels, render_note, validate_note, validate_trusted_summary
 from zotero_paperread.pdf_extract import extract_pdf
 from zotero_paperread.review import apply_review_to_summary
 from zotero_paperread.runs import allocate_run_dir, write_run_manifest
@@ -228,6 +228,13 @@ def next_version_suffix_command(
         generated_date=generated_date,
     )
     typer.echo(suffix)
+
+
+@app.command("note-tags")
+def note_tags_command(summary_json: Path) -> None:
+    """Print Zotero note tags derived from summary JSON."""
+    tags = build_note_labels(read_json_or_exit(summary_json, label="summary JSON"))
+    typer.echo(json.dumps(tags, ensure_ascii=False))
 
 
 @app.command("validate-note")

@@ -93,6 +93,7 @@ uv run zotero-paperread validate-summary-json runs/<date>/<paper-slug>/summary.j
 uv run zotero-paperread render-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md
 uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md
 uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md --version-suffix " (v2)"
+uv run zotero-paperread note-tags runs/<date>/<paper-slug>/summary.json
 uv run zotero-paperread validate-note runs/<date>/<paper-slug>/note.md
 uv run zotero-paperread preview-note runs/<date>/<paper-slug>/note.md
 ```
@@ -125,6 +126,7 @@ PAPER_TITLE="<paper title>"
 GENERATED_DATE="<YYYY-MM-DD>"
 VERSION_SUFFIX="$(uv run zotero-paperread next-version-suffix <run_dir>/item-details.json --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE")"
 uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --generated-date "$GENERATED_DATE" --version-suffix "$VERSION_SUFFIX" --output <run_dir>/note.md
+NOTE_TAGS_JSON="$(uv run zotero-paperread note-tags <run_dir>/summary.json)"
 uv run zotero-paperread preview-note <run_dir>/note.md
 ```
 
@@ -135,13 +137,14 @@ review_status is passed or passed_with_caveats
 needs_improvement is false
 validate-trusted-summary passes
 same-day version suffix has been computed from current item-details.json
+note tags have been computed from current summary.json
 preview-note has been shown
 target Zotero item title has been shown
 ```
 
 Actual Zotero write-through still requires explicit write intent and uses only `zotero-mcp write_note`.
 
-The rendered note includes `## 可信度与证据` with `paper_type`, `trust_status`, `review_status`, `improvement_status`, evidence pointers, review issues, and any improvement notes. This section is meant to make each note useful as a long-term knowledge-base entry without hiding extraction uncertainty.
+The rendered note includes `## 可信度与证据` near the top with `paper_type`, `trust_status`, `review_status`, `improvement_status`, and the trust rationale. `## 关键证据`, `## 审查问题`, and `## 补充优化记录` are rendered near the end of the note before the trailing `Tags:` line, so the main reading flow stays compact while provenance remains visible.
 
 ## V2: Key Figure Extraction and Analysis
 
@@ -155,7 +158,7 @@ The rendered note includes `## 可信度与证据` with `paper_type`, `trust_sta
 - If figure extraction crashes, `prepare-item` keeps the text bundle, clears stale optional figure artifacts, and surfaces `figure_extraction_failed` plus a compact `figure_extraction_error:<type>:<message>` warning.
 - Goal: improve scientific reading quality, not just embed pictures.
 - Current note behavior: figure analysis is written into the Zotero note even if inline image embedding is not enabled.
-- Current label behavior: the note ends with `## 本文标签`, containing `codex-summary`, `paper-summary`, and at most four inferred English key labels.
+- Current label behavior: the note no longer renders a separate `## 本文标签` section. It ends with a single `Tags:` line containing `codex-summary`, `paper-summary`, and at most four inferred English key labels. The same label set is available through `uv run zotero-paperread note-tags <summary.json>` and should be passed to Zotero `write_note(..., tags=...)` so Zotero note metadata tags match the rendered note.
 
 ## Safety
 

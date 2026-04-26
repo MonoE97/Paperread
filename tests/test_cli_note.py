@@ -165,6 +165,36 @@ def test_finalize_note_command_accepts_trusted_note_fields(tmp_path: Path) -> No
     assert "note_valid" in result.stdout
 
 
+def test_note_tags_command_prints_fixed_and_inferred_labels(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    write_json(
+        summary_path,
+        {
+            "note_labels": [
+                "Deep Learning",
+                "inverse-design",
+                "materials discovery",
+                "physics-informed ML",
+                "deep_learning",
+                "ignored extra label",
+            ],
+        },
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["note-tags", str(summary_path)])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == [
+        "codex-summary",
+        "paper-summary",
+        "deep_learning",
+        "inverse_design",
+        "materials_discovery",
+        "physics_informed_ml",
+    ]
+
+
 def test_validate_note_command_fails_for_incomplete_note(tmp_path: Path) -> None:
     note_path = tmp_path / "bad.md"
     note_path.write_text("# bad\n", encoding="utf-8")
