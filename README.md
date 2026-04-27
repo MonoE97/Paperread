@@ -103,6 +103,7 @@ The recommended dry-run manual sequence is:
 ```bash
 uv run zotero-paperread create-run --title "<title>" --item-key "<item_key>"
 uv run zotero-paperread prepare-item runs/<date>/<paper-slug>/item-details.json --workdir runs/<date>/<paper-slug> --max-pages 15
+# Codex then reads context.md / figure_context.md and writes summary.json.
 uv run zotero-paperread validate-summary-json runs/<date>/<paper-slug>/summary.json
 uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md
 uv run zotero-paperread preview-note runs/<date>/<paper-slug>/note.md
@@ -134,7 +135,8 @@ Write to Zotero only if all of these are true:
 
 ```text
 review_status is passed or passed_with_caveats
-needs_improvement is false
+review.json needs_improvement is false
+summary.json improvement_status is neither needed nor blocked after apply-review
 validate-trusted-summary passes
 same-day version suffix has been computed from current item-details.json
 note tags have been computed from current summary.json

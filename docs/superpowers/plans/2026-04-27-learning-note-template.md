@@ -1337,3 +1337,15 @@ Expected: diffs are limited to the planned files and show no unrelated rewrites.
 **Compatibility review:** Existing `trust_status` values are preserved. Old `summary.json` fields still render. `StrictUndefined` remains enabled, so missing context keys will surface in tests.
 
 **Verification review:** The plan includes focused failing tests, focused passing tests, full `uv run pytest`, CLI help, and the project-required PDF extraction smoke command.
+
+## Final Implementation Notes
+
+After the initial learning-note template landed, the rendered output was polished based on the first real-paper dry run:
+
+- Enum values shown in the speed-read card are now human-readable while preserving the machine value in parentheses, for example `方法论文 (method_paper)`, `可用但需注意限制 (usable_with_caveats)`, and `强烈建议精读 (strongly_recommended)`.
+- The figure index header is rendered in Chinese as `图 | 页码 | 作用 | 证据等级 | 图像质量`.
+- Internal figure-ranking metadata such as `Priority Score` is not rendered in the note body.
+- Figure detail labels are rendered as `图注`, `页码`, `为什么重要`, and `图像/抽取质量`.
+- When there are no `improvement_notes`, `## 12. 补充优化记录` now renders only `- none`; it does not print an empty `改进状态` line.
+
+These changes are display-layer polish only. They do not change PDF extraction, figure extraction, Zotero lookup, review gates, or Zotero write-through behavior.

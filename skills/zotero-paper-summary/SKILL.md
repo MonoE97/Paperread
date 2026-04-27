@@ -311,7 +311,8 @@ uv run zotero-paperread preview-note <run_dir>/note.md
 
 ```text
 review_status is passed or passed_with_caveats
-needs_improvement is false
+review.json needs_improvement is false
+summary.json improvement_status is neither needed nor blocked after apply-review
 validate-trusted-summary passes
 same-day version suffix has been computed from current item-details.json
 Zotero note tags have been computed from current summary.json using `note-tags`
