@@ -144,7 +144,9 @@ target Zotero item title has been shown
 
 Actual Zotero write-through still requires explicit write intent and uses only `zotero-mcp write_note`.
 
-The rendered note includes `## 可信度与证据` near the top with `paper_type`, `trust_status`, `review_status`, `improvement_status`, and the trust rationale. `## 关键证据`, `## 审查问题`, and `## 补充优化记录` are rendered near the end of the note before the trailing `Tags:` line, so the main reading flow stays compact while provenance remains visible.
+The rendered note is a layered learning note. It opens with `## 0. 速读卡片` so the first screen shows paper type, research object, core problem, core method, core result, trust status, main risk, reading decision, and relevance to AI4S / battery / materials research. The main body then follows problem, method, results, figures, contributions, limits, transferable workflows, concept cards, and follow-up keywords. Metadata, extraction warnings, review issues, trust rationale, evidence chains, and improvement notes are kept in rear sections (`## 9` through `## 12`) so provenance remains available without interrupting the reading flow.
+
+New learning-note fields such as `method_modules`, `key_results_table`, `concept_cards`, `workflow_lessons`, and `reading_decision` are optional. Old `summary.json` files still render through safe fallbacks: `method_overview` falls back to `method`, `core_result_short` falls back to `one_sentence_summary`, and `transferable_insight` falls back to `ai4s_relevance`.
 
 ## V2: Key Figure Extraction and Analysis
 

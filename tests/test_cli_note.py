@@ -38,7 +38,9 @@ def test_render_note_command_writes_markdown(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert output_path.exists()
-    assert "## 核心结论" in output_path.read_text(encoding="utf-8")
+    note = output_path.read_text(encoding="utf-8")
+    assert "## 0. 速读卡片" in note
+    assert "## 11. 证据链附录" in note
 
 
 def test_finalize_note_command_writes_and_validates_markdown(tmp_path: Path) -> None:
@@ -161,7 +163,8 @@ def test_finalize_note_command_accepts_trusted_note_fields(tmp_path: Path) -> No
 
     assert result.exit_code == 0
     note = output_path.read_text(encoding="utf-8")
-    assert "## 可信度与证据" in note
+    assert "## 10. 自动抽取质量报告" in note
+    assert "## 11. 证据链附录" in note
     assert "note_valid" in result.stdout
 
 

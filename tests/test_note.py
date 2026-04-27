@@ -33,12 +33,59 @@ SUMMARY_WITH_FIGURES = {
     "key_figures": [
         {
             "figure_id": "fig_p1_1",
+            "title_short": "Overall pipeline",
             "caption": "Figure 1. Overall pipeline.",
             "page": 1,
             "priority_score": 5.2,
+            "why_it_matters_short": "定义方法对象和信息流",
             "why_it_matters": "这张图定义了整篇论文的方法对象和信息流。",
+            "evidence_level": "medium",
+            "image_quality": "ok",
+            "figure_quality_note": "图像质量可用于辅助理解，结论仍以正文为准。",
             "analysis": "图 1 展示了从输入结构到扩散采样再到性质打分的主链路。",
         }
+    ],
+}
+
+LEARNING_FIELDS = {
+    "research_object": "Au(100)/NaCl(aq) electrochemical interface",
+    "research_question_short": "如何加速 finite-field electrochemical interface simulations？",
+    "core_method_short": "FIREANN 学外场相关原子力，MLEDR 学电子密度响应。",
+    "core_result_short": "实现约 4 个数量级加速，并预测电容、极化和界面水取向。",
+    "relevance_to_user": "对 AI4S、电池界面模拟和 learned observable workflow 有直接参考价值。",
+    "reading_decision": "strongly_recommended",
+    "main_risk_short": "Figure 2-4 crop 过小，图像细节不能独立复核。",
+    "tldr": "本文把动力学采样模型和电子响应模型拆开训练，用于电化学界面长时间尺度采样。",
+    "background_problem": "电化学界面需要同时描述电势、电解液极化、离子吸附和界面水取向。",
+    "existing_gap": "finite-field AIMD 成本高，经典力场难以描述电子响应。",
+    "paper_entry_point": "用外场相关机器学习力场和电子密度响应模型替代昂贵的 AIMD 采样。",
+    "method_overview": "方法由 FIREANN 力场和 MLEDR 电子密度响应模型组成。",
+    "method_modules": [
+        {"name": "FIREANN", "input": "原子结构 + 外场", "target": "外场相关原子力", "output": "MLMD 力场", "role": "加速界面结构采样"},
+        {"name": "MLEDR", "input": "原子结构 + 外场 + ghost atoms", "target": "电子密度响应", "output": "charge response field", "role": "计算表面电荷和 Helmholtz capacitance"},
+    ],
+    "workflow_steps": "1. 生成 AIMD 数据。\n2. 训练 FIREANN。\n3. 训练 MLEDR。\n4. 执行 MLMD。\n5. 积分得到电化学可观测量。",
+    "technical_details": ["训练体系为 Au(100)/5.5 M NaCl(aq)。", "MLMD 使用 0.5 fs timestep。"],
+    "key_results_table": [
+        {"result": "加速效果", "value": "约 4 个数量级", "meaning": "支持 ns 级界面采样"},
+        {"result": "最大 Helmholtz capacitance", "value": "约 20.8 μF/cm²", "meaning": "0 V 附近出现最大电容"},
+    ],
+    "applicability_limits": [
+        "适合研究需要外场、电势、界面极化和电子响应的电化学界面体系。",
+        "不能直接推广到复杂电极、多组分电解液、真实 SEI 或反应性界面。",
+    ],
+    "transferable_insight": "把科学问题拆成动力学采样模型和可观测量响应模型。",
+    "workflow_lessons": [
+        "用 field-conditioned ML potential 学习外场下的结构动力学。",
+        "用单独 response model 学习电子密度、电荷、极化或谱学响应。",
+    ],
+    "follow_up_questions": [
+        "该 framework 能否迁移到电池 SEI / 电解液分解界面？",
+        "MLEDR 是否可以替换为 charge density foundation model？",
+    ],
+    "concept_cards": [
+        {"term": "finite-field molecular dynamics", "short_definition": "在周期体系中施加外电场的分子动力学方法。", "role_in_paper": "提供 constant-potential-like 全电池模拟框架。", "related_keywords": ["finite field", "electric field", "electrochemical interface"]},
+        {"term": "MLEDR", "short_definition": "用机器学习预测电子密度响应的模型。", "role_in_paper": "从结构和外场预测 charge response。", "related_keywords": ["electron density response", "charge response", "learned observable"]},
     ],
 }
 
@@ -83,15 +130,167 @@ TRUSTED_FIELDS = {
 }
 
 
-def test_render_note_contains_required_sections() -> None:
+def test_render_note_contains_required_learning_sections() -> None:
     note = render_note(METADATA, SUMMARY, generated_date="2026-04-23")
 
+    expected_sections = [
+        "## 0. 速读卡片",
+        "## 1. 论文解决了什么问题？",
+        "## 2. 方法框架",
+        "## 3. 关键结果与数值",
+        "## 4. 图表导读",
+        "## 5. 贡献、局限与适用边界",
+        "## 6. 对 AI4S / 电池 / 材料研究的启发",
+        "## 7. 术语与概念卡片",
+        "## 8. 后续检索关键词",
+        "## 9. 元数据",
+        "## 10. 自动抽取质量报告",
+        "## 11. 证据链附录",
+        "## 12. 补充优化记录",
+    ]
+    for section in expected_sections:
+        assert section in note
+    positions = [note.index(section) for section in expected_sections]
+    assert positions == sorted(positions)
+
     assert "# [Codex Summary] A Useful Materials Paper - 2026-04-23" in note
-    assert "## 核心结论" in note
-    assert "## 研究问题" in note
-    assert "## 方法拆解" in note
-    assert "## AI+物理/材料启发" in note
     assert "zotero://select/library/items/ABC123" in note
+
+
+def test_render_note_renders_learning_fields() -> None:
+    note = render_note(
+        METADATA,
+        {**SUMMARY_WITH_FIGURES, **TRUSTED_FIELDS, **LEARNING_FIELDS},
+        generated_date="2026-04-23",
+    )
+
+    assert "| 是否值得精读 | strongly_recommended |" in note
+    assert "| 与我的研究关系 | 对 AI4S、电池界面模拟和 learned observable workflow 有直接参考价值。 |" in note
+    assert "### 30 秒结论" in note
+    assert "Au(100)/NaCl(aq) electrochemical interface" in note
+    assert "Figure 2-4 crop 过小，图像细节不能独立复核。" in note
+    assert "电化学界面需要同时描述电势、电解液极化、离子吸附和界面水取向。" in note
+    assert "| FIREANN | 原子结构 + 外场 | 外场相关原子力 | MLMD 力场 | 加速界面结构采样 |" in note
+    assert "训练体系为 Au(100)/5.5 M NaCl(aq)。" in note
+    assert "| 加速效果 | 约 4 个数量级 | 支持 ns 级界面采样 |" in note
+    assert "| fig_p1_1 | 1 | 定义方法对象和信息流 | medium | ok |" in note
+    assert "不能直接推广到复杂电极、多组分电解液、真实 SEI 或反应性界面。" in note
+    assert "把科学问题拆成动力学采样模型和可观测量响应模型。" in note
+    assert "用 field-conditioned ML potential 学习外场下的结构动力学。" in note
+    assert "该 framework 能否迁移到电池 SEI / 电解液分解界面？" in note
+    assert "### fig_p1_1：Overall pipeline" in note
+    assert "### finite-field molecular dynamics" in note
+    assert "- **相关关键词**: finite field, electric field, electrochemical interface" in note
+
+
+def test_render_note_escapes_pipe_characters_inside_markdown_table_cells() -> None:
+    note = render_note(
+        {**METADATA, "title": "Alpha | Beta"},
+        {
+            **SUMMARY,
+            "research_object": "Battery | Interface",
+            "method_modules": [
+                {
+                    "name": "Module | A",
+                    "input": "Input | structure",
+                    "target": "Target | property",
+                    "output": "Output | score",
+                    "role": "Role | ranking",
+                }
+            ],
+        },
+        generated_date="2026-04-23",
+    )
+
+    assert "| 研究对象 | Battery \\| Interface |" in note
+    assert "| 标题 | Alpha \\| Beta |" in note
+    assert "| Module \\| A | Input \\| structure | Target \\| property | Output \\| score | Role \\| ranking |" in note
+    assert "| 标题 | Alpha | Beta |" not in note
+    assert "| Module | A | Input | structure |" not in note
+
+
+def test_render_note_old_summary_uses_safe_fallbacks() -> None:
+    note = render_note(METADATA, SUMMARY, generated_date="2026-04-23")
+
+    assert "| 研究对象 | unknown |" in note
+    assert "| 核心问题 | 如何更可靠地预测材料性质？ |" in note
+    assert "| 核心方法 | 作者结合图神经网络和物理约束。 |" in note
+    assert "| 核心结果 | 这篇论文提出一种用于材料发现的机器学习框架。 |" in note
+    assert "### 摘要翻译" in note
+    assert "本文摘要的中文翻译。" in note
+    assert "### 实验与证据摘要" in note
+    assert "实验覆盖多个材料数据集。" in note
+    assert "## 7. 术语与概念卡片\n\n- none" in note
+
+
+def test_render_note_accepts_workflow_steps_as_list() -> None:
+    note = render_note(
+        METADATA,
+        {**SUMMARY, "workflow_steps": ["生成 AIMD 数据", "训练 FIREANN", "训练 MLEDR"]},
+        generated_date="2026-04-23",
+    )
+
+    assert "### Workflow" in note
+    assert "1. 生成 AIMD 数据\n2. 训练 FIREANN\n3. 训练 MLEDR" in note
+
+
+def test_render_note_prefers_specific_visual_quality_warning() -> None:
+    summary = {
+        **SUMMARY,
+        "figure_overview": "图表总览。",
+        "key_figures": [
+            {
+                "figure_id": "fig_p1_1",
+                "caption": "Figure 1. Overall pipeline.",
+                "page": 1,
+                "why_it_matters": "测试图作用。",
+                "image_quality": "poor",
+                "visual_quality": {"status": "poor", "warnings": ["image_too_small"]},
+                "analysis": "图像质量不足，只能基于正文和 caption 分析。",
+            }
+        ],
+    }
+
+    note = render_note(METADATA, summary, generated_date="2026-04-23")
+
+    assert "| fig_p1_1 | 1 | 测试图作用。 | unknown | image_too_small |" in note
+
+
+def test_render_note_places_quality_and_evidence_in_rear_sections() -> None:
+    note = render_note(
+        METADATA,
+        {
+            **SUMMARY_WITH_FIGURES,
+            **TRUSTED_FIELDS,
+            "extraction_warnings": ["figure_visual_quality:fig_p1_1:image_too_small"],
+            "main_risk_short": "Visual crop risk.",
+        },
+        generated_date="2026-04-23",
+    )
+
+    warning = "figure_visual_quality:fig_p1_1:image_too_small"
+    quality_report_marker = "## 10. 自动抽取质量报告"
+    evidence_marker = "## 11. 证据链附录"
+    claim_text = "The method uses a learned inverse-design model."
+    page_evidence_line = "- page 3 method section: The method section describes the learned mapping"
+    quality_report_start = note.find(quality_report_marker)
+
+    assert quality_report_start != -1
+    front_matter = note[:quality_report_start]
+    quality_and_rear_sections = note[quality_report_start:]
+    quality_report = quality_and_rear_sections.split(evidence_marker, maxsplit=1)[0]
+    assert warning not in front_matter
+    assert claim_text not in front_matter
+    assert page_evidence_line not in front_matter
+    assert warning in quality_and_rear_sections
+    assert warning in quality_report
+    assert "## 11. 证据链附录" in note
+    assert "### Claim 1" in note
+    assert f"**结论**: {claim_text}" in note
+    assert page_evidence_line in note
+    assert "\n-   - 证据:" not in note
+    assert "\n  - 证据:" not in note
+    assert note.index("## 10. 自动抽取质量报告") < note.index("## 11. 证据链附录")
 
 
 def test_render_note_uses_date_only_for_first_version_suffix() -> None:
@@ -122,28 +321,32 @@ def test_next_same_day_version_suffix_skips_existing_versions() -> None:
 def test_render_note_contains_figure_sections() -> None:
     note = render_note(METADATA, SUMMARY_WITH_FIGURES, generated_date="2026-04-23")
 
-    assert "## 关键图片总览" in note
-    assert "### fig_p1_1" in note
+    assert "## 4. 图表导读" in note
+    assert "### fig_p1_1：Overall pipeline" in note
     assert "Figure 1. Overall pipeline." in note
 
 
 def test_render_note_contains_trust_and_evidence_section() -> None:
     note = render_note(METADATA, {**SUMMARY_WITH_FIGURES, **TRUSTED_FIELDS}, generated_date="2026-04-23")
 
-    assert "## 可信度与证据" in note
-    assert "- **论文类型**: research_article" in note
-    assert "- **可信状态**: trusted" in note
-    assert "- **审查状态**: passed_with_caveats" in note
+    assert "## 0. 速读卡片" in note
+    assert "| 论文类型 | research_article |" in note
+    assert "| 可信状态 | trusted |" in note
+    assert "## 10. 自动抽取质量报告" in note
+    assert "### 审查状态\n\npassed_with_caveats" in note
+    assert "## 11. 证据链附录" in note
+    assert "## 12. 补充优化记录" in note
     assert "- **改进状态**: completed" in note
     assert "The method uses a learned inverse-design model." in note
     assert "page 3 method section" in note
     assert "fig_p1_1" in note
     assert "Method section was too generic." in note
-    assert "\n  - 证据: page 3 method section;" in note
-    assert "\n  - 证据: fig_p1_1;" in note
-    trust_section = note.split("## 可信度与证据\n\n", maxsplit=1)[1].split("\n\n## 核心结论", maxsplit=1)[0]
-    assert "关键证据" not in trust_section
-    assert "审查问题" not in trust_section
+    assert "\n- page 3 method section: The method section describes the learned mapping" in note
+    assert "\n- fig_p1_1: The framework figure shows the optimization loop." in note
+    quality_report = note.split("## 10. 自动抽取质量报告\n\n", maxsplit=1)[1].split(
+        "\n## 11. 证据链附录", maxsplit=1
+    )[0]
+    assert "The method uses a learned inverse-design model." not in quality_report
 
 
 def test_render_note_places_evidence_and_review_before_trailing_tags() -> None:
@@ -151,9 +354,9 @@ def test_render_note_places_evidence_and_review_before_trailing_tags() -> None:
 
     assert "## 本文标签" not in note
     assert note.count("\nTags: codex-summary, paper-summary") == 1
-    assert note.index("## 抽取告警") < note.index("## 关键证据")
-    assert note.index("## 关键证据") < note.index("## 审查问题")
-    assert note.index("## 审查问题") < note.index("---\n\nTags: codex-summary, paper-summary")
+    assert note.index("## 10. 自动抽取质量报告") < note.index("## 11. 证据链附录")
+    assert note.index("## 11. 证据链附录") < note.index("## 12. 补充优化记录")
+    assert note.index("## 12. 补充优化记录") < note.index("---\n\nTags: codex-summary, paper-summary")
 
 
 def test_render_note_keeps_evidence_bullets_contiguous() -> None:
@@ -193,19 +396,25 @@ def test_render_note_keeps_evidence_bullets_contiguous() -> None:
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
 
-    evidence_section = note.split("## 关键证据\n\n", maxsplit=1)[1].split("\n\n## 审查问题", maxsplit=1)[0]
+    evidence_section = note.split("## 11. 证据链附录\n\n", maxsplit=1)[1].split(
+        "\n## 12. 补充优化记录", maxsplit=1
+    )[0].strip()
 
     assert (
         evidence_section
-        == "- 结论: The method uses a learned inverse-design model.\n"
-        "  - 证据: page 3 method section; "
+        == "### Claim 1\n\n"
+        "**结论**: The method uses a learned inverse-design model.\n\n"
+        "**证据**:\n"
+        "- page 3 method section: "
         "The method section describes the learned mapping from target response to structure parameters.\n"
-        "  - 证据: fig_p1_1; The framework figure shows the optimization loop.\n"
-        "- 结论: The experiments compare against multiple baselines.\n"
-        "  - 证据: page 5 results section; Table 2 compares the proposed model with three baselines."
+        "- fig_p1_1: The framework figure shows the optimization loop.\n\n"
+        "### Claim 2\n\n"
+        "**结论**: The experiments compare against multiple baselines.\n\n"
+        "**证据**:\n"
+        "- page 5 results section: Table 2 compares the proposed model with three baselines."
     )
     assert "\n\n  - 证据:" not in evidence_section
-    assert "\n\n- 结论:" not in evidence_section
+    assert "\n-   - 证据:" not in evidence_section
 
 
 def test_render_note_formats_evidence_lines_when_locator_or_summary_is_missing() -> None:
@@ -235,11 +444,13 @@ def test_render_note_formats_evidence_lines_when_locator_or_summary_is_missing()
     }
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
-    evidence_section = note.split("## 关键证据\n\n", maxsplit=1)[1].split("\n\n---", maxsplit=1)[0].strip()
+    evidence_section = note.split("## 11. 证据链附录\n\n", maxsplit=1)[1].split(
+        "\n## 12. 补充优化记录", maxsplit=1
+    )[0].strip()
 
-    assert "- 证据: Only summary is available." in evidence_section
-    assert "- 证据: fig_p1_2" in evidence_section
-    assert "- 证据: ;" not in evidence_section
+    assert "- Only summary is available." in evidence_section
+    assert "- fig_p1_2" in evidence_section
+    assert "- :" not in evidence_section
 
 
 def test_render_note_flattens_multiline_evidence_into_single_bullet() -> None:
@@ -264,12 +475,16 @@ def test_render_note_flattens_multiline_evidence_into_single_bullet() -> None:
     }
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
-    evidence_section = note.split("## 关键证据\n\n", maxsplit=1)[1].split("\n\n---", maxsplit=1)[0].strip()
+    evidence_section = note.split("## 11. 证据链附录\n\n", maxsplit=1)[1].split(
+        "\n## 12. 补充优化记录", maxsplit=1
+    )[0].strip()
 
     assert (
         evidence_section
-        == "- 结论: Evidence text should not break Markdown list structure.\n"
-        "  - 证据: page 4 results - nested locator bullet; line 1 summary - nested summary bullet"
+        == "### Claim 1\n\n"
+        "**结论**: Evidence text should not break Markdown list structure.\n\n"
+        "**证据**:\n"
+        "- page 4 results - nested locator bullet: line 1 summary - nested summary bullet"
     )
     assert "\n- nested locator bullet" not in evidence_section
     assert "\n- nested summary bullet" not in evidence_section
@@ -319,12 +534,16 @@ def test_render_note_flattens_multiline_claim_into_single_bullet() -> None:
     }
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
-    evidence_section = note.split("## 关键证据\n\n", maxsplit=1)[1].split("\n\n---", maxsplit=1)[0].strip()
+    evidence_section = note.split("## 11. 证据链附录\n\n", maxsplit=1)[1].split(
+        "\n## 12. 补充优化记录", maxsplit=1
+    )[0].strip()
 
     assert (
         evidence_section
-        == "- 结论: Primary conclusion line - looks like a nested claim bullet\n"
-        "  - 证据: page 6 discussion; Supporting text stays on one evidence bullet."
+        == "### Claim 1\n\n"
+        "**结论**: Primary conclusion line - looks like a nested claim bullet\n\n"
+        "**证据**:\n"
+        "- page 6 discussion: Supporting text stays on one evidence bullet."
     )
     assert "\n- looks like a nested claim bullet" not in evidence_section
 
@@ -344,9 +563,14 @@ def test_render_note_ignores_string_values_for_list_sections() -> None:
 
     assert "\n- n\n- o\n- t\n" not in note
     assert "### n" not in note
-    figure_section = note.split("## 关键图片总览\n\n", maxsplit=1)[1].split("## 实验与证据", maxsplit=1)[0]
+    figure_section = note.split("## 4. 图表导读\n\n", maxsplit=1)[1].split(
+        "## 5. 贡献、局限与适用边界", maxsplit=1
+    )[0]
 
-    assert figure_section.strip() == "图像概览。"
+    assert (
+        figure_section.strip()
+        == "### 图表总览\n\n图像概览。\n\n### 图表索引\n\n- none\n\n### 展开图表\n\n- none"
+    )
 
 
 def test_render_note_keeps_evidence_section_stable_without_review_or_improvement_blocks() -> None:
@@ -358,12 +582,14 @@ def test_render_note_keeps_evidence_section_stable_without_review_or_improvement
     }
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
-    evidence_section = note.split("## 关键证据\n\n", maxsplit=1)[1].split("\n\n---", maxsplit=1)[0].strip()
+    evidence_section = note.split("## 11. 证据链附录\n\n", maxsplit=1)[1].split(
+        "\n## 12. 补充优化记录", maxsplit=1
+    )[0].strip()
 
-    assert evidence_section.endswith("  - 证据: fig_p1_1; The framework figure shows the optimization loop.")
+    assert evidence_section.endswith("- fig_p1_1: The framework figure shows the optimization loop.")
     assert "\n\n  - 证据:" not in evidence_section
-    assert "\n## 审查问题" not in note
-    assert "\n## 补充优化记录" not in note
+    assert "### 审查问题\n\n- none" in note
+    assert "## 12. 补充优化记录\n\n- **改进状态**: completed\n\n- none" in note
 
 
 def test_render_note_moves_normalized_note_labels_to_trailing_tags() -> None:
@@ -407,13 +633,13 @@ def test_validate_note_accepts_complete_note() -> None:
 def test_validate_note_requires_figure_overview_section() -> None:
     note = render_note(METADATA, SUMMARY_WITH_FIGURES, generated_date="2026-04-23")
 
-    errors = validate_note(note.replace("## 关键图片总览", "## 图片"))
+    errors = validate_note(note.replace("## 4. 图表导读", "## 图片"))
 
-    assert "missing_section: 关键图片总览" in errors
+    assert "missing_section: 4. 图表导读" in errors
 
 
 def test_validate_note_rejects_missing_required_section() -> None:
-    errors = validate_note("# title\n\n## 核心结论\ncontent")
+    errors = validate_note("# title\n\n## 旧结构\ncontent")
 
-    assert "missing_section: 元数据" in errors
-    assert "missing_section: 研究问题" in errors
+    assert "missing_section: 0. 速读卡片" in errors
+    assert "missing_section: 9. 元数据" in errors
