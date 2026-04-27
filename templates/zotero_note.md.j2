@@ -118,7 +118,7 @@
 ### 图表索引
 
 {% if key_figures %}
-| Figure | Page | Why it matters | Evidence | Image quality |
+| 图 | 页码 | 作用 | 证据等级 | 图像质量 |
 | --- | --- | --- | --- | --- |
 {% for item in key_figures %}
 | {{ item.figure_id | table_cell }} | {{ item.page | table_cell }} | {{ item.why_it_matters_short | table_cell }} | {{ item.evidence_level | table_cell }} | {{ item.image_quality | table_cell }} |
@@ -133,11 +133,10 @@
 {% for item in key_figures %}
 ### {{ item.figure_id }}{% if item.title_short %}：{{ item.title_short }}{% endif %}
 
-- **Caption**: {{ item.caption }}
-- **Page**: {{ item.page }}
-- **Priority Score**: {{ item.priority_score }}
-- **Why It Matters**: {{ item.why_it_matters }}
-- **Figure Quality**: {{ item.figure_quality_note }}
+- **图注**: {{ item.caption }}
+- **页码**: {{ item.page }}
+- **为什么重要**: {{ item.why_it_matters }}
+- **图像/抽取质量**: {{ item.figure_quality_note }}
 
 {{ item.analysis }}
 
@@ -296,9 +295,9 @@
 
 ## 12. 补充优化记录
 
+{% if improvement_notes %}
 - **改进状态**: {{ improvement_status }}
 
-{% if improvement_notes %}
 {% for item in improvement_notes %}
 - {{ item.issue }}{% if item.action %}: {{ item.action }}{% endif %}{% if item.source %} (source: {{ item.source }}){% endif %}{{ "\n" }}
 {% endfor %}

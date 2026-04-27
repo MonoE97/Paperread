@@ -164,7 +164,9 @@ def test_render_note_renders_learning_fields() -> None:
         generated_date="2026-04-23",
     )
 
-    assert "| 是否值得精读 | strongly_recommended |" in note
+    assert "| 论文类型 | 研究论文 (research_article) |" in note
+    assert "| 可信状态 | 可信 (trusted) |" in note
+    assert "| 是否值得精读 | 强烈建议精读 (strongly_recommended) |" in note
     assert "| 与我的研究关系 | 对 AI4S、电池界面模拟和 learned observable workflow 有直接参考价值。 |" in note
     assert "### 30 秒结论" in note
     assert "Au(100)/NaCl(aq) electrochemical interface" in note
@@ -173,7 +175,14 @@ def test_render_note_renders_learning_fields() -> None:
     assert "| FIREANN | 原子结构 + 外场 | 外场相关原子力 | MLMD 力场 | 加速界面结构采样 |" in note
     assert "训练体系为 Au(100)/5.5 M NaCl(aq)。" in note
     assert "| 加速效果 | 约 4 个数量级 | 支持 ns 级界面采样 |" in note
+    assert "| 图 | 页码 | 作用 | 证据等级 | 图像质量 |" in note
     assert "| fig_p1_1 | 1 | 定义方法对象和信息流 | medium | ok |" in note
+    assert "- **页码**: 1" in note
+    assert "- **为什么重要**: 这张图定义了整篇论文的方法对象和信息流。" in note
+    assert "- **图像/抽取质量**: 图像质量可用于辅助理解，结论仍以正文为准。" in note
+    assert "Priority Score" not in note
+    assert "Why It Matters" not in note
+    assert "Figure Quality" not in note
     assert "不能直接推广到复杂电极、多组分电解液、真实 SEI 或反应性界面。" in note
     assert "把科学问题拆成动力学采样模型和可观测量响应模型。" in note
     assert "用 field-conditioned ML potential 学习外场下的结构动力学。" in note
@@ -253,6 +262,7 @@ def test_render_note_prefers_specific_visual_quality_warning() -> None:
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
 
+    assert "| 图 | 页码 | 作用 | 证据等级 | 图像质量 |" in note
     assert "| fig_p1_1 | 1 | 测试图作用。 | unknown | image_too_small |" in note
 
 
@@ -330,8 +340,8 @@ def test_render_note_contains_trust_and_evidence_section() -> None:
     note = render_note(METADATA, {**SUMMARY_WITH_FIGURES, **TRUSTED_FIELDS}, generated_date="2026-04-23")
 
     assert "## 0. 速读卡片" in note
-    assert "| 论文类型 | research_article |" in note
-    assert "| 可信状态 | trusted |" in note
+    assert "| 论文类型 | 研究论文 (research_article) |" in note
+    assert "| 可信状态 | 可信 (trusted) |" in note
     assert "## 10. 自动抽取质量报告" in note
     assert "### 审查状态\n\npassed_with_caveats" in note
     assert "## 11. 证据链附录" in note
@@ -589,7 +599,8 @@ def test_render_note_keeps_evidence_section_stable_without_review_or_improvement
     assert evidence_section.endswith("- fig_p1_1: The framework figure shows the optimization loop.")
     assert "\n\n  - 证据:" not in evidence_section
     assert "### 审查问题\n\n- none" in note
-    assert "## 12. 补充优化记录\n\n- **改进状态**: completed\n\n- none" in note
+    assert "## 12. 补充优化记录\n\n- none" in note
+    assert "- **改进状态**: completed\n\n- none" not in note
 
 
 def test_render_note_moves_normalized_note_labels_to_trailing_tags() -> None:

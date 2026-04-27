@@ -43,6 +43,29 @@ VALID_READING_DECISIONS = {"strongly_recommended", "recommended", "skim_only", "
 VALID_EVIDENCE_LEVELS = {"high", "medium", "low", "text_only", "caption_only", "image_unverified", "unknown"}
 VALID_IMAGE_QUALITIES = {"good", "ok", "poor", "image_too_small", "caption_only", "unknown"}
 WRITE_READY_REVIEW_STATUSES = {"passed", "passed_with_caveats"}
+PAPER_TYPE_DISPLAY_LABELS = {
+    "research_article": "研究论文",
+    "review": "综述",
+    "perspective": "观点 / 展望",
+    "benchmark": "基准测试论文",
+    "method_paper": "方法论文",
+    "dataset_paper": "数据集论文",
+    "theory_paper": "理论论文",
+    "unknown": "unknown",
+}
+TRUST_STATUS_DISPLAY_LABELS = {
+    "trusted": "可信",
+    "usable_with_caveats": "可用但需注意限制",
+    "metadata_only": "仅元数据可用",
+    "needs_manual_review": "需要人工复核",
+}
+READING_DECISION_DISPLAY_LABELS = {
+    "strongly_recommended": "强烈建议精读",
+    "recommended": "建议阅读",
+    "skim_only": "只需略读",
+    "not_priority": "暂非优先",
+    "unknown": "unknown",
+}
 REQUIRED_WRITE_READY_TEXT_FIELDS = {
     "one_sentence_summary": "one_sentence_summary is required",
     "abstract_translation": "abstract_translation is required",
@@ -61,6 +84,13 @@ REQUIRED_WRITE_READY_LIST_FIELDS = {
 
 def safe_choice(value: Any, allowed: set[str], default: str) -> str:
     return value if isinstance(value, str) and value in allowed else default
+
+
+def display_choice(value: str, display_labels: dict[str, str]) -> str:
+    label = display_labels.get(value, "unknown")
+    if value == "unknown" or label == "unknown":
+        return "unknown"
+    return f"{label} ({value})"
 
 
 def safe_list(value: Any) -> list[Any]:
@@ -512,6 +542,9 @@ def render_note(
     resolved_date = generated_date or date.today().isoformat()
     review_issues = clean_issue_list(summary)
     extraction_warnings = clean_string_list(summary.get("extraction_warnings", []))
+    paper_type = safe_choice(summary.get("paper_type"), VALID_PAPER_TYPES, "unknown")
+    trust_status = safe_choice(summary.get("trust_status"), VALID_TRUST_STATUSES, "usable_with_caveats")
+    reading_decision = safe_choice(summary.get("reading_decision"), VALID_READING_DECISIONS, "unknown")
     context = {
         "note_title": build_note_title(metadata, resolved_date, version_suffix=version_suffix),
         "generated_date": resolved_date,
@@ -523,8 +556,8 @@ def render_note(
         "url": metadata.get("url", ""),
         "zotero_url": metadata.get("zoteroUrl", ""),
         "quality_score": scalar_text(summary.get("quality_score")),
-        "paper_type": safe_choice(summary.get("paper_type"), VALID_PAPER_TYPES, "unknown"),
-        "trust_status": safe_choice(summary.get("trust_status"), VALID_TRUST_STATUSES, "usable_with_caveats"),
+        "paper_type": display_choice(paper_type, PAPER_TYPE_DISPLAY_LABELS),
+        "trust_status": display_choice(trust_status, TRUST_STATUS_DISPLAY_LABELS),
         "trust_rationale": safe_text(summary.get("trust_rationale"), "未提供可信度判断依据。"),
         "review_status": safe_choice(summary.get("review_status"), VALID_REVIEW_STATUSES, "not_reviewed"),
         "review_issues": review_issues,
@@ -552,7 +585,7 @@ def render_note(
         "core_method_short": fallback_text(summary.get("core_method_short"), summary.get("method")),
         "core_result_short": fallback_text(summary.get("core_result_short"), summary.get("one_sentence_summary")),
         "relevance_to_user": safe_text(summary.get("relevance_to_user")),
-        "reading_decision": safe_choice(summary.get("reading_decision"), VALID_READING_DECISIONS, "unknown"),
+        "reading_decision": display_choice(reading_decision, READING_DECISION_DISPLAY_LABELS),
         "main_risk_short": infer_main_risk_short(summary, review_issues),
         "tldr": optional_text(summary.get("tldr")),
         "background_problem": safe_text(summary.get("background_problem")),
