@@ -8,21 +8,19 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 REQUIRED_SECTIONS = [
-    "元数据",
-    "可信度与证据",
-    "核心结论",
-    "摘要翻译",
-    "关键要点",
-    "研究问题",
-    "方法拆解",
-    "关键图片总览",
-    "实验与证据",
-    "主要贡献",
-    "局限与风险",
-    "AI+物理/材料启发",
-    "后续关键词",
-    "抽取告警",
-    "关键证据",
+    "0. 速读卡片",
+    "1. 论文解决了什么问题？",
+    "2. 方法框架",
+    "3. 关键结果与数值",
+    "4. 图表导读",
+    "5. 贡献、局限与适用边界",
+    "6. 对 AI4S / 电池 / 材料研究的启发",
+    "7. 术语与概念卡片",
+    "8. 后续检索关键词",
+    "9. 元数据",
+    "10. 自动抽取质量报告",
+    "11. 证据链附录",
+    "12. 补充优化记录",
 ]
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "templates"
@@ -41,7 +39,33 @@ VALID_PAPER_TYPES = {
 VALID_TRUST_STATUSES = {"trusted", "usable_with_caveats", "metadata_only", "needs_manual_review"}
 VALID_REVIEW_STATUSES = {"not_reviewed", "passed", "passed_with_caveats", "failed"}
 VALID_IMPROVEMENT_STATUSES = {"not_needed", "needed", "completed", "blocked"}
+VALID_READING_DECISIONS = {"strongly_recommended", "recommended", "skim_only", "not_priority", "unknown"}
+VALID_EVIDENCE_LEVELS = {"high", "medium", "low", "text_only", "caption_only", "image_unverified", "unknown"}
+VALID_IMAGE_QUALITIES = {"good", "ok", "poor", "image_too_small", "caption_only", "unknown"}
 WRITE_READY_REVIEW_STATUSES = {"passed", "passed_with_caveats"}
+PAPER_TYPE_DISPLAY_LABELS = {
+    "research_article": "研究论文",
+    "review": "综述",
+    "perspective": "观点 / 展望",
+    "benchmark": "基准测试论文",
+    "method_paper": "方法论文",
+    "dataset_paper": "数据集论文",
+    "theory_paper": "理论论文",
+    "unknown": "unknown",
+}
+TRUST_STATUS_DISPLAY_LABELS = {
+    "trusted": "可信",
+    "usable_with_caveats": "可用但需注意限制",
+    "metadata_only": "仅元数据可用",
+    "needs_manual_review": "需要人工复核",
+}
+READING_DECISION_DISPLAY_LABELS = {
+    "strongly_recommended": "强烈建议精读",
+    "recommended": "建议阅读",
+    "skim_only": "只需略读",
+    "not_priority": "暂非优先",
+    "unknown": "unknown",
+}
 REQUIRED_WRITE_READY_TEXT_FIELDS = {
     "one_sentence_summary": "one_sentence_summary is required",
     "abstract_translation": "abstract_translation is required",
@@ -62,6 +86,13 @@ def safe_choice(value: Any, allowed: set[str], default: str) -> str:
     return value if isinstance(value, str) and value in allowed else default
 
 
+def display_choice(value: str, display_labels: dict[str, str]) -> str:
+    label = display_labels.get(value, "unknown")
+    if value == "unknown" or label == "unknown":
+        return "unknown"
+    return f"{label} ({value})"
+
+
 def safe_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
@@ -78,6 +109,66 @@ def clean_string_list(value: Any) -> list[str]:
     return cleaned
 
 
+def clean_method_modules(value: Any) -> list[dict[str, str]]:
+    items = safe_list(value)
+    cleaned: list[dict[str, str]] = []
+    for item in items[:8]:
+        if not isinstance(item, dict):
+            continue
+        name = safe_text(item.get("name"))
+        if name == "unknown":
+            continue
+        cleaned.append(
+            {
+                "name": name,
+                "input": safe_text(item.get("input")),
+                "target": safe_text(item.get("target")),
+                "output": safe_text(item.get("output")),
+                "role": safe_text(item.get("role")),
+            }
+        )
+    return cleaned
+
+
+def clean_key_results_table(value: Any) -> list[dict[str, str]]:
+    items = safe_list(value)
+    cleaned: list[dict[str, str]] = []
+    for item in items[:12]:
+        if not isinstance(item, dict):
+            continue
+        result = safe_text(item.get("result"))
+        if result == "unknown":
+            continue
+        cleaned.append(
+            {
+                "result": result,
+                "value": safe_text(item.get("value")),
+                "meaning": safe_text(item.get("meaning")),
+            }
+        )
+    return cleaned
+
+
+def clean_concept_cards(value: Any) -> list[dict[str, Any]]:
+    items = safe_list(value)
+    cleaned: list[dict[str, Any]] = []
+    for item in items[:8]:
+        if not isinstance(item, dict):
+            continue
+        term = safe_text(item.get("term"))
+        if term == "unknown":
+            continue
+        cleaned.append(
+            {
+                "term": term,
+                "short_definition": safe_text(item.get("short_definition")),
+                "role_in_paper": safe_text(item.get("role_in_paper")),
+                "related_keywords": clean_string_list(item.get("related_keywords", [])),
+            }
+        )
+    return cleaned
+
+
 def flatten_inline_markdown_text(value: str) -> str:
     parts = []
     for line in value.splitlines():
@@ -89,6 +180,47 @@ def flatten_inline_markdown_text(value: str) -> str:
 
 def clean_required_text(value: Any) -> str:
     return flatten_inline_markdown_text(value) if isinstance(value, str) else ""
+
+
+def safe_text(value: Any, default: str = "unknown") -> str:
+    if not isinstance(value, str):
+        return default
+    text = flatten_inline_markdown_text(value)
+    return text if text else default
+
+
+def scalar_text(value: Any, default: str = "") -> str:
+    if isinstance(value, str):
+        return flatten_inline_markdown_text(value) or default
+    if isinstance(value, (int, float)):
+        return str(value)
+    return default
+
+
+def markdown_table_cell(value: Any) -> str:
+    text = scalar_text(value) if not isinstance(value, str) else flatten_inline_markdown_text(value)
+    return text.replace("|", r"\|")
+
+
+def optional_text(value: Any) -> str:
+    return flatten_inline_markdown_text(value) if isinstance(value, str) else ""
+
+
+def fallback_text(primary: Any, fallback: Any, default: str = "unknown") -> str:
+    primary_text = flatten_inline_markdown_text(primary) if isinstance(primary, str) else ""
+    if primary_text:
+        return primary_text
+    fallback_text_value = flatten_inline_markdown_text(fallback) if isinstance(fallback, str) else ""
+    if fallback_text_value:
+        return fallback_text_value
+    return default
+
+
+def clean_workflow_steps(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    items = clean_string_list(value)
+    return "\n".join(f"{index}. {item}" for index, item in enumerate(items, start=1))
 
 
 def _has_text(value: Any) -> bool:
@@ -104,10 +236,8 @@ def format_evidence_line(locator: str, summary: str) -> str:
     locator = flatten_inline_markdown_text(locator)
     summary = flatten_inline_markdown_text(summary)
     if locator and summary:
-        details = f"{locator}; {summary}"
-    else:
-        details = locator or summary
-    return f"  - 证据: {details}"
+        return f"{locator}: {summary}"
+    return locator or summary
 
 
 def clean_evidence_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -180,12 +310,34 @@ def validate_write_ready_evidence(summary: dict[str, Any]) -> list[str]:
     return errors
 
 
+def normalize_figure_image_quality(item: dict[str, Any]) -> str:
+    visual_quality = item.get("visual_quality")
+    if isinstance(visual_quality, dict):
+        warnings = visual_quality.get("warnings", [])
+        if isinstance(warnings, list):
+            for warning in warnings:
+                if isinstance(warning, str) and warning in VALID_IMAGE_QUALITIES:
+                    return warning
+
+    image_quality = item.get("image_quality")
+    if isinstance(image_quality, str) and image_quality in VALID_IMAGE_QUALITIES:
+        return image_quality
+
+    if isinstance(visual_quality, dict):
+        status = visual_quality.get("status")
+        if isinstance(status, str) and status in VALID_IMAGE_QUALITIES:
+            return status
+
+    return "unknown"
+
+
 def clean_key_figures(summary: dict[str, Any]) -> list[dict[str, Any]]:
     items = safe_list(summary.get("key_figures", []))
     cleaned: list[dict[str, Any]] = []
     for item in items[:10]:
         if not isinstance(item, dict):
             continue
+        image_quality = normalize_figure_image_quality(item)
         cleaned.append(
             {
                 "figure_id": str(item.get("figure_id", "")).strip(),
@@ -193,6 +345,11 @@ def clean_key_figures(summary: dict[str, Any]) -> list[dict[str, Any]]:
                 "page": item.get("page", ""),
                 "priority_score": item.get("priority_score", ""),
                 "why_it_matters": str(item.get("why_it_matters", "")).strip(),
+                "title_short": optional_text(item.get("title_short")),
+                "why_it_matters_short": fallback_text(item.get("why_it_matters_short"), item.get("why_it_matters")),
+                "evidence_level": safe_choice(item.get("evidence_level"), VALID_EVIDENCE_LEVELS, "unknown"),
+                "image_quality": image_quality,
+                "figure_quality_note": fallback_text(item.get("figure_quality_note"), image_quality),
                 "analysis": str(item.get("analysis", "")).strip(),
             }
         )
@@ -218,6 +375,26 @@ def clean_issue_list(summary: dict[str, Any]) -> list[dict[str, str]]:
             }
         )
     return cleaned
+
+
+def infer_main_risk_short(summary: dict[str, Any], review_issues: list[dict[str, str]]) -> str:
+    main_risk_short = optional_text(summary.get("main_risk_short"))
+    if main_risk_short:
+        return main_risk_short
+
+    extraction_warnings = clean_string_list(summary.get("extraction_warnings", []))
+    if extraction_warnings:
+        return extraction_warnings[0]
+
+    if review_issues:
+        severity_rank = {"high": 0, "medium": 1, "low": 2}
+        highest_issue = min(
+            review_issues,
+            key=lambda item: severity_rank.get(item.get("severity", "medium"), severity_rank["medium"]),
+        )
+        return highest_issue.get("issue") or "none"
+
+    return "none"
 
 
 def clean_improvement_notes(summary: dict[str, Any]) -> list[dict[str, str]]:
@@ -360,8 +537,14 @@ def render_note(
         trim_blocks=True,
         lstrip_blocks=True,
     )
+    env.filters["table_cell"] = markdown_table_cell
     template = env.get_template("zotero_note.md.j2")
     resolved_date = generated_date or date.today().isoformat()
+    review_issues = clean_issue_list(summary)
+    extraction_warnings = clean_string_list(summary.get("extraction_warnings", []))
+    paper_type = safe_choice(summary.get("paper_type"), VALID_PAPER_TYPES, "unknown")
+    trust_status = safe_choice(summary.get("trust_status"), VALID_TRUST_STATUSES, "usable_with_caveats")
+    reading_decision = safe_choice(summary.get("reading_decision"), VALID_READING_DECISIONS, "unknown")
     context = {
         "note_title": build_note_title(metadata, resolved_date, version_suffix=version_suffix),
         "generated_date": resolved_date,
@@ -372,31 +555,52 @@ def render_note(
         "doi": metadata.get("DOI", ""),
         "url": metadata.get("url", ""),
         "zotero_url": metadata.get("zoteroUrl", ""),
-        "quality_score": summary.get("quality_score", ""),
-        "paper_type": safe_choice(summary.get("paper_type"), VALID_PAPER_TYPES, "unknown"),
-        "trust_status": safe_choice(summary.get("trust_status"), VALID_TRUST_STATUSES, "usable_with_caveats"),
-        "trust_rationale": summary.get("trust_rationale", "") or "未提供可信度判断依据。",
+        "quality_score": scalar_text(summary.get("quality_score")),
+        "paper_type": display_choice(paper_type, PAPER_TYPE_DISPLAY_LABELS),
+        "trust_status": display_choice(trust_status, TRUST_STATUS_DISPLAY_LABELS),
+        "trust_rationale": safe_text(summary.get("trust_rationale"), "未提供可信度判断依据。"),
         "review_status": safe_choice(summary.get("review_status"), VALID_REVIEW_STATUSES, "not_reviewed"),
-        "review_issues": clean_issue_list(summary),
+        "review_issues": review_issues,
         "evidence_summary": clean_evidence_summary(summary),
         "improvement_status": safe_choice(
             summary.get("improvement_status"), VALID_IMPROVEMENT_STATUSES, "not_needed"
         ),
         "improvement_notes": clean_improvement_notes(summary),
-        "one_sentence_summary": summary.get("one_sentence_summary", ""),
-        "abstract_translation": summary.get("abstract_translation", ""),
+        "one_sentence_summary": safe_text(summary.get("one_sentence_summary"), ""),
+        "abstract_translation": safe_text(summary.get("abstract_translation"), ""),
         "key_points": clean_string_list(summary.get("key_points", [])),
-        "research_question": summary.get("research_question", ""),
-        "method": summary.get("method", ""),
-        "figure_overview": summary.get("figure_overview", ""),
+        "research_question": safe_text(summary.get("research_question"), ""),
+        "method": safe_text(summary.get("method"), ""),
+        "figure_overview": safe_text(summary.get("figure_overview"), ""),
         "key_figures": clean_key_figures(summary),
-        "experiments": summary.get("experiments", ""),
+        "experiments": safe_text(summary.get("experiments"), ""),
         "contributions": clean_string_list(summary.get("contributions", [])),
         "limitations": clean_string_list(summary.get("limitations", [])),
-        "ai4s_relevance": summary.get("ai4s_relevance", ""),
+        "ai4s_relevance": safe_text(summary.get("ai4s_relevance"), ""),
         "follow_up_keywords": clean_string_list(summary.get("follow_up_keywords", [])),
-        "extraction_warnings": clean_string_list(summary.get("extraction_warnings", [])),
+        "extraction_warnings": extraction_warnings,
         "note_labels": build_note_labels(summary),
+        "research_object": safe_text(summary.get("research_object")),
+        "research_question_short": fallback_text(summary.get("research_question_short"), summary.get("research_question")),
+        "core_method_short": fallback_text(summary.get("core_method_short"), summary.get("method")),
+        "core_result_short": fallback_text(summary.get("core_result_short"), summary.get("one_sentence_summary")),
+        "relevance_to_user": safe_text(summary.get("relevance_to_user")),
+        "reading_decision": display_choice(reading_decision, READING_DECISION_DISPLAY_LABELS),
+        "main_risk_short": infer_main_risk_short(summary, review_issues),
+        "tldr": optional_text(summary.get("tldr")),
+        "background_problem": safe_text(summary.get("background_problem")),
+        "existing_gap": safe_text(summary.get("existing_gap")),
+        "paper_entry_point": safe_text(summary.get("paper_entry_point")),
+        "method_overview": fallback_text(summary.get("method_overview"), summary.get("method")),
+        "method_modules": clean_method_modules(summary.get("method_modules", [])),
+        "workflow_steps": clean_workflow_steps(summary.get("workflow_steps", "")),
+        "technical_details": clean_string_list(summary.get("technical_details", [])),
+        "key_results_table": clean_key_results_table(summary.get("key_results_table", [])),
+        "applicability_limits": clean_string_list(summary.get("applicability_limits", [])),
+        "transferable_insight": fallback_text(summary.get("transferable_insight"), summary.get("ai4s_relevance")),
+        "workflow_lessons": clean_string_list(summary.get("workflow_lessons", [])),
+        "follow_up_questions": clean_string_list(summary.get("follow_up_questions", [])),
+        "concept_cards": clean_concept_cards(summary.get("concept_cards", [])),
     }
     return template.render(**context).strip() + "\n"
 

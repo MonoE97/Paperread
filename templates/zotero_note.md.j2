@@ -1,127 +1,308 @@
 # {{ note_title }}
 
-## 元数据
+> {{ one_sentence_summary }}
 
-- **Zotero Key**: {{ key }}
-- **标题**: {{ title }}
-- **作者**: {{ creators }}
-- **日期**: {{ date }}
-- **DOI**: {{ doi }}
-- **URL**: {{ url }}
-- **Zotero 链接**: {{ zotero_url }}
-- **质量评分**: {{ quality_score }}
+## 0. 速读卡片
 
-## 可信度与证据
+| 项目 | 内容 |
+| --- | --- |
+| 论文类型 | {{ paper_type | table_cell }} |
+| 研究对象 | {{ research_object | table_cell }} |
+| 核心问题 | {{ research_question_short | table_cell }} |
+| 核心方法 | {{ core_method_short | table_cell }} |
+| 核心结果 | {{ core_result_short | table_cell }} |
+| 可信状态 | {{ trust_status | table_cell }} |
+| 质量评分 | {{ quality_score | table_cell }} |
+| 最大风险 | {{ main_risk_short | table_cell }} |
+| 是否值得精读 | {{ reading_decision | table_cell }} |
+| 与我的研究关系 | {{ relevance_to_user | table_cell }} |
 
-- **论文类型**: {{ paper_type }}
-- **可信状态**: {{ trust_status }}
-- **审查状态**: {{ review_status }}
-- **改进状态**: {{ improvement_status }}
-- **判断依据**: {{ trust_rationale }}
+{% if tldr %}
+### 30 秒结论
 
-## 核心结论
-
-{{ one_sentence_summary }}
-
-## 摘要翻译
-
-{{ abstract_translation }}
-
-## 关键要点
-
-{% for item in key_points -%}
-- {{ item }}
-{% endfor %}
-
-## 研究问题
-
-{{ research_question }}
-
-## 方法拆解
-
-{{ method }}
-
-## 关键图片总览
-
-{{ figure_overview }}
-
-{% for item in key_figures -%}
-### {{ item.figure_id }}
-
-- **Caption**: {{ item.caption }}
-- **Page**: {{ item.page }}
-- **Priority Score**: {{ item.priority_score }}
-- **Why It Matters**: {{ item.why_it_matters }}
-
-{{ item.analysis }}
-
-{% endfor %}
-
-## 实验与证据
-
-{{ experiments }}
-
-## 主要贡献
-
-{% for item in contributions -%}
-- {{ item }}
-{% endfor %}
-
-## 局限与风险
-
-{% for item in limitations -%}
-- {{ item }}
-{% endfor %}
-
-## AI+物理/材料启发
-
-{{ ai4s_relevance }}
-
-## 后续关键词
-
-{% for item in follow_up_keywords -%}
-- {{ item }}
-{% endfor %}
-
-## 抽取告警
-
-{% if extraction_warnings -%}
-{% for item in extraction_warnings -%}
-- {{ item }}
-{% endfor %}
-{% else -%}
-- none
+{{ tldr }}
 {% endif %}
 
-## 关键证据
+## 1. 论文解决了什么问题？
 
-{% if evidence_summary %}
-{% set ns = namespace(lines=[]) %}
-{% for item in evidence_summary %}
-{% set ns.lines = ns.lines + ["- 结论: " ~ item.claim] %}
-{% for evidence in item.evidence %}
-{% set ns.lines = ns.lines + [evidence.line] %}
+### 背景问题
+
+{{ background_problem }}
+
+### 已有缺口
+
+{{ existing_gap }}
+
+### 本文切入点
+
+{{ paper_entry_point }}
+
+{% if abstract_translation %}
+### 摘要翻译
+
+{{ abstract_translation }}
+{% endif %}
+
+## 2. 方法框架
+
+### 方法总览
+
+{{ method_overview }}
+
+### 模块拆解
+
+{% if method_modules %}
+| 模块 | 输入 | 目标 | 输出 | 作用 |
+| --- | --- | --- | --- | --- |
+{% for item in method_modules %}
+| {{ item.name | table_cell }} | {{ item.input | table_cell }} | {{ item.target | table_cell }} | {{ item.output | table_cell }} | {{ item.role | table_cell }} |
 {% endfor %}
-{% endfor %}
-{{ ns.lines | join('\n') }}
 {% else %}
 - none
 {% endif %}
 
-{% if review_issues %}
-## 审查问题
+{% if workflow_steps %}
+### Workflow
 
+{{ workflow_steps }}
+{% endif %}
+
+### 技术细节
+
+{% if technical_details %}
+{% for item in technical_details %}
+- {{ item }}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+## 3. 关键结果与数值
+
+### 关键结果表
+
+{% if key_results_table %}
+| 结果 | 数值 | 含义 |
+| --- | --- | --- |
+{% for item in key_results_table %}
+| {{ item.result | table_cell }} | {{ item.value | table_cell }} | {{ item.meaning | table_cell }} |
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+### 关键要点
+
+{% if key_points %}
+{% for item in key_points %}
+- {{ item }}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+{% if experiments %}
+### 实验与证据摘要
+
+{{ experiments }}
+{% endif %}
+
+## 4. 图表导读
+
+{% if figure_overview %}
+### 图表总览
+
+{{ figure_overview }}
+{% endif %}
+
+### 图表索引
+
+{% if key_figures %}
+| 图 | 页码 | 作用 | 证据等级 | 图像质量 |
+| --- | --- | --- | --- | --- |
+{% for item in key_figures %}
+| {{ item.figure_id | table_cell }} | {{ item.page | table_cell }} | {{ item.why_it_matters_short | table_cell }} | {{ item.evidence_level | table_cell }} | {{ item.image_quality | table_cell }} |
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+### 展开图表
+
+{% if key_figures %}
+{% for item in key_figures %}
+### {{ item.figure_id }}{% if item.title_short %}：{{ item.title_short }}{% endif %}
+
+- **图注**: {{ item.caption }}
+- **页码**: {{ item.page }}
+- **为什么重要**: {{ item.why_it_matters }}
+- **图像/抽取质量**: {{ item.figure_quality_note }}
+
+{{ item.analysis }}
+
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+## 5. 贡献、局限与适用边界
+
+### 主要贡献
+
+{% if contributions %}
+{% for item in contributions %}
+- {{ item }}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+### 局限与风险
+
+{% if limitations %}
+{% for item in limitations %}
+- {{ item }}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+### 适用边界
+
+{% if applicability_limits %}
+{% for item in applicability_limits %}
+- {{ item }}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+## 6. 对 AI4S / 电池 / 材料研究的启发
+
+### 可迁移启发
+
+{{ transferable_insight }}
+
+### 工作流经验
+
+{% if workflow_lessons %}
+{% for item in workflow_lessons %}
+- {{ item }}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+### 后续问题
+
+{% if follow_up_questions %}
+{% for item in follow_up_questions %}
+- {{ item }}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+## 7. 术语与概念卡片
+
+{% if concept_cards %}
+{% for item in concept_cards %}
+### {{ item.term }}
+
+- **定义**: {{ item.short_definition }}
+- **在本文中的作用**: {{ item.role_in_paper }}
+- **相关关键词**: {{ item.related_keywords | join(', ') }}
+
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+## 8. 后续检索关键词
+
+{% if follow_up_keywords %}
+{% for item in follow_up_keywords %}
+- {{ item }}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+## 9. 元数据
+
+| 字段 | 内容 |
+| --- | --- |
+| Zotero Key | {{ key | table_cell }} |
+| 标题 | {{ title | table_cell }} |
+| 作者 | {{ creators | table_cell }} |
+| 日期 | {{ date | table_cell }} |
+| DOI | {{ doi | table_cell }} |
+| URL | {{ url | table_cell }} |
+| Zotero 链接 | {{ zotero_url | table_cell }} |
+| 生成日期 | {{ generated_date | table_cell }} |
+
+## 10. 自动抽取质量报告
+
+### 抽取告警
+
+{% if extraction_warnings %}
+{% for item in extraction_warnings %}
+- {{ item }}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+### 审查问题
+
+{% if review_issues %}
 {% for item in review_issues %}
 - {{ item.severity }}: {{ item.issue }}{% if item.suggested_fix %} 建议: {{ item.suggested_fix }}{% endif %}{{ "\n" }}
 {% endfor %}
+{% else %}
+- none
 {% endif %}
 
+### 可信度判断
+
+{{ trust_rationale }}
+
+### 审查状态
+
+{{ review_status }}
+
+## 11. 证据链附录
+
+{% if evidence_summary %}
+{% for item in evidence_summary %}
+### Claim {{ loop.index }}
+
+**结论**: {{ item.claim }}
+
+**证据**:
+{% if item.evidence %}
+{% for evidence in item.evidence %}
+- {{ evidence.line }}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+## 12. 补充优化记录
+
 {% if improvement_notes %}
-## 补充优化记录
+- **改进状态**: {{ improvement_status }}
 
 {% for item in improvement_notes %}
 - {{ item.issue }}{% if item.action %}: {{ item.action }}{% endif %}{% if item.source %} (source: {{ item.source }}){% endif %}{{ "\n" }}
 {% endfor %}
+{% else %}
+- none
 {% endif %}
 
 ---

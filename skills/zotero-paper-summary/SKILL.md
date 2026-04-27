@@ -131,7 +131,12 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
       "caption": "",
       "page": 0,
       "priority_score": 0,
+      "title_short": "",
       "why_it_matters": "",
+      "why_it_matters_short": "",
+      "evidence_level": "unknown",
+      "image_quality": "unknown",
+      "figure_quality_note": "",
       "analysis": ""
     }
   ],
@@ -141,6 +146,48 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
   "ai4s_relevance": "",
   "follow_up_keywords": [],
   "note_labels": [],
+  "research_object": "",
+  "research_question_short": "",
+  "core_method_short": "",
+  "core_result_short": "",
+  "relevance_to_user": "",
+  "reading_decision": "unknown",
+  "main_risk_short": "",
+  "tldr": "",
+  "background_problem": "",
+  "existing_gap": "",
+  "paper_entry_point": "",
+  "method_overview": "",
+  "method_modules": [
+    {
+      "name": "",
+      "input": "",
+      "target": "",
+      "output": "",
+      "role": ""
+    }
+  ],
+  "workflow_steps": "",
+  "technical_details": [],
+  "key_results_table": [
+    {
+      "result": "",
+      "value": "",
+      "meaning": ""
+    }
+  ],
+  "applicability_limits": [],
+  "transferable_insight": "",
+  "workflow_lessons": [],
+  "follow_up_questions": [],
+  "concept_cards": [
+    {
+      "term": "",
+      "short_definition": "",
+      "role_in_paper": "",
+      "related_keywords": []
+    }
+  ],
   "quality_score": "",
   "extraction_warnings": [],
   "paper_type": "research_article",
@@ -151,7 +198,7 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
       "evidence": [
         {
           "type": "text",
-          "locator": "page 1",
+          "locator": "context.md page 1",
           "summary": ""
         }
       ],
@@ -182,10 +229,21 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
      - 它支撑了哪条核心结论或方法理解
    - `note_labels` 只写本文自动推断出的英文规范 key，不要包含固定系统标签 `codex-summary` 或 `paper-summary`。
    - `note_labels` 最多 4 个；使用 lowercase snake_case，例如 `metasurface`、`inverse_design`、`deep_learning`、`power_allocation`。
+   - `reading_decision` 必须从 `strongly_recommended`、`recommended`、`skim_only`、`not_priority`、`unknown` 中选择。
+   - `main_risk_short` 只写一个最重要的风险；完整告警保留在 `extraction_warnings` 和 `review_issues`。
+   - `workflow_steps` 可以是 Markdown string，也可以是 string list。
+   - `method_modules` 优先用于 AI4S、computational materials、battery、simulation 和 method papers，拆出方法模块的输入、目标、输出和作用。
+   - `key_results_table` 汇总 RMSE、MAE、speedup、capacitance、energy density、cycle life、rate performance、diffusion barrier、conductivity、OOD performance 等关键结果。
+   - `concept_cards` 写 3-8 个核心概念。
+   - `workflow_lessons` 提炼可复用研究 workflow，不重复本文结论。
    - `paper_type` 必须从 `research_article`、`review`、`perspective`、`benchmark`、`method_paper`、`dataset_paper`、`theory_paper`、`unknown` 中选择。
-   - `trust_status` 必须从 `trusted`、`usable_with_caveats`、`metadata_only`、`needs_manual_review` 中选择；默认用 `usable_with_caveats`，不要过度自信。
+   - `trust_status` 必须从 `trusted`、`usable_with_caveats`、`metadata_only`、`needs_manual_review` 中选择；默认用 `usable_with_caveats`，不要过度自信；不要输出 `needs_review`、`low_confidence` 或 `failed`。
    - `evidence_summary` 最多 5 条，每条结论最多列 3 个证据 locator；证据必须来自 `context.md` 或 `figure_context.md`。
    - `trust_rationale` 必须解释可信状态和抽取告警之间的关系。
+   - `evidence_level` 必须从 `high`、`medium`、`low`、`text_only`、`caption_only`、`image_unverified`、`unknown` 中选择。
+   - `image_quality` 必须从 `good`、`ok`、`poor`、`image_too_small`、`caption_only`、`unknown` 中选择。
+   - 如果 `visual_quality.warnings` 存在，优先使用 `image_too_small` 等具体 warning，不要泛化成 `poor`。
+   - 当 `image_quality` 为 `poor`、`image_too_small` 或 `caption_only` 时，`figure_quality_note` 和 `analysis` 必须说明图分析不依赖像素读取，只基于正文或 caption。
 
 8. 初始渲染和验证 note（dry-run 审查输入）：
 
