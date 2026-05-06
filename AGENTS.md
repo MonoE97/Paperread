@@ -10,7 +10,7 @@
 - `tests/`：pytest 测试，禁止真实写入 Zotero。
 - `templates/`：Jinja2 note 模板。
 - `skills/`：Codex skill 定义。
-- `docs/references/`：外部项目参考与设计取舍记录。
+- `docs/references/`：外部项目参考、设计取舍记录和可复用 runbook。
 - `docs/superpowers/plans/`：实施计划。
 
 ## 环境与依赖

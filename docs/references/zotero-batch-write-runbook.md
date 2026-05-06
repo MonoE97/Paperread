@@ -1,0 +1,185 @@
+# Zotero Batch Write Runbook
+
+This runbook captures the reusable control pattern for batch Zotero note writing
+and historical note-content migrations. It is the operational reference for
+future multi-paper or multi-note writes; one-off implementation plans under
+`docs/superpowers/plans/` are historical execution records.
+
+## Scope
+
+Use this runbook when a task will write or update more than one Zotero note, or
+when a local conversion step prepares content for later Zotero writes.
+
+Do not use it to reorganize Zotero collections, edit Zotero metadata, change
+Better Notes configuration, or modify Zotero SQLite directly.
+
+## Durable Artifacts
+
+Create one batch directory under `runs/` before analysis starts:
+
+```text
+runs/<YYYY-MM-DD>/<batch-id>/
+```
+
+Use these batch-level files:
+
+- `manifest.json`: frozen candidate set, per-item state, run directories, note
+  keys, hashes when content migration is involved, and compact errors.
+- `write-preview.md`: compact preview table shown before any persistent Zotero
+  write.
+- `report.md`: final totals and blocked or failed items.
+
+Use one per-paper run directory for summary generation, created with
+`uv run zotero-paperread create-run`. Use the returned `run_dir`; do not hand-roll
+slugs.
+
+## Candidate Freeze
+
+Build the complete candidate set first, then freeze it in `manifest.json`.
+After freeze, do not rebuild the candidate list during worker execution or
+resume unless the user explicitly asks for a fresh audit.
+
+For summary-note batches, detect existing Codex summaries with
+`get_item_details(mode="complete")`. Treat an item as already summarized when a
+child note matches any marker:
+
+- note title starts with `[Codex Summary]`;
+- note metadata tags include `codex-summary`;
+- note body includes `Tags: codex-summary, paper-summary`.
+
+For historical note-content migrations, store the raw note content and a
+SHA-256 hash before conversion. Before updating Zotero, re-read the current note
+and compare the current hash with the frozen hash.
+
+## Status Model
+
+Recommended item states for summary-note batches:
+
+```text
+discovered
+skipped_existing_summary
+skipped_invalid_item
+queued
+prepared
+summarized
+reviewed
+gated
+previewed
+write_ready
+written
+verified
+blocked
+failed
+```
+
+Recommended states for content migrations:
+
+```text
+discovered
+migrate
+skipped
+blocked
+verified
+failed
+```
+
+`verified`, `skipped`, `blocked`, and `failed` are terminal states. Keep
+`blocked_reason` concise and keep full error text in a separate field when it is
+needed for audit.
+
+## Worker Boundary
+
+Workers may prepare local run artifacts, extract PDFs and figures, draft
+`summary.json`, and run local validation. Workers must not write Zotero notes,
+change Zotero collections, edit Zotero metadata, or touch source files outside
+their assigned run directories.
+
+The coordinator owns:
+
+- candidate discovery and manifest freeze;
+- run directory allocation;
+- central quality gates;
+- preview presentation;
+- all `write_note` calls;
+- post-write verification and final reporting.
+
+Cap parallelism explicitly for large batches and queue remaining candidates.
+Close completed workers promptly.
+
+## Summary Note Gate
+
+A Zotero summary-note write is allowed only after all checks pass:
+
+```text
+summary.json validates
+review.json exists
+review.json needs_improvement is false
+summary.json improvement_status is neither needed nor blocked after apply-review
+validate-trusted-summary passes
+same-day version suffix has been computed from current item-details.json
+note.md and note.html have been finalized with the computed suffix
+note tags have been computed with note-tags
+preview-note has been shown for note.md and note.html
+target Zotero item title has been shown
+user has confirmed the write-ready preview
+```
+
+Write only through Zotero MCP:
+
+```text
+write_note(action="create", parentKey=<item_key>, content=<contents of note.html>, tags=<parsed note-tags list>)
+```
+
+Never overwrite an existing Codex summary. Same-day repeats must use
+`next-version-suffix` and create a new child note.
+
+## Content Migration Gate
+
+Historical Zotero notes may already be HTML. Do not render the whole note as
+Markdown unless it has been classified as plain Markdown.
+
+Safe content migration sequence:
+
+1. Save raw note content under the batch directory.
+2. Classify the note content.
+3. Convert only local dry-run files.
+4. Review converted previews and `report.md`.
+5. Stop for explicit user confirmation.
+6. Re-read the current Zotero note and compare hashes.
+7. Update one note at a time.
+8. Re-read after each update and verify the rendered condition.
+
+Update shape:
+
+```text
+write_note(action="update", noteKey=<note_key>, content=<converted_html>)
+```
+
+Do not pass tags during update. A content migration changes note rendering only;
+tag changes are separate side effects.
+
+## Resume Rules
+
+Resume from `manifest.json`.
+
+If execution stops before preview, continue from the first item that is not in a
+terminal state. If execution stops after preview but before writes, re-check
+current Zotero state and ask before writing. If execution stops during writes,
+resume from the first item that is not `verified`.
+
+Before writing after a resume, re-check that another session did not create an
+equivalent Codex summary or change the note content being migrated.
+
+## Verification
+
+After implementation or runbook changes, run:
+
+```bash
+uv run pytest
+uv run zotero-paperread --help
+uv run zotero-paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/zotero-paperread-extract.json
+git diff --check
+```
+
+For completed Zotero writes, verify through Zotero MCP readback, not only local
+files or command success.

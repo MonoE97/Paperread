@@ -202,3 +202,6 @@ Do not pass tags during update. This migration changes note content only.
 ## Reference
 
 This project adapts the skill-based paper-analysis ideas from `evil-read-arxiv`, but replaces arXiv/Obsidian assumptions with a Zotero-first workflow.
+
+For batch note writing and historical note-content migrations, see
+`docs/references/zotero-batch-write-runbook.md`.
