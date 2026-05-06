@@ -1,5 +1,5 @@
 import zotero_paperread.note as note_module
-from zotero_paperread.note import render_note, validate_note
+from zotero_paperread.note import render_note, render_note_html, validate_note
 
 
 METADATA = {
@@ -216,6 +216,47 @@ def test_render_note_escapes_pipe_characters_inside_markdown_table_cells() -> No
     assert "| Module \\| A | Input \\| structure | Target \\| property | Output \\| score | Role \\| ranking |" in note
     assert "| 标题 | Alpha | Beta |" not in note
     assert "| Module | A | Input | structure |" not in note
+
+
+def test_render_note_html_converts_markdown_tables_to_zotero_ready_html() -> None:
+    note = render_note(
+        {**METADATA, "title": "Alpha | Beta"},
+        {
+            **SUMMARY,
+            "research_object": "Battery | Interface",
+            "method_modules": [
+                {
+                    "name": "Module | A",
+                    "input": "Input | structure",
+                    "target": "Target | property",
+                    "output": "Output | score",
+                    "role": "Role | ranking",
+                }
+            ],
+        },
+        generated_date="2026-04-23",
+    )
+
+    html = render_note_html(note)
+
+    assert "<table>" in html
+    assert "<th>项目</th>" in html
+    assert "<td>Battery | Interface</td>" in html
+    assert "<td>Alpha | Beta</td>" in html
+    assert "<td>Module | A</td>" in html
+    assert "| --- | --- |" not in html
+
+
+def test_render_note_html_escapes_raw_html_from_note_source() -> None:
+    html = render_note_html(
+        "# Test\n\n"
+        "| Field | Value |\n"
+        "| --- | --- |\n"
+        "| unsafe | <script>alert(1)</script> & text |\n"
+    )
+
+    assert "<script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt; &amp; text" in html
 
 
 def test_render_note_old_summary_uses_safe_fallbacks() -> None:

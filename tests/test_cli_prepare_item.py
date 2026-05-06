@@ -173,3 +173,63 @@ def test_prepare_item_command_outputs_bundle_paths(monkeypatch, tmp_path: Path) 
     assert seen["max_pages"] == 1
     assert seen["arxiv_id"] is None
     assert seen["enable_ocr_fallback"] is False
+
+
+def test_prepare_item_command_processes_full_pdf_by_default(monkeypatch, tmp_path: Path) -> None:
+    pdf_path = tmp_path / "paper.pdf"
+    make_pdf(pdf_path, ["Abstract\nFirst page.", "Methods\nSecond page."])
+    details_path = tmp_path / "details.json"
+    workdir = tmp_path / "bundle"
+    details_path.write_text(
+        json.dumps(
+            {
+                "key": "CLI123",
+                "title": "CLI Paper",
+                "creators": [{"firstName": "A", "lastName": "B"}],
+                "date": "2026",
+                "attachments": [
+                    {
+                        "key": "PDF1",
+                        "filename": "paper.pdf",
+                        "contentType": "application/pdf",
+                        "path": str(pdf_path),
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
+
+    def fake_extract_figures(
+        requested_pdf_path: Path,
+        output_dir: Path,
+        top_k: int = 4,
+        max_pages: int | None = None,
+        *,
+        arxiv_id: str | None = None,
+        item_details: dict | None = None,
+        enable_ocr_fallback: bool = False,
+    ) -> dict:
+        seen["max_pages"] = max_pages
+        return {
+            "arxiv_id": None,
+            "pdf_path": str(requested_pdf_path),
+            "candidate_count": 0,
+            "selected_figures": [],
+            "source_attempts": [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(workflow, "extract_figures", fake_extract_figures)
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["prepare-item", str(details_path), "--workdir", str(workdir)])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    extract = json.loads((workdir / "extract.json").read_text(encoding="utf-8"))
+    assert seen["max_pages"] is None
+    assert "truncated_to_1_pages" not in payload["warnings"]
+    assert "Second page." in extract["text"]

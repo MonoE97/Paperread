@@ -75,6 +75,132 @@ def test_finalize_note_command_writes_and_validates_markdown(tmp_path: Path) -> 
     assert "note_valid" in result.stdout
 
 
+def test_finalize_note_command_can_write_zotero_ready_html(tmp_path: Path) -> None:
+    metadata_path = tmp_path / "metadata.json"
+    summary_path = tmp_path / "summary.json"
+    output_path = tmp_path / "note.md"
+    html_output_path = tmp_path / "note.html"
+    write_json(metadata_path, {"key": "ABC123", "title": "Paper", "creators": "A", "date": "2026"})
+    write_json(
+        summary_path,
+        {
+            "one_sentence_summary": "一句话总结。",
+            "abstract_translation": "摘要翻译。",
+            "key_points": ["要点"],
+            "research_question": "问题",
+            "method": "方法",
+            "experiments": "实验",
+            "contributions": ["贡献"],
+            "limitations": ["局限"],
+            "ai4s_relevance": "启发",
+            "follow_up_keywords": ["keyword"],
+            "quality_score": "8/10",
+            "extraction_warnings": [],
+            "research_object": "Battery | Interface",
+        },
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "finalize-note",
+            str(metadata_path),
+            str(summary_path),
+            "--output",
+            str(output_path),
+            "--html-output",
+            str(html_output_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert html_output_path.exists()
+    html = html_output_path.read_text(encoding="utf-8")
+    assert "Wrote note HTML:" in result.stdout
+    assert "<table>" in html
+    assert "<td>Battery | Interface</td>" in html
+    assert "| --- | --- |" not in html
+
+
+def test_render_note_html_command_converts_existing_note(tmp_path: Path) -> None:
+    note_path = tmp_path / "note.md"
+    html_output_path = tmp_path / "note.html"
+    note_path.write_text(
+        "# Existing Note\n\n"
+        "| Field | Value |\n"
+        "| --- | --- |\n"
+        "| target | rendered table |\n",
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["render-note-html", str(note_path), "--output", str(html_output_path)])
+
+    assert result.exit_code == 0
+    assert "Wrote note HTML:" in result.stdout
+    html = html_output_path.read_text(encoding="utf-8")
+    assert "<h1>Existing Note</h1>" in html
+    assert "<table>" in html
+    assert "<td>rendered table</td>" in html
+
+
+def test_classify_note_tables_command_reports_content_type(tmp_path: Path) -> None:
+    note_path = tmp_path / "note.html"
+    note_path.write_text("<p>| A | B |<br>| --- | --- |<br>| 1 | 2 |</p>", encoding="utf-8")
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["classify-note-tables", str(note_path)])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload == {
+        "content_type": "html_with_markdown_tables",
+        "has_markdown_table": True,
+        "has_html_table": False,
+    }
+
+
+def test_classify_note_tables_command_detects_self_closing_html_breaks(tmp_path: Path) -> None:
+    note_path = tmp_path / "note.html"
+    note_path.write_text("<p>| A | B |<br/>| --- | --- |<br/>| 1 | 2 |</p>", encoding="utf-8")
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["classify-note-tables", str(note_path)])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["content_type"] == "html_with_markdown_tables"
+    assert payload["has_markdown_table"] is True
+
+
+def test_convert_note_tables_command_writes_converted_html_and_report(tmp_path: Path) -> None:
+    note_path = tmp_path / "note.html"
+    output_path = tmp_path / "converted.html"
+    report_path = tmp_path / "report.json"
+    note_path.write_text("<p>| A | B |<br>| --- | --- |<br>| 1 | 2 |</p>", encoding="utf-8")
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "convert-note-tables",
+            str(note_path),
+            "--output",
+            str(output_path),
+            "--report",
+            str(report_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "<table>" in output_path.read_text(encoding="utf-8")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "converted"
+    assert report["content_type"] == "html_with_markdown_tables"
+    assert report["reason"] == "html_blocks_converted"
+
+
 def test_finalize_note_command_applies_version_suffix(tmp_path: Path) -> None:
     metadata_path = tmp_path / "metadata.json"
     summary_path = tmp_path / "summary.json"

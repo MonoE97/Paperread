@@ -2,7 +2,7 @@
 
 ## 项目目标
 
-本项目实现 Zotero-first 文献总结工作流：输入 Zotero 中的文章标题，Codex 通过 Zotero MCP 定位条目，使用本地 Python 工具抽取 PDF 内容，生成中文结构化论文总结，并在用户明确要求写入时创建 Zotero 子笔记。
+本项目实现 Zotero-first 文献总结工作流：输入 Zotero 中的文章标题，Codex 通过 Zotero MCP 定位条目，使用本地 Python 工具默认抽取完整 PDF 内容，生成中文结构化论文总结，并在用户明确要求写入时创建 Zotero 子笔记。审计源保留为 `note.md`，真实写入 Zotero 时使用由同一份 Markdown 转换出的 `note.html`。
 
 ## 目录约定
 
@@ -57,5 +57,7 @@ uv run zotero-paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/zot
 ## 写入规则
 
 - 默认先 dry-run。
-- 真实写入 Zotero 前，必须展示 note 预览和目标 Zotero item 标题。
+- `prepare-item`、`extract-pdf`、`extract-figures` 默认处理完整 PDF；只有用户明确要求快速调试、预览或截断抽取时才传 `--max-pages <N>`。
+- 真实写入 Zotero 前，必须展示 `note.md` 与 `note.html` 预览和目标 Zotero item 标题。
+- 真实写入 Zotero 时，`write_note(content=...)` 必须使用 `note.html` 的内容，避免 Markdown 表格在 Zotero 中被当作普通文本。
 - 重复运行不覆盖旧 note；同日重复创建时使用 `[Codex Summary] <paper title> - YYYY-MM-DD (v2)`、`(v3)` 等标题后缀创建新版本。

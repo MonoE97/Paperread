@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from pathlib import Path
 
@@ -8,7 +9,12 @@ import typer
 from rich.console import Console
 
 from zotero_paperread.figures import extract_figures
-from zotero_paperread.note import build_note_labels, render_note, validate_note, validate_trusted_summary
+from zotero_paperread.note import build_note_labels, render_note, render_note_html, validate_note, validate_trusted_summary
+from zotero_paperread.note_table_migration import (
+    classify_note_content,
+    convert_note_tables_to_html,
+    has_markdown_table_separator,
+)
 from zotero_paperread.pdf_extract import extract_pdf
 from zotero_paperread.review import apply_review_to_summary
 from zotero_paperread.runs import allocate_run_dir, write_run_manifest
@@ -69,7 +75,7 @@ def render_note_to_path(
     output: Path,
     generated_date: str | None = None,
     version_suffix: str = "",
-) -> None:
+) -> str:
     note = render_note(
         read_json_or_exit(metadata_json, label="metadata JSON"),
         read_json_or_exit(summary_json, label="summary JSON"),
@@ -79,6 +85,14 @@ def render_note_to_path(
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(note, encoding="utf-8")
     console.print(f"Wrote note Markdown: {output}")
+    return note
+
+
+def write_note_html_to_path(note: str, output: Path) -> None:
+    html = render_note_html(note)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(html, encoding="utf-8")
+    console.print(f"Wrote note HTML: {output}")
 
 
 def read_note_text_or_exit(note_path: Path) -> str:
@@ -201,11 +215,16 @@ def finalize_note_command(
     metadata_json: Path,
     summary_json: Path,
     output: Path = typer.Option(..., "--output", "-o", help="Write Markdown note to this file."),
+    html_output: Path | None = typer.Option(
+        None,
+        "--html-output",
+        help="Write Zotero-ready HTML converted from the finalized Markdown note.",
+    ),
     generated_date: str | None = typer.Option(None, "--generated-date", help="Override generated date."),
     version_suffix: str = typer.Option("", "--version-suffix", help="Append a suffix such as ' (v2)' to the note title."),
 ) -> None:
     """Render and validate a Zotero note sequentially."""
-    render_note_to_path(
+    note = render_note_to_path(
         metadata_json,
         summary_json,
         output,
@@ -213,6 +232,8 @@ def finalize_note_command(
         version_suffix=version_suffix,
     )
     validate_note_path_or_exit(output)
+    if html_output is not None:
+        write_note_html_to_path(note, html_output)
 
 
 @app.command("next-version-suffix")
@@ -241,6 +262,62 @@ def note_tags_command(summary_json: Path) -> None:
 def validate_note_command(note_path: Path) -> None:
     """Validate a rendered note."""
     validate_note_path_or_exit(note_path)
+
+
+@app.command("render-note-html")
+def render_note_html_command(
+    note_path: Path,
+    output: Path = typer.Option(..., "--output", "-o", help="Write Zotero-ready HTML to this file."),
+) -> None:
+    """Convert an existing rendered Markdown note into Zotero-ready HTML."""
+    write_note_html_to_path(read_note_text_or_exit(note_path), output)
+
+
+@app.command("classify-note-tables")
+def classify_note_tables_command(note_path: Path) -> None:
+    """Classify a raw Zotero note file before table migration."""
+    content = read_note_text_or_exit(note_path)
+    content_with_line_breaks = re.sub(r"<br\s*/?>", "\n", content, flags=re.IGNORECASE)
+    typer.echo(
+        json.dumps(
+            {
+                "content_type": classify_note_content(content),
+                "has_markdown_table": has_markdown_table_separator(content_with_line_breaks),
+                "has_html_table": "<table" in content.lower(),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+@app.command("convert-note-tables")
+def convert_note_tables_command(
+    note_path: Path,
+    output: Path = typer.Option(..., "--output", "-o", help="Write converted HTML to this file."),
+    report: Path = typer.Option(..., "--report", help="Write conversion report JSON to this file."),
+) -> None:
+    """Convert Markdown tables in a raw Zotero note file without writing to Zotero."""
+    result = convert_note_tables_to_html(read_note_text_or_exit(note_path))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(result.content, encoding="utf-8")
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(
+        json.dumps(
+            {
+                "status": result.status,
+                "content_type": result.content_type,
+                "reason": result.reason,
+                "before_hash": result.before_hash,
+                "after_hash": result.after_hash,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    console.print(f"Wrote converted note HTML: {output}")
+    console.print(f"Wrote conversion report: {report}")
 
 
 @app.command("validate-summary-json")

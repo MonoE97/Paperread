@@ -97,7 +97,7 @@ uv run zotero-paperread create-run --title "<title>" --item-key "<item_key>"
    - 运行：
 
 ```bash
-uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_dir> --max-pages 15
+uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_dir>
 ```
 
    - 该命令会生成：
@@ -107,6 +107,7 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
      - `figures.json`
      - `figure_context.md`
      - `figures/`
+   - 默认处理完整 PDF，不限制页数。只有用户明确要求快速调试、预览或截断抽取时，才显式追加 `--max-pages <N>`。
    - `context.md` 是默认总结输入源，包含元数据、摘要、抽取告警和 PDF 正文。
    - `figure_context.md` 用于关键图片筛选与分析，包含 figure provenance、source attempts、warnings 和候选图摘要。
    - `metadata.json` 中的 PDF 默认选择主论文；文件名、路径或标题含 appendix、supplement、supporting information 等低优先级信号的 PDF 会排在主文后面。
@@ -254,21 +255,23 @@ uv run zotero-paperread validate-summary-json <run_dir>/summary.json
 ```
 
 ```bash
-uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --output <run_dir>/note.md
+uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --output <run_dir>/note.md --html-output <run_dir>/note.html
 uv run zotero-paperread preview-note <run_dir>/note.md
+uv run zotero-paperread preview-note <run_dir>/note.html
 ```
 
-   - 生成的 `summary.json`、`note.md` 和预览输出都保留在同一个 run 目录里，便于审计和复查。
+   - 生成的 `summary.json`、`note.md`、`note.html` 和预览输出都保留在同一个 run 目录里，便于审计和复查。
    - `validate-summary-json` 只证明文件是可读 UTF-8 JSON 且顶层是 object，不代表语义字段已经完整正确。
    - 推荐使用 `finalize-note`，它会按正确顺序执行 `render-note -> validate-note`。
+   - Zotero note 内部是 HTML；`note.md` 用于人工审查，真实写入时使用 `note.html`，避免 Markdown 表格在 Zotero 中被当作普通文本。
    - 如果本次是同日新版本，把步骤 4 得到的 suffix 传给 `finalize-note`，例如：
 
 ```bash
-uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --output <run_dir>/note.md --version-suffix " (v2)"
+uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --output <run_dir>/note.md --html-output <run_dir>/note.html --version-suffix " (v2)"
 ```
 
-   - 如果手动拆开执行，必须按 `render-note -> validate-note -> preview-note` 串行执行，不能并行调度。
-   - 这是供二次质量审查读取的初始 dry-run note，不是最终 write-through gate。即使用户已经明确要求写入，也必须先完成 `preview-note`，确认目标条目标题和 note 预览都已经生成，再进入 Zotero 写入步骤。
+   - 如果手动拆开执行，必须按 `render-note -> validate-note -> render-note-html -> preview-note` 串行执行，不能并行调度。
+   - 这是供二次质量审查读取的初始 dry-run note，不是最终 write-through gate。即使用户已经明确要求写入，也必须先完成 `note.md` 和 `note.html` 的 `preview-note`，确认目标条目标题和 note 预览都已经生成，再进入 Zotero 写入步骤。
 
 9. 二次质量审查：
    - 阅读 `<run_dir>/context.md`、`<run_dir>/figure_context.md`、`<run_dir>/summary.json` 和 `<run_dir>/note.md`。
@@ -291,9 +294,10 @@ uv run zotero-paperread validate-trusted-summary <run_dir>/summary.json
 PAPER_TITLE="<paper title>"
 GENERATED_DATE="<YYYY-MM-DD>"
 VERSION_SUFFIX="$(uv run zotero-paperread next-version-suffix <run_dir>/item-details.json --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE")"
-uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --generated-date "$GENERATED_DATE" --version-suffix "$VERSION_SUFFIX" --output <run_dir>/note.md
+uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --generated-date "$GENERATED_DATE" --version-suffix "$VERSION_SUFFIX" --output <run_dir>/note.md --html-output <run_dir>/note.html
 NOTE_TAGS_JSON="$(uv run zotero-paperread note-tags <run_dir>/summary.json)"
 uv run zotero-paperread preview-note <run_dir>/note.md
+uv run zotero-paperread preview-note <run_dir>/note.html
 ```
 
 10. 补充优化：
@@ -316,19 +320,32 @@ summary.json improvement_status is neither needed nor blocked after apply-review
 validate-trusted-summary passes
 same-day version suffix has been computed from current item-details.json
 Zotero note tags have been computed from current summary.json using `note-tags`
-preview-note has been shown
+preview-note has been shown for note.md and note.html
 target Zotero item title has been shown
 ```
 
    - 如果 `review_status` 为 `failed`，停止并报告审查问题，不写入 Zotero。
    - note 标题由模板生成：`[Codex Summary] <paper title> - YYYY-MM-DD`，同日重复创建时追加 ` (v2)`、` (v3)` 等后缀。
    - note 正文末尾 `Tags:` 和 Zotero note metadata tags 必须使用同一套标签：固定标签 `codex-summary`、`paper-summary`，加上 `summary.json` 中 `note_labels` 归一化后的最多 4 个推断标签。
-   - 真实写入仍必须来自用户明确写入意图，且只能调用 `zotero-mcp write_note`。调用前用 `uv run zotero-paperread note-tags <run_dir>/summary.json` 得到 JSON 标签数组，解析后传给 `write_note(action="create", parentKey=<item key>, content=<note markdown>, tags=<parsed note-tags list>)`。
+   - 真实写入仍必须来自用户明确写入意图，且只能调用 `zotero-mcp write_note`。调用前用 `uv run zotero-paperread note-tags <run_dir>/summary.json` 得到 JSON 标签数组，解析后传给 `write_note(action="create", parentKey=<item key>, content=<contents of note.html>, tags=<parsed note-tags list>)`。
    - 成功后回读一次 `get_item_details`，确认子笔记已经挂载到目标条目下。
 
 ## Better Notes 兼容
 
 生成普通 Zotero 子笔记。Better Notes 如果已安装，可直接显示和管理该 note；本 skill 不依赖 Better Notes。
+
+## 历史笔记表格迁移
+
+当用户要求整理已有 Zotero 笔记中的表格显示问题时，不要重新总结论文。按内容格式迁移处理：
+
+1. 先 dry-run 发现候选 `[Codex Summary]` notes。
+2. 冻结 `runs/migrations/<date>-zotero-note-table-html/manifest.json`。
+3. 保存每条原始 note 内容到 `raw/<noteKey>.html`。
+4. 用 `classify-note-tables` 判断内容类型。
+5. 用 `convert-note-tables` 生成本地 `converted/<noteKey>.html` 和转换报告。
+6. 展示 manifest、blocked 列表、转换前后片段，等待用户明确确认。
+7. 确认后才调用 `write_note(action="update", noteKey=<note_key>, content=<converted_html>)`。
+8. update 时不要传 tags；写完逐条回读验证。
 
 ## V2 仍不做
 

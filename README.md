@@ -21,6 +21,7 @@ runs/<date>/<paper-slug>/
 - `figure_context.md`
 - `summary.json`
 - `note.md`
+- `note.html`
 - `figures/`
 
 These are intermediate and audit artifacts. Keep them while reviewing a run. Delete old runs manually when they are no longer useful.
@@ -36,7 +37,7 @@ Given a Zotero paper title, Codex can:
 5. extract figures, backfill nearby captions for embedded images, and analyze key images when available;
 6. generate a Chinese structured paper summary with figure-aware analysis;
 7. render a small set of normalized English key labels at the end of the note;
-8. validate summary JSON, render Markdown that survives Zotero list conversion, and preview the note;
+8. validate summary JSON, render auditable Markdown plus Zotero-ready HTML, and preview the note;
 9. create a Zotero child note only when explicitly requested.
 
 The normal Zotero path is native `zotero-mcp` tool access. This repository intentionally does not implement an HTTP JSON-RPC fallback client for Zotero writes; if a Codex session lacks native Zotero MCP tools, treat it as a session/tool-injection issue and start a fresh session or verify the MCP registration.
@@ -68,10 +69,10 @@ In this project/user-specific convention, `输出笔记` also means Zotero write
 For a dry-run note render, preferred note finalization command:
 
 ```text
-finalize-note -> preview-note
+finalize-note --html-output <run_dir>/note.html -> preview-note note.md -> preview-note note.html
 ```
 
-`finalize-note` encapsulates `render-note -> validate-note` in the correct order. If you still call the lower-level commands manually, keep `render-note -> validate-note -> preview-note` strictly sequential and do not parallelize them.
+`finalize-note` encapsulates `render-note -> validate-note` in the correct order. For Zotero writes, pass `--html-output <run_dir>/note.html` and send that HTML file to `write_note`; Zotero notes are HTML internally, and Markdown table syntax is not reliable at the write boundary. If you still call the lower-level commands manually, keep `render-note -> validate-note -> render-note-html -> preview-note` strictly sequential and do not parallelize them.
 
 Same-day regenerated notes should not overwrite earlier notes. Use a date-only title for the first note and pass `--version-suffix " (v2)"`, `--version-suffix " (v3)"`, etc. for later notes on the same date.
 
@@ -86,30 +87,36 @@ Known MCP behavior: `get_item_details` is available in `cookjohn/zotero-mcp` 1.4
 ```bash
 uv run zotero-paperread --help
 uv run zotero-paperread create-run --title "<title>" --item-key "<item_key>"
-uv run zotero-paperread prepare-item runs/<date>/<paper-slug>/item-details.json --workdir runs/<date>/<paper-slug> --max-pages 15
+uv run zotero-paperread prepare-item runs/<date>/<paper-slug>/item-details.json --workdir runs/<date>/<paper-slug>
 uv run zotero-paperread extract-pdf path/to/paper.pdf --output runs/<date>/<paper-slug>/extract.json
-uv run zotero-paperread extract-figures path/to/paper.pdf --output-dir runs/<date>/<paper-slug>/figures --top-k 4 --max-pages 15
+uv run zotero-paperread extract-figures path/to/paper.pdf --output-dir runs/<date>/<paper-slug>/figures --top-k 4
 uv run zotero-paperread validate-summary-json runs/<date>/<paper-slug>/summary.json
 uv run zotero-paperread render-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md
 uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md
-uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md --version-suffix " (v2)"
+uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md --html-output runs/<date>/<paper-slug>/note.html
+uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md --html-output runs/<date>/<paper-slug>/note.html --version-suffix " (v2)"
+uv run zotero-paperread render-note-html runs/<date>/<paper-slug>/note.md --output runs/<date>/<paper-slug>/note.html
 uv run zotero-paperread note-tags runs/<date>/<paper-slug>/summary.json
 uv run zotero-paperread validate-note runs/<date>/<paper-slug>/note.md
 uv run zotero-paperread preview-note runs/<date>/<paper-slug>/note.md
+uv run zotero-paperread preview-note runs/<date>/<paper-slug>/note.html
 ```
 
 The recommended dry-run manual sequence is:
 
 ```bash
 uv run zotero-paperread create-run --title "<title>" --item-key "<item_key>"
-uv run zotero-paperread prepare-item runs/<date>/<paper-slug>/item-details.json --workdir runs/<date>/<paper-slug> --max-pages 15
+uv run zotero-paperread prepare-item runs/<date>/<paper-slug>/item-details.json --workdir runs/<date>/<paper-slug>
 # Codex then reads context.md / figure_context.md and writes summary.json.
 uv run zotero-paperread validate-summary-json runs/<date>/<paper-slug>/summary.json
-uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md
+uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md --html-output runs/<date>/<paper-slug>/note.html
 uv run zotero-paperread preview-note runs/<date>/<paper-slug>/note.md
+uv run zotero-paperread preview-note runs/<date>/<paper-slug>/note.html
 ```
 
 `create-run` prints a JSON payload containing `run_dir`, `manifest_path`, `slug`, and `date`. Use the returned `run_dir` instead of guessing the final slug when there may already be a same-day run for the same title.
+
+By default, `prepare-item`, `extract-pdf`, and `extract-figures` process the full PDF. Use `--max-pages <N>` only for explicit debugging or deliberately shortened dry runs.
 
 `validate-summary-json` only verifies that the file is readable UTF-8 JSON with an object at the top level. It is not a semantic schema validator. `render-note` and `finalize-note` use the same friendly JSON error path, so malformed or missing JSON fails before any partial note is written.
 
@@ -126,9 +133,10 @@ uv run zotero-paperread validate-trusted-summary <run_dir>/summary.json
 PAPER_TITLE="<paper title>"
 GENERATED_DATE="<YYYY-MM-DD>"
 VERSION_SUFFIX="$(uv run zotero-paperread next-version-suffix <run_dir>/item-details.json --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE")"
-uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --generated-date "$GENERATED_DATE" --version-suffix "$VERSION_SUFFIX" --output <run_dir>/note.md
+uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --generated-date "$GENERATED_DATE" --version-suffix "$VERSION_SUFFIX" --output <run_dir>/note.md --html-output <run_dir>/note.html
 NOTE_TAGS_JSON="$(uv run zotero-paperread note-tags <run_dir>/summary.json)"
 uv run zotero-paperread preview-note <run_dir>/note.md
+uv run zotero-paperread preview-note <run_dir>/note.html
 ```
 
 Write to Zotero only if all of these are true:
@@ -140,15 +148,32 @@ summary.json improvement_status is neither needed nor blocked after apply-review
 validate-trusted-summary passes
 same-day version suffix has been computed from current item-details.json
 note tags have been computed from current summary.json
-preview-note has been shown
+preview-note has been shown for note.md and note.html
 target Zotero item title has been shown
 ```
 
-Actual Zotero write-through still requires explicit write intent and uses only `zotero-mcp write_note`.
+Actual Zotero write-through still requires explicit write intent and uses only `zotero-mcp write_note`. Use `content=<contents of note.html>` for writes so Markdown tables are already converted to Zotero-renderable HTML.
 
 The rendered note is a layered learning note. It opens with `## 0. 速读卡片` so the first screen shows paper type, research object, core problem, core method, core result, trust status, main risk, reading decision, and relevance to AI4S / battery / materials research. The main body then follows problem, method, results, figures, contributions, limits, transferable workflows, concept cards, and follow-up keywords. Metadata, extraction warnings, review issues, trust rationale, evidence chains, and improvement notes are kept in rear sections (`## 9` through `## 12`) so provenance remains available without interrupting the reading flow.
 
 New learning-note fields such as `method_modules`, `key_results_table`, `concept_cards`, `workflow_lessons`, and `reading_decision` are optional. Old `summary.json` files still render through safe fallbacks: `method_overview` falls back to `method`, `core_result_short` falls back to `one_sentence_summary`, and `transferable_insight` falls back to `ai4s_relevance`.
+
+## Historical Note Table Migration
+
+Historical `[Codex Summary]` notes created before `note.html` support may contain Markdown table syntax that Zotero displays as plain text. Do not rerun paper summarization for this. Treat it as a content-format migration.
+
+Safe migration order:
+
+1. Discover candidate notes through Zotero MCP.
+2. Save raw note content under `runs/migrations/<date>-zotero-note-table-html/raw/`.
+3. Classify each raw note with `uv run zotero-paperread classify-note-tables <raw-note-file>`.
+4. Convert only dry-run local files with `uv run zotero-paperread convert-note-tables <raw-note-file> --output <converted-file> --report <report-json>`.
+5. Review `manifest.json`, converted previews, and `report.md`.
+6. Stop for explicit user confirmation.
+7. After confirmation, update one Zotero note at a time with `write_note(action="update", noteKey=<note_key>, content=<converted_html>)`.
+8. Verify each update by reading the note back through Zotero MCP.
+
+Do not pass tags during update. This migration changes note content only.
 
 ## V2: Key Figure Extraction and Analysis
 

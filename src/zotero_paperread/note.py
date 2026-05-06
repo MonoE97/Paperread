@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from markdown_it import MarkdownIt
 
 REQUIRED_SECTIONS = [
     "0. 速读卡片",
@@ -603,6 +604,12 @@ def render_note(
         "concept_cards": clean_concept_cards(summary.get("concept_cards", [])),
     }
     return template.render(**context).strip() + "\n"
+
+
+def render_note_html(note: str) -> str:
+    """Convert rendered Markdown into Zotero-ready HTML with table support."""
+    parser = MarkdownIt("commonmark", {"html": False}).enable("table")
+    return parser.render(note).strip() + "\n"
 
 
 def validate_note(note: str) -> list[str]:
