@@ -459,6 +459,36 @@ def test_prepare_item_command_reports_non_object_details_json(tmp_path: Path) ->
     assert f"json_invalid: details JSON {details_path}: expected top-level JSON object" in result.stdout
 
 
+def test_save_item_details_command_writes_normalized_and_raw(tmp_path: Path) -> None:
+    input_path = tmp_path / "mcp-response.json"
+    output_path = tmp_path / "run" / "item-details.json"
+    raw_output_path = tmp_path / "run" / "item-details.raw.json"
+    input_path.write_text(
+        json.dumps(
+            [{"type": "text", "text": json.dumps({"key": "ABC123", "title": "Example Paper"})}],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "save-item-details",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--raw-output",
+            str(raw_output_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(output_path.read_text(encoding="utf-8"))["key"] == "ABC123"
+    assert raw_output_path.exists()
+
+
 def test_next_version_suffix_command_reads_item_details(tmp_path: Path) -> None:
     details_path = tmp_path / "item-details.json"
     write_json(

@@ -20,6 +20,7 @@ from zotero_paperread.review import apply_review_to_summary
 from zotero_paperread.runs import allocate_run_dir, write_run_manifest
 from zotero_paperread.workflow import prepare_item_bundle
 from zotero_paperread.zotero_details import next_version_suffix_from_details
+from zotero_paperread.zotero_item_io import write_item_details_files
 
 app = typer.Typer(help="Zotero-first paper reading utilities.")
 console = Console()
@@ -362,6 +363,18 @@ def validate_trusted_summary_command(summary_json: Path) -> None:
 def preview_note_command(note_path: Path) -> None:
     """Print a rendered note without writing to Zotero."""
     console.print(note_path.read_text(encoding="utf-8"))
+
+
+@app.command("save-item-details")
+def save_item_details_command(
+    input_json: Path,
+    output: Path = typer.Option(..., "--output", "-o", help="Write normalized item details JSON."),
+    raw_output: Path | None = typer.Option(None, "--raw-output", help="Optionally write raw MCP payload JSON."),
+) -> None:
+    """Save raw MCP item details as normalized run item-details.json."""
+    payload = json.loads(input_json.read_text(encoding="utf-8"))
+    result = write_item_details_files(payload, normalized_path=output, raw_path=raw_output)
+    typer.echo(json.dumps(result, ensure_ascii=False))
 
 
 @app.command("prepare-item")
