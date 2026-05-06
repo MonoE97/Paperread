@@ -66,6 +66,12 @@ The skill then performs Zotero lookup, run-directory creation, bundle preparatio
 
 In this project/user-specific convention, `输出笔记` also means Zotero write-through intent, not just printing Markdown. It still requires all write-through gates in the Trusted Notes section, and the write must be performed only through `zotero-mcp write_note`.
 
+### Duplicate Zotero Entries
+
+If a title search finds duplicate Zotero entries with the same normalized title, the workflow stops before `create-run`. The agent must not choose among duplicate items; in short, do not choose among duplicate items because writing to the wrong parent item is harder to recover from than asking the user to de-duplicate first.
+
+The user-facing message should be direct: duplicate Zotero entries exist; please de-duplicate in Zotero first, then rerun the workflow. If a broad `contains` search finds several different titles, the workflow asks for a more exact title or item key instead.
+
 For a dry-run note render, preferred note finalization command:
 
 ```text

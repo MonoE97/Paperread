@@ -26,6 +26,14 @@ Natural-language write intent example:
 请对 Zotero 中的 <paper title> 文章进行分析并输出笔记
 ```
 
+If historical memory or a user message contains an old absolute skill path, do not rely on plugin cache hashes. Prefer the current repo-local stable entry:
+
+```bash
+rg --files -g 'SKILL.md' skills /Users/jwxi/.codex/skills | rg 'zotero|paper'
+```
+
+Use `skills/zotero-paper-summary/SKILL.md` in this repository first.
+
 ## 目标
 
 把 Zotero 中的一篇论文转换为中文结构化研究笔记。默认只 dry-run；当用户明确要求“输出笔记”“写入笔记”“写回 Zotero”“创建 note”“保存到 Zotero”等动作时，执行分析、预览并创建 Zotero 子笔记。
@@ -61,10 +69,12 @@ zotero mcp search_library get_item_details get_content write_note annotations
 ## 工作流
 
 1. 搜索 Zotero 条目：
-   - 使用标题 exact 或 contains 搜索。
+   - 先使用标题 exact 搜索；如果 0 个匹配，再使用 contains 搜索作为发现入口。
    - 0 个匹配：停止，告诉用户没有找到。
-   - 多个匹配：列出候选标题、作者、年份和 key，停止，不写入。
+   - 多个 exact 匹配且标题归一化后相同：same normalized title，stop before create-run，停止分析和写入，告诉用户 Zotero 中存在 duplicate Zotero entries，请先在 Zotero 中去重；不要在重复条目中帮用户选择一个。
+   - 多个 contains 匹配但不是同一 normalized title：列出候选标题、作者、年份和 key，停止，要求用户提供更精确标题或 item key；不要写入。
    - 1 个匹配：继续。
+   - normalized title 比较至少忽略大小写、连续空白、常见 dash 变体和首尾空格；如果仍有多个同题条目，视为重复条目。
 
 2. 创建 run 目录：
    - 运行：
