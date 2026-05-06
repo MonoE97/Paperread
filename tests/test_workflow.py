@@ -38,6 +38,36 @@ def test_select_pdf_attachment_prefers_main_paper_over_appendix() -> None:
     assert selected["key"] == "MAINPDF"
 
 
+def test_figure_context_includes_evidence_tier() -> None:
+    payload = {
+        "arxiv_id": None,
+        "candidate_count": 1,
+        "pdf_path": "/tmp/paper.pdf",
+        "source_attempts": [],
+        "warnings": [],
+        "selected_figures": [
+            {
+                "figure_id": "p1-f1",
+                "caption": "Figure 1. Overview.",
+                "caption_confidence": 0.56,
+                "page": 1,
+                "source": "embedded-image",
+                "image_path": "/tmp/fig.png",
+                "priority_score": 1.0,
+                "needs_fallback": False,
+                "visual_quality": {"status": "ok", "warnings": []},
+                "evidence_tier": "caption_text_grounded",
+                "evidence_tier_reason": "embedded-image requires text/caption-grounded analysis",
+            }
+        ],
+    }
+
+    context = workflow.build_figure_context_markdown(payload)
+
+    assert "Evidence Tier: caption_text_grounded" in context
+    assert "Analysis Boundary: embedded-image requires text/caption-grounded analysis" in context
+
+
 def test_select_pdf_attachment_prefers_main_paper_when_low_priority_signal_is_in_title_and_path() -> None:
     attachments = [
         {

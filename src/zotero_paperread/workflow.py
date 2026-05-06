@@ -132,6 +132,8 @@ def build_figure_context_markdown(figures_payload: dict[str, Any]) -> str:
                         f"- Priority Score: {figure.get('priority_score', '')}",
                         f"- Needs Fallback: {figure.get('needs_fallback', False)}",
                         f"- Visual Quality: {json.dumps(figure.get('visual_quality', {}), ensure_ascii=False, sort_keys=True)}",
+                        f"- Evidence Tier: {figure.get('evidence_tier', 'unknown')}",
+                        f"- Analysis Boundary: {figure.get('evidence_tier_reason', '')}",
                     ]
                 )
             )

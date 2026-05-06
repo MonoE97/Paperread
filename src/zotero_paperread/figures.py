@@ -115,6 +115,8 @@ class FigureExtraction(TypedDict):
     fallback_reason: str | None
     needs_fallback: bool
     visual_quality: NotRequired[dict[str, Any]]
+    evidence_tier: NotRequired[str]
+    evidence_tier_reason: NotRequired[str]
 
 
 class CaptionBlock(TypedDict):
@@ -133,6 +135,32 @@ class TextLine(TypedDict):
     rect: fitz.Rect
     block_index: int
     line_index: int
+
+
+def classify_figure_evidence_tier(figure: dict[str, Any]) -> dict[str, str]:
+    """Classify whether figure analysis can rely on pixels, caption/text, or neither."""
+    source = str(figure.get("source", ""))
+    caption_confidence = float(figure.get("caption_confidence") or 0.0)
+    visual_quality = figure.get("visual_quality") if isinstance(figure.get("visual_quality"), dict) else {}
+    warnings = visual_quality.get("warnings", []) if isinstance(visual_quality, dict) else []
+    warning_text = ",".join(str(item) for item in warnings)
+
+    if any(item in {"image_too_small", "image_low_information", "image_unreadable"} for item in warnings):
+        return {"tier": "not_usable", "reason": f"visual quality warning: {warning_text}"}
+
+    if source in {"pdf-figure", "arxiv-source", "deterministic-pdf"} and caption_confidence >= 0.75:
+        return {
+            "tier": "pixel_verified",
+            "reason": "source and caption confidence are strong enough for visual cross-checking",
+        }
+
+    if caption_confidence > 0 or source == "embedded-image":
+        return {
+            "tier": "caption_text_grounded",
+            "reason": f"{source or 'unknown source'} requires text/caption-grounded analysis",
+        }
+
+    return {"tier": "not_usable", "reason": "missing caption and weak source provenance"}
 
 
 def extract_figures(
@@ -180,6 +208,9 @@ def extract_figures(
     for item in selected:
         quality = assess_image_quality(Path(item["image_path"]))
         item["visual_quality"] = quality
+        tier = classify_figure_evidence_tier(item)
+        item["evidence_tier"] = tier["tier"]
+        item["evidence_tier_reason"] = tier["reason"]
         for warning in quality["warnings"]:
             item["needs_fallback"] = True
             item["fallback_reason"] = item.get("fallback_reason") or "visual_quality"

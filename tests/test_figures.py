@@ -4,12 +4,53 @@ import base64
 import fitz
 import pytest
 
-from zotero_paperread.figures import _detect_captions, assess_image_quality, extract_figures
+from zotero_paperread.figures import (
+    _detect_captions,
+    assess_image_quality,
+    classify_figure_evidence_tier,
+    extract_figures,
+)
 from zotero_paperread.workflow import build_figure_context_markdown
 
 
 def _selected(payload: dict) -> list[dict]:
     return payload["selected_figures"]
+
+
+def test_classify_figure_evidence_tier_marks_source_pdf_as_pixel_verified() -> None:
+    figure = {
+        "source": "pdf-figure",
+        "caption_confidence": 0.9,
+        "visual_quality": {"status": "ok", "warnings": []},
+    }
+
+    assert classify_figure_evidence_tier(figure)["tier"] == "pixel_verified"
+
+
+def test_classify_figure_evidence_tier_marks_embedded_low_caption_as_text_grounded() -> None:
+    figure = {
+        "source": "embedded-image",
+        "caption_confidence": 0.56,
+        "visual_quality": {"status": "ok", "warnings": []},
+    }
+
+    result = classify_figure_evidence_tier(figure)
+
+    assert result["tier"] == "caption_text_grounded"
+    assert "embedded-image" in result["reason"]
+
+
+def test_classify_figure_evidence_tier_marks_tiny_image_not_usable() -> None:
+    figure = {
+        "source": "embedded-image",
+        "caption_confidence": 0.2,
+        "visual_quality": {"status": "poor", "warnings": ["image_too_small"]},
+    }
+
+    result = classify_figure_evidence_tier(figure)
+
+    assert result["tier"] == "not_usable"
+    assert "image_too_small" in result["reason"]
 
 
 def make_captioned_pdf(path: Path) -> None:
