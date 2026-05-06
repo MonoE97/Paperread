@@ -39,3 +39,13 @@ def test_single_paper_workflow_avoids_plugin_hash_paths() -> None:
 
     assert "/plugins/cache/openai-curated/superpowers/" not in skill
     assert "rg --files -g 'SKILL.md'" in skill
+
+
+def test_secondary_context_is_documented_as_non_evidence() -> None:
+    skill = (PROJECT_ROOT / "skills" / "zotero-paper-summary" / "SKILL.md").read_text(encoding="utf-8")
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "capture-secondary-url" in skill
+    assert "source_status: secondary_context" in skill
+    assert "evidence_summary" in skill
+    assert "must not cite secondary context" in readme

@@ -126,6 +126,16 @@ By default, `prepare-item`, `extract-pdf`, and `extract-figures` process the ful
 
 `validate-summary-json` only verifies that the file is readable UTF-8 JSON with an object at the top level. It is not a semantic schema validator. `render-note` and `finalize-note` use the same friendly JSON error path, so malformed or missing JSON fails before any partial note is written.
 
+## Secondary Context
+
+When the user provides a WeChat article, press release, blog, or other webpage as supplemental context, capture it as secondary context instead of mixing it into PDF evidence:
+
+```bash
+node skills/zotero-paper-summary/scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_context.md
+```
+
+The captured file must contain `source_status: secondary_context`. It can be used for cross-checking, background, and follow-up questions, but `evidence_summary` must not cite secondary context. Trusted evidence remains limited to `context.md` and `figure_context.md`.
+
 ## Trusted Notes
 
 The workflow asks Codex to classify paper type, assign trust status, attach compact evidence pointers, and run a second-pass note quality review before Zotero write-through. If review finds fixable omissions, Codex may perform one bounded improvement pass by re-reading only the current run directory artifacts.

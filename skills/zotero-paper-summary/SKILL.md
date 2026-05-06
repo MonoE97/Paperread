@@ -256,6 +256,16 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
    - 如果 `visual_quality.warnings` 存在，优先使用 `image_too_small` 等具体 warning，不要泛化成 `poor`。
    - 当 `image_quality` 为 `poor`、`image_too_small` 或 `caption_only` 时，`figure_quality_note` 和 `analysis` 必须说明图分析不依赖像素读取，只基于正文或 caption。
 
+## 二级材料 capture
+
+当用户提供微信公众号、新闻稿、博客或其他网页作为补充材料时，先用二级材料 capture，不要把网页正文混入 PDF 主证据。
+
+```bash
+node skills/zotero-paper-summary/scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_context.md
+```
+
+微信公众号默认使用 Chrome CDP。输出文件必须包含 `source_status: secondary_context`。`evidence_summary` must not cite secondary context；它只能用于 cross-check、补充阅读背景和提示后续问题。
+
 8. 初始渲染和验证 note（dry-run 审查输入）：
 
    - 写完 `<run_dir>/summary.json` 后，先检查 JSON 可读性：
