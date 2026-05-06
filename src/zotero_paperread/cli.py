@@ -21,6 +21,7 @@ from zotero_paperread.review import apply_review_to_summary
 from zotero_paperread.runs import allocate_run_dir, write_run_manifest
 from zotero_paperread.summary_lint import lint_summary
 from zotero_paperread.workflow import prepare_item_bundle
+from zotero_paperread.write_payload import build_write_payload
 from zotero_paperread.zotero_details import next_version_suffix_from_details
 from zotero_paperread.zotero_item_io import write_item_details_files
 
@@ -356,6 +357,23 @@ def gate_run_command(
     typer.echo(payload)
     if report["status"] != "write_ready":
         raise typer.Exit(1)
+
+
+@app.command("prepare-write-payload")
+def prepare_write_payload_command(
+    gate_report_json: Path,
+    output: Path = typer.Option(..., "--output", "-o", help="Write write-payload JSON."),
+) -> None:
+    """Prepare a safe local write payload summary without writing to Zotero."""
+    gate_report = read_json_or_exit(gate_report_json, label="gate report JSON")
+    try:
+        payload = build_write_payload(gate_report)
+    except ValueError as exc:
+        console.print(str(exc), soft_wrap=True)
+        raise typer.Exit(1)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 @app.command("apply-review")

@@ -464,6 +464,32 @@ def test_gate_run_command_writes_blocked_report(tmp_path: Path) -> None:
     assert json.loads(report_path.read_text(encoding="utf-8"))["status"] == "blocked"
 
 
+def test_prepare_write_payload_command_writes_payload(tmp_path: Path) -> None:
+    note_html = tmp_path / "note.html"
+    note_html.write_text("<h1>Title</h1>", encoding="utf-8")
+    gate_report = tmp_path / "gate-report.json"
+    gate_report.write_text(
+        json.dumps(
+            {
+                "status": "write_ready",
+                "parentKey": "ABC123",
+                "note_html_path": str(note_html),
+                "tags": ["codex-summary"],
+                "note_title": "[Codex Summary] Title - 2026-05-06",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "write-payload.json"
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["prepare-write-payload", str(gate_report), "--output", str(output)])
+
+    assert result.exit_code == 0
+    assert json.loads(output.read_text(encoding="utf-8"))["parentKey"] == "ABC123"
+
+
 def test_finalize_note_command_reports_invalid_summary_json(tmp_path: Path) -> None:
     metadata_path = tmp_path / "metadata.json"
     summary_path = tmp_path / "summary.json"
