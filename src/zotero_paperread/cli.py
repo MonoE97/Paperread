@@ -18,6 +18,7 @@ from zotero_paperread.note_table_migration import (
 from zotero_paperread.pdf_extract import extract_pdf
 from zotero_paperread.review import apply_review_to_summary
 from zotero_paperread.runs import allocate_run_dir, write_run_manifest
+from zotero_paperread.summary_lint import lint_summary
 from zotero_paperread.workflow import prepare_item_bundle
 from zotero_paperread.zotero_details import next_version_suffix_from_details
 from zotero_paperread.zotero_item_io import write_item_details_files
@@ -326,6 +327,16 @@ def validate_summary_json_command(summary_json: Path) -> None:
     """Check that summary JSON is readable and has an object at the top level."""
     read_json_or_exit(summary_json, label="summary JSON")
     console.print("summary_json_readable_object")
+
+
+@app.command("lint-summary")
+def lint_summary_command(summary_json: Path) -> None:
+    """Run non-fatal summary lint checks used before write-through."""
+    issues = lint_summary(read_json_or_exit(summary_json, label="summary JSON"))
+    if issues:
+        typer.echo(json.dumps({"status": "failed", "issues": issues}, ensure_ascii=False, indent=2))
+        raise typer.Exit(1)
+    typer.echo(json.dumps({"status": "passed", "issues": []}, ensure_ascii=False))
 
 
 @app.command("apply-review")

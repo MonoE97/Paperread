@@ -417,6 +417,27 @@ def test_validate_summary_json_command_success_output_does_not_imply_full_schema
     assert "valid" not in result.stdout.lower()
 
 
+def test_lint_summary_command_reports_issues(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "workflow_steps": "1. First. 2. Second.",
+                "evidence_summary": [],
+                "key_figures": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["lint-summary", str(summary_path)])
+
+    assert result.exit_code == 1
+    assert "workflow_steps_single_line_numbered_list" in result.stdout
+
+
 def test_finalize_note_command_reports_invalid_summary_json(tmp_path: Path) -> None:
     metadata_path = tmp_path / "metadata.json"
     summary_path = tmp_path / "summary.json"
