@@ -9,6 +9,7 @@ import typer
 from rich.console import Console
 
 from zotero_paperread.figures import extract_figures
+from zotero_paperread.gate import build_gate_report
 from zotero_paperread.note import build_note_labels, render_note, render_note_html, validate_note, validate_trusted_summary
 from zotero_paperread.note_table_migration import (
     classify_note_content,
@@ -337,6 +338,24 @@ def lint_summary_command(summary_json: Path) -> None:
         typer.echo(json.dumps({"status": "failed", "issues": issues}, ensure_ascii=False, indent=2))
         raise typer.Exit(1)
     typer.echo(json.dumps({"status": "passed", "issues": []}, ensure_ascii=False))
+
+
+@app.command("gate-run")
+def gate_run_command(
+    run_dir: Path,
+    paper_title: str = typer.Option(..., "--paper-title", help="Paper title used in the generated note title."),
+    generated_date: str = typer.Option(..., "--generated-date", help="Generated note date in YYYY-MM-DD form."),
+    output: Path | None = typer.Option(None, "--output", "-o", help="Write gate report JSON."),
+) -> None:
+    """Aggregate run write-readiness into one report."""
+    report = build_gate_report(run_dir, paper_title=paper_title, generated_date=generated_date)
+    payload = json.dumps(report, ensure_ascii=False, indent=2)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(payload + "\n", encoding="utf-8")
+    typer.echo(payload)
+    if report["status"] != "write_ready":
+        raise typer.Exit(1)
 
 
 @app.command("apply-review")

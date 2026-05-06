@@ -438,6 +438,32 @@ def test_lint_summary_command_reports_issues(tmp_path: Path) -> None:
     assert "workflow_steps_single_line_numbered_list" in result.stdout
 
 
+def test_gate_run_command_writes_blocked_report(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "summary.json").write_text(json.dumps({"review_status": "not_reviewed"}), encoding="utf-8")
+    report_path = tmp_path / "gate-report.json"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "gate-run",
+            str(run_dir),
+            "--paper-title",
+            "Example Paper",
+            "--generated-date",
+            "2026-05-06",
+            "--output",
+            str(report_path),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert report_path.exists()
+    assert json.loads(report_path.read_text(encoding="utf-8"))["status"] == "blocked"
+
+
 def test_finalize_note_command_reports_invalid_summary_json(tmp_path: Path) -> None:
     metadata_path = tmp_path / "metadata.json"
     summary_path = tmp_path / "summary.json"
