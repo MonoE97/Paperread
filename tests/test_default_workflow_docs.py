@@ -49,3 +49,16 @@ def test_secondary_context_is_documented_as_non_evidence() -> None:
     assert "source_status: secondary_context" in skill
     assert "evidence_summary" in skill
     assert "must not cite secondary context" in readme
+
+
+def test_docs_show_smoothed_write_gate_command_chain() -> None:
+    skill = (PROJECT_ROOT / "skills" / "zotero-paper-summary" / "SKILL.md").read_text(encoding="utf-8")
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    for text in (skill, readme):
+        assert "save-item-details" in text
+        assert "lint-summary" in text
+        assert "gate-run" in text
+        assert "prepare-write-payload" in text
+        assert "write_note" in text
+        assert "prepare-write-payload does not write to Zotero" in text

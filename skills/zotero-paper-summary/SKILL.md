@@ -88,7 +88,13 @@ uv run zotero-paperread create-run --title "<title>" --item-key "<item_key>"
 
 3. 获取条目详情：
    - 调用 `get_item_details(itemKey=<item_key>, mode="complete")`。
-   - 保存原始返回到 `<run_dir>/item-details.json`。
+   - 将 MCP 原始响应保存为 `<run_dir>/mcp-response.json` 后，运行：
+
+```bash
+uv run zotero-paperread save-item-details <run_dir>/mcp-response.json --output <run_dir>/item-details.json --raw-output <run_dir>/item-details.raw.json
+```
+
+   - 后续命令只读取规范化后的 `<run_dir>/item-details.json`；`item-details.raw.json` 作为 MCP 原始返回审计件保留。
    - 如果返回中 `attachments[].path` 已有本地 PDF 路径，直接交给 `prepare-item`。
    - 如果没有 PDF path，但有 PDF attachment key，先报告 `missing_pdf_path_in_item_details`，不要直接猜 Zotero storage 路径；只有用户明确要求排障时才进行本机路径探测。
 
@@ -310,6 +316,7 @@ uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.
 ```bash
 uv run zotero-paperread validate-summary-json <run_dir>/summary.json
 uv run zotero-paperread apply-review <run_dir>/summary.json <run_dir>/review.json
+uv run zotero-paperread lint-summary <run_dir>/summary.json
 uv run zotero-paperread validate-trusted-summary <run_dir>/summary.json
 PAPER_TITLE="<paper title>"
 GENERATED_DATE="<YYYY-MM-DD>"
@@ -318,6 +325,8 @@ uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.
 NOTE_TAGS_JSON="$(uv run zotero-paperread note-tags <run_dir>/summary.json)"
 uv run zotero-paperread preview-note <run_dir>/note.md
 uv run zotero-paperread preview-note <run_dir>/note.html
+uv run zotero-paperread gate-run <run_dir> --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE" --output <run_dir>/gate-report.json
+uv run zotero-paperread prepare-write-payload <run_dir>/gate-report.json --output <run_dir>/write-payload.json
 ```
 
 10. 补充优化：
@@ -347,7 +356,8 @@ target Zotero item title has been shown
    - 如果 `review_status` 为 `failed`，停止并报告审查问题，不写入 Zotero。
    - note 标题由模板生成：`[Codex Summary] <paper title> - YYYY-MM-DD`，同日重复创建时追加 ` (v2)`、` (v3)` 等后缀。
    - note 正文末尾 `Tags:` 和 Zotero note metadata tags 必须使用同一套标签：固定标签 `codex-summary`、`paper-summary`，加上 `summary.json` 中 `note_labels` 归一化后的最多 4 个推断标签。
-   - 真实写入仍必须来自用户明确写入意图，且只能调用 `zotero-mcp write_note`。调用前用 `uv run zotero-paperread note-tags <run_dir>/summary.json` 得到 JSON 标签数组，解析后传给 `write_note(action="create", parentKey=<item key>, content=<contents of note.html>, tags=<parsed note-tags list>)`。
+   - `prepare-write-payload does not write to Zotero`; it only prepares metadata for the agent-side `write_note` call and readback checklist. Real writes still happen only through `zotero-mcp write_note`.
+   - 真实写入仍必须来自用户明确写入意图，且只能调用 `zotero-mcp write_note`。调用前读取 `<run_dir>/write-payload.json` 和 `<run_dir>/note.html`，传给 `write_note(action="create", parentKey=<payload parentKey>, content=<contents of note.html>, tags=<payload tags>)`。
    - 成功后回读一次 `get_item_details`，确认子笔记已经挂载到目标条目下。
 
 ## Better Notes 兼容

@@ -93,15 +93,19 @@ Known MCP behavior: `get_item_details` is available in `cookjohn/zotero-mcp` 1.4
 ```bash
 uv run zotero-paperread --help
 uv run zotero-paperread create-run --title "<title>" --item-key "<item_key>"
+uv run zotero-paperread save-item-details runs/<date>/<paper-slug>/mcp-response.json --output runs/<date>/<paper-slug>/item-details.json --raw-output runs/<date>/<paper-slug>/item-details.raw.json
 uv run zotero-paperread prepare-item runs/<date>/<paper-slug>/item-details.json --workdir runs/<date>/<paper-slug>
 uv run zotero-paperread extract-pdf path/to/paper.pdf --output runs/<date>/<paper-slug>/extract.json
 uv run zotero-paperread extract-figures path/to/paper.pdf --output-dir runs/<date>/<paper-slug>/figures --top-k 4
 uv run zotero-paperread validate-summary-json runs/<date>/<paper-slug>/summary.json
+uv run zotero-paperread lint-summary runs/<date>/<paper-slug>/summary.json
 uv run zotero-paperread render-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md
 uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md
 uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md --html-output runs/<date>/<paper-slug>/note.html
 uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md --html-output runs/<date>/<paper-slug>/note.html --version-suffix " (v2)"
 uv run zotero-paperread render-note-html runs/<date>/<paper-slug>/note.md --output runs/<date>/<paper-slug>/note.html
+uv run zotero-paperread gate-run runs/<date>/<paper-slug> --paper-title "<title>" --generated-date "<YYYY-MM-DD>" --output runs/<date>/<paper-slug>/gate-report.json
+uv run zotero-paperread prepare-write-payload runs/<date>/<paper-slug>/gate-report.json --output runs/<date>/<paper-slug>/write-payload.json
 uv run zotero-paperread note-tags runs/<date>/<paper-slug>/summary.json
 uv run zotero-paperread validate-note runs/<date>/<paper-slug>/note.md
 uv run zotero-paperread preview-note runs/<date>/<paper-slug>/note.md
@@ -145,6 +149,7 @@ After generating `review.json`, the final write-through gate order is:
 ```bash
 uv run zotero-paperread validate-summary-json <run_dir>/summary.json
 uv run zotero-paperread apply-review <run_dir>/summary.json <run_dir>/review.json
+uv run zotero-paperread lint-summary <run_dir>/summary.json
 uv run zotero-paperread validate-trusted-summary <run_dir>/summary.json
 PAPER_TITLE="<paper title>"
 GENERATED_DATE="<YYYY-MM-DD>"
@@ -153,6 +158,8 @@ uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.
 NOTE_TAGS_JSON="$(uv run zotero-paperread note-tags <run_dir>/summary.json)"
 uv run zotero-paperread preview-note <run_dir>/note.md
 uv run zotero-paperread preview-note <run_dir>/note.html
+uv run zotero-paperread gate-run <run_dir> --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE" --output <run_dir>/gate-report.json
+uv run zotero-paperread prepare-write-payload <run_dir>/gate-report.json --output <run_dir>/write-payload.json
 ```
 
 Write to Zotero only if all of these are true:
@@ -169,6 +176,8 @@ target Zotero item title has been shown
 ```
 
 Actual Zotero write-through still requires explicit write intent and uses only `zotero-mcp write_note`. Use `content=<contents of note.html>` for writes so Markdown tables are already converted to Zotero-renderable HTML.
+
+`prepare-write-payload does not write to Zotero`. It records `parentKey`, tags, `note_html_path`, `contentLength`, and readback checks. The actual write remains an explicit `zotero-mcp write_note` action performed by the agent after the gate report is `write_ready`.
 
 The rendered note is a layered learning note. It opens with `## 0. 速读卡片` so the first screen shows paper type, research object, core problem, core method, core result, trust status, main risk, reading decision, and relevance to AI4S / battery / materials research. The main body then follows problem, method, results, figures, contributions, limits, transferable workflows, concept cards, and follow-up keywords. Metadata, extraction warnings, review issues, trust rationale, evidence chains, and improvement notes are kept in rear sections (`## 9` through `## 12`) so provenance remains available without interrupting the reading flow.
 
