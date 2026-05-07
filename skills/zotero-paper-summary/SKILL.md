@@ -283,10 +283,12 @@ node skills/zotero-paper-summary/scripts/capture-secondary-url.mjs "<url>" --out
 
 ```bash
 mkdir -p <run_dir>/secondary_contexts
-node skills/zotero-paper-summary/scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_contexts/secondary-001.md
+node skills/zotero-paper-summary/scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_contexts/secondary-001.md --request-retries 2 --request-retry-ms 500
 ```
 
-微信公众号默认使用 Chrome CDP。脚本默认最多等待 `60000` ms，直到页面完成导航且正文非空；只有调试或测试时才使用 `--timeout-ms <ms>` / `--poll-ms <ms>` 缩短等待。成功输出文件必须包含 `source_status: secondary_context`。如果页面一直停在 `about:blank` 或超时仍没有正文，输出 `source_status: secondary_context_unavailable` 和 `capture_warning: navigation_timeout`，不要把它当成可用二级材料。`evidence_summary` must not cite secondary context；它只能用于 cross-check、补充阅读背景和提示后续问题。
+Successful immutable SQLite Extra reads are recorded as provenance diagnostics, not normal workflow warnings. Actual missing, unreadable, or item-not-found fallback still records warnings and continues the main PDF workflow.
+
+微信公众号默认使用 Chrome CDP。脚本默认最多等待 `60000` ms，直到页面完成导航且正文非空；只有调试或测试时才使用 `--timeout-ms <ms>` / `--poll-ms <ms>` 缩短等待。Transient CDP request failures are retried by default. Tune with `--request-retries <N>` and `--request-retry-ms <ms>`。成功输出文件必须包含 `source_status: secondary_context`。如果 transient request 恢复成功，输出仍保持 `source_status: secondary_context`，并记录 `capture_warning`。如果页面一直停在 `about:blank` 或超时仍没有正文，输出 `source_status: secondary_context_unavailable` 和 `capture_warning: navigation_timeout`。Persistent CDP failures write secondary_context_unavailable and a `capture_warning`; do not treat that file as usable secondary context. `evidence_summary` must not cite secondary context；它只能用于 cross-check、补充阅读背景和提示后续问题。
 
 `secondary_contexts/*.md` 和 `secondary_sources.json` 都是 `cross-check only; must not be cited in evidence_summary`。可信证据仍只来自 `context.md` 和 `figure_context.md`。
 

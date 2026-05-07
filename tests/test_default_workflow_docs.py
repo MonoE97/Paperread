@@ -69,6 +69,17 @@ def test_docs_explain_zotero_extra_secondary_sources() -> None:
         assert "--no-sqlite-extra-fallback" in text
 
 
+def test_docs_describe_secondary_capture_retry_behavior() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    skill = (PROJECT_ROOT / "skills" / "zotero-paper-summary" / "SKILL.md").read_text(encoding="utf-8")
+
+    for text in (readme, skill):
+        assert "--request-retries" in text
+        normalized = text.lower()
+        assert "transient cdp request failures are retried" in normalized
+        assert "persistent cdp failures write secondary_context_unavailable" in normalized
+
+
 def test_docs_show_smoothed_write_gate_command_chain() -> None:
     skill = (PROJECT_ROOT / "skills" / "zotero-paper-summary" / "SKILL.md").read_text(encoding="utf-8")
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
