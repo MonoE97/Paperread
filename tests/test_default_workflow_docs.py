@@ -47,8 +47,13 @@ def test_secondary_context_is_documented_as_non_evidence() -> None:
 
     assert "capture-secondary-url" in skill
     assert "source_status: secondary_context" in skill
+    assert "60000" in skill
+    assert "secondary_context_unavailable" in skill
+    assert "navigation_timeout" in skill
     assert "evidence_summary" in skill
     assert "must not cite secondary context" in readme
+    assert "secondary_context_unavailable" in readme
+    assert "navigation_timeout" in readme
 
 
 def test_docs_show_smoothed_write_gate_command_chain() -> None:

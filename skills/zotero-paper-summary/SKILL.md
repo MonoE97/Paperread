@@ -270,7 +270,7 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
 node skills/zotero-paper-summary/scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_context.md
 ```
 
-微信公众号默认使用 Chrome CDP。输出文件必须包含 `source_status: secondary_context`。`evidence_summary` must not cite secondary context；它只能用于 cross-check、补充阅读背景和提示后续问题。
+微信公众号默认使用 Chrome CDP。脚本默认最多等待 `60000` ms，直到页面完成导航且正文非空；只有调试或测试时才使用 `--timeout-ms <ms>` / `--poll-ms <ms>` 缩短等待。成功输出文件必须包含 `source_status: secondary_context`。如果页面一直停在 `about:blank` 或超时仍没有正文，输出 `source_status: secondary_context_unavailable` 和 `capture_warning: navigation_timeout`，不要把它当成可用二级材料。`evidence_summary` must not cite secondary context；它只能用于 cross-check、补充阅读背景和提示后续问题。
 
 8. 初始渲染和验证 note（dry-run 审查输入）：
 

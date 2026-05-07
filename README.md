@@ -138,7 +138,7 @@ When the user provides a WeChat article, press release, blog, or other webpage a
 node skills/zotero-paper-summary/scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_context.md
 ```
 
-The captured file must contain `source_status: secondary_context`. It can be used for cross-checking, background, and follow-up questions, but `evidence_summary` must not cite secondary context. Trusted evidence remains limited to `context.md` and `figure_context.md`.
+The capture script waits up to `60000` ms for browser navigation and non-empty page text. Use `--timeout-ms <ms>` and `--poll-ms <ms>` only for debugging or tests. A successful capture contains `source_status: secondary_context` and can be used for cross-checking, background, and follow-up questions, but `evidence_summary` must not cite secondary context. If the page never leaves `about:blank` or never yields text before timeout, the file contains `source_status: secondary_context_unavailable` and `capture_warning: navigation_timeout`; do not treat it as usable secondary material. Trusted evidence remains limited to `context.md` and `figure_context.md`.
 
 ## Trusted Notes
 
