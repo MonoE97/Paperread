@@ -5,6 +5,13 @@ from typing import Any
 
 
 LOW_QUALITY_IMAGE_VALUES = {"poor", "image_too_small", "caption_only"}
+SECONDARY_EVIDENCE_PREFIXES = (
+    "secondary_context",
+    "secondary_context.md",
+    "secondary_contexts/",
+    "secondary_sources.json",
+    "wechat-context",
+)
 
 
 def lint_summary(summary: dict[str, Any]) -> list[dict[str, str]]:
@@ -27,7 +34,7 @@ def lint_summary(summary: dict[str, Any]) -> list[dict[str, str]]:
             if not isinstance(evidence, dict):
                 continue
             locator = str(evidence.get("locator", ""))
-            if locator.startswith(("secondary_context", "wechat-context")):
+            if locator.startswith(SECONDARY_EVIDENCE_PREFIXES):
                 issues.append(
                     {
                         "code": "secondary_context_used_as_evidence",

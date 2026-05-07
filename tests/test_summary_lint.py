@@ -34,6 +34,44 @@ def test_lint_summary_flags_secondary_context_evidence_locator() -> None:
     assert any(issue["code"] == "secondary_context_used_as_evidence" for issue in issues)
 
 
+def test_lint_summary_flags_secondary_contexts_directory_locator() -> None:
+    summary = {
+        "workflow_steps": "1. First.\n2. Second.",
+        "evidence_summary": [
+            {
+                "claim": "Claim",
+                "evidence": [
+                    {"type": "text", "locator": "secondary_contexts/001.md", "summary": "Not allowed"}
+                ],
+            }
+        ],
+        "key_figures": [],
+    }
+
+    issues = lint_summary(summary)
+
+    assert any(issue["code"] == "secondary_context_used_as_evidence" for issue in issues)
+
+
+def test_lint_summary_flags_secondary_sources_json_locator() -> None:
+    summary = {
+        "workflow_steps": "1. First.\n2. Second.",
+        "evidence_summary": [
+            {
+                "claim": "Claim",
+                "evidence": [
+                    {"type": "text", "locator": "secondary_sources.json", "summary": "Not allowed"}
+                ],
+            }
+        ],
+        "key_figures": [],
+    }
+
+    issues = lint_summary(summary)
+
+    assert any(issue["code"] == "secondary_context_used_as_evidence" for issue in issues)
+
+
 def test_lint_summary_flags_low_quality_figure_without_note() -> None:
     summary = {
         "workflow_steps": "1. First.\n2. Second.",
