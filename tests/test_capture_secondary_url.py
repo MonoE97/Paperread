@@ -47,6 +47,12 @@ class MockCdpHandler(BaseHTTPRequestHandler):
 
         _ = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         self.server.eval_count += 1
+        if self.server.mode == "transient_eval_400" and self.server.eval_count == 1:
+            self._send_json({"error": "transient bad request"}, status=400)
+            return
+        if self.server.mode == "persistent_eval_400":
+            self._send_json({"error": "persistent bad request"}, status=400)
+            return
         if self.server.mode == "timeout" or self.server.eval_count < 3:
             data = {
                 "title": "",
@@ -124,3 +130,53 @@ def test_capture_secondary_url_reports_navigation_timeout(tmp_path: Path) -> Non
     assert "source_status: secondary_context_unavailable" in captured
     assert "capture_warning: navigation_timeout" in captured
     assert "final_url: about:blank" in captured
+
+
+def test_capture_secondary_url_recovers_from_transient_eval_400(tmp_path: Path) -> None:
+    server, base_url = run_mock_cdp(mode="transient_eval_400")
+    try:
+        result = run_capture(
+            tmp_path,
+            base_url,
+            "--timeout-ms",
+            "2000",
+            "--poll-ms",
+            "10",
+            "--request-retries",
+            "1",
+            "--request-retry-ms",
+            "1",
+        )
+    finally:
+        server.shutdown()
+
+    assert result.returncode == 0, result.stderr
+    captured = (tmp_path / "secondary_context.md").read_text(encoding="utf-8")
+    assert "source_status: secondary_context" in captured
+    assert "capture_warning: transient_cdp_request_recovered:400 Bad Request" in captured
+    assert "正文已经加载出来" in captured
+
+
+def test_capture_secondary_url_writes_unavailable_file_for_persistent_eval_400(tmp_path: Path) -> None:
+    server, base_url = run_mock_cdp(mode="persistent_eval_400")
+    try:
+        result = run_capture(
+            tmp_path,
+            base_url,
+            "--timeout-ms",
+            "80",
+            "--poll-ms",
+            "10",
+            "--request-retries",
+            "1",
+            "--request-retry-ms",
+            "1",
+        )
+    finally:
+        server.shutdown()
+
+    assert result.returncode == 1
+    assert "Error:" not in result.stderr
+    captured = (tmp_path / "secondary_context.md").read_text(encoding="utf-8")
+    assert "source_status: secondary_context_unavailable" in captured
+    assert "capture_warning: cdp_request_failed:400 Bad Request" in captured

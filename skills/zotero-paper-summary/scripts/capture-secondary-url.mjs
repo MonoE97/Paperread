@@ -8,10 +8,14 @@ const outputIndex = args.indexOf("--output");
 const output = outputIndex >= 0 ? args[outputIndex + 1] : null;
 const timeoutMs = readPositiveIntOption("--timeout-ms", 60000);
 const pollMs = readPositiveIntOption("--poll-ms", 500);
+const requestRetries = readPositiveIntOption("--request-retries", 2);
+const requestRetryMs = readPositiveIntOption("--request-retry-ms", 500);
 const cdpBaseUrl = (process.env.ZOTERO_PAPERREAD_CDP_BASE_URL || "http://localhost:3456").replace(/\/$/, "");
 
 if (!url || !output) {
-  console.error("usage: capture-secondary-url.mjs <url> --output <path> [--timeout-ms <ms>] [--poll-ms <ms>]");
+  console.error(
+    "usage: capture-secondary-url.mjs <url> --output <path> [--timeout-ms <ms>] [--poll-ms <ms>] [--request-retries <n>] [--request-retry-ms <ms>]"
+  );
   process.exit(2);
 }
 
@@ -25,12 +29,65 @@ function readPositiveIntOption(name, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-async function request(requestPath, options = {}) {
-  const response = await fetch(`${cdpBaseUrl}${requestPath}`, options);
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
+class CdpRequestError extends Error {
+  constructor(status, statusText, bodyText) {
+    super(`${status} ${statusText}`);
+    this.status = status;
+    this.statusText = statusText;
+    this.bodyText = bodyText;
   }
-  return await response.json();
+}
+
+function isRetryableStatus(status) {
+  return status === 400 || status === 408 || status === 409 || status === 429 || status >= 500;
+}
+
+function warningFromError(error, prefix) {
+  if (error instanceof CdpRequestError) {
+    return `${prefix}:${error.status} ${error.statusText}`;
+  }
+  return `${prefix}:${String(error?.message || error || "unknown_error")}`;
+}
+
+function uniqueWarnings(warnings) {
+  return [...new Set(warnings.filter(Boolean))];
+}
+
+const recoveredRequestWarnings = [];
+
+function recordRecoveredRequestWarnings(warnings) {
+  recoveredRequestWarnings.push(
+    ...warnings.map((warning) => warning.replace("cdp_request_failed:", "transient_cdp_request_recovered:"))
+  );
+}
+
+function drainRecoveredRequestWarnings() {
+  const warnings = [...recoveredRequestWarnings];
+  recoveredRequestWarnings.length = 0;
+  return warnings;
+}
+
+async function request(requestPath, options = {}) {
+  let lastError = null;
+  const retryWarnings = [];
+  for (let attempt = 0; attempt <= requestRetries; attempt += 1) {
+    const response = await fetch(`${cdpBaseUrl}${requestPath}`, options);
+    if (response.ok) {
+      if (retryWarnings.length) {
+        recordRecoveredRequestWarnings(retryWarnings);
+      }
+      return await response.json();
+    }
+    const bodyText = await response.text().catch(() => "");
+    lastError = new CdpRequestError(response.status, response.statusText, bodyText);
+    if (attempt < requestRetries && isRetryableStatus(response.status)) {
+      retryWarnings.push(warningFromError(lastError, "cdp_request_failed"));
+      await sleep(requestRetryMs);
+      continue;
+    }
+    throw lastError;
+  }
+  throw lastError || new Error("cdp_request_failed");
 }
 
 function markdownEscape(text) {
@@ -84,11 +141,22 @@ async function waitForLoadedText(targetId) {
     readyState: "",
     text: "",
   };
+  const requestWarnings = drainRecoveredRequestWarnings();
 
   while (Date.now() <= deadline) {
-    lastData = await capturePage(targetId);
-    if (hasLoadedText(lastData)) {
-      return { status: "captured", data: lastData };
+    try {
+      lastData = await capturePage(targetId);
+      requestWarnings.push(...drainRecoveredRequestWarnings());
+      if (hasLoadedText(lastData)) {
+        return {
+          status: "captured",
+          data: lastData,
+          warnings: uniqueWarnings(requestWarnings),
+        };
+      }
+    } catch (error) {
+      requestWarnings.push(warningFromError(error, "cdp_request_failed"));
+      requestWarnings.push(...drainRecoveredRequestWarnings());
     }
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
@@ -97,10 +165,18 @@ async function waitForLoadedText(targetId) {
     await sleep(Math.min(pollMs, remaining));
   }
 
-  return { status: "navigation_timeout", data: lastData };
+  return {
+    status: requestWarnings.length ? "cdp_request_failed" : "navigation_timeout",
+    data: lastData,
+    warnings: uniqueWarnings(requestWarnings),
+  };
 }
 
-function renderSecondaryContext({ sourceStatus, warning, data, capturedAt }) {
+function renderWarningLines(warnings) {
+  return warnings.map((warning) => `- capture_warning: ${warning}\n`).join("");
+}
+
+function renderSecondaryContext({ sourceStatus, warnings = [], data, capturedAt }) {
   return `# Secondary Context
 
 - source_url: ${url}
@@ -109,7 +185,7 @@ function renderSecondaryContext({ sourceStatus, warning, data, capturedAt }) {
 - captured_at: ${capturedAt}
 - capture_method: chrome_cdp
 - source_status: ${sourceStatus}
-${warning ? `- capture_warning: ${warning}\n` : ""}- usage_boundary: cross-check only; must not be cited in evidence_summary
+${renderWarningLines(warnings)}- usage_boundary: cross-check only; must not be cited in evidence_summary
 
 ## Description
 
@@ -121,16 +197,16 @@ ${markdownEscape(data.text) || "_No text captured._"}
 `;
 }
 
-const target = await request(`/new?url=${encodeURIComponent(url)}`);
-const targetId = target.targetId;
-
+let targetId = "";
 try {
+  const target = await request(`/new?url=${encodeURIComponent(url)}`);
+  targetId = target.targetId;
   const capture = await waitForLoadedText(targetId);
   const data = capture.data;
   const capturedAt = new Date().toISOString();
   const sourceStatus = capture.status === "captured" ? "secondary_context" : "secondary_context_unavailable";
-  const warning = capture.status === "captured" ? "" : capture.status;
-  const body = renderSecondaryContext({ sourceStatus, warning, data, capturedAt });
+  const warnings = capture.status === "captured" ? capture.warnings : (capture.warnings.length ? capture.warnings : [capture.status]);
+  const body = renderSecondaryContext({ sourceStatus, warnings, data, capturedAt });
   fs.mkdirSync(path.dirname(output), { recursive: true });
   fs.writeFileSync(output, body, "utf8");
   console.log(
@@ -141,11 +217,37 @@ try {
       finalUrl: data.finalUrl,
       title: data.title,
       textLength: data.text.length,
+      warnings,
     })
   );
   if (capture.status !== "captured") {
     process.exitCode = 1;
   }
+} catch (error) {
+  const data = { title: "", description: "", finalUrl: "about:blank", readyState: "", text: "" };
+  const warnings = [warningFromError(error, "cdp_request_failed")];
+  const body = renderSecondaryContext({
+    sourceStatus: "secondary_context_unavailable",
+    warnings,
+    data,
+    capturedAt: new Date().toISOString(),
+  });
+  fs.mkdirSync(path.dirname(output), { recursive: true });
+  fs.writeFileSync(output, body, "utf8");
+  console.log(
+    JSON.stringify({
+      output,
+      targetId,
+      status: "cdp_request_failed",
+      finalUrl: data.finalUrl,
+      title: data.title,
+      textLength: 0,
+      warnings,
+    })
+  );
+  process.exitCode = 1;
 } finally {
-  await request(`/close?target=${encodeURIComponent(targetId)}`).catch(() => null);
+  if (targetId) {
+    await request(`/close?target=${encodeURIComponent(targetId)}`).catch(() => null);
+  }
 }
