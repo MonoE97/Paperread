@@ -33,11 +33,21 @@ Use one per-paper run directory for summary generation, created with
 `uv run zotero-paperread create-run`. Use the returned `run_dir`; do not hand-roll
 slugs.
 
+For each candidate item, save the raw MCP `get_item_details(mode="complete")`
+response under that run directory and normalize it with `save-item-details`
+before calling local preparation commands. Downstream local commands should read
+the normalized `item-details.json`, while the raw response remains an audit
+artifact.
+
 ## Candidate Freeze
 
 Build the complete candidate set first, then freeze it in `manifest.json`.
 After freeze, do not rebuild the candidate list during worker execution or
 resume unless the user explicitly asks for a fresh audit.
+
+If discovery finds multiple Zotero entries with the same normalized title, block
+that paper before `create-run`; do not assign a worker and do not choose a parent
+item on the user's behalf. The user must de-duplicate those Zotero entries first.
 
 For summary-note batches, detect existing Codex summaries with
 `get_item_details(mode="complete")`. Treat an item as already summarized when a
@@ -46,6 +56,12 @@ child note matches any marker:
 - note title starts with `[Codex Summary]`;
 - note metadata tags include `codex-summary`;
 - note body includes `Tags: codex-summary, paper-summary`.
+
+When a user provides a supplemental webpage for an item, capture it into that
+item's run directory with `skills/zotero-paper-summary/scripts/capture-secondary-url.mjs`.
+Treat the resulting `secondary_context.md` as cross-check material only. It must
+not appear as a locator in `evidence_summary`; primary evidence remains
+`context.md` and `figure_context.md`.
 
 For historical note-content migrations, store the raw note content and a
 SHA-256 hash before conversion. Before updating Zotero, re-read the current note
@@ -113,6 +129,8 @@ A Zotero summary-note write is allowed only after all checks pass:
 ```text
 summary.json validates
 review.json exists
+apply-review has merged review.json into summary.json
+lint-summary reports no blocking issues
 review.json needs_improvement is false
 summary.json improvement_status is neither needed nor blocked after apply-review
 validate-trusted-summary passes
@@ -121,13 +139,31 @@ note.md and note.html have been finalized with the computed suffix
 note tags have been computed with note-tags
 preview-note has been shown for note.md and note.html
 target Zotero item title has been shown
+gate-run reports write_ready with no blockers
+prepare-write-payload records parentKey, tags, note_html_path, contentLength, and readback checks
 user has confirmed the write-ready preview
+```
+
+Recommended per-item command sequence:
+
+```bash
+uv run zotero-paperread validate-summary-json <run_dir>/summary.json
+uv run zotero-paperread apply-review <run_dir>/summary.json <run_dir>/review.json
+uv run zotero-paperread lint-summary <run_dir>/summary.json
+uv run zotero-paperread validate-trusted-summary <run_dir>/summary.json
+VERSION_SUFFIX="$(uv run zotero-paperread next-version-suffix <run_dir>/item-details.json --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE")"
+uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --generated-date "$GENERATED_DATE" --version-suffix "$VERSION_SUFFIX" --output <run_dir>/note.md --html-output <run_dir>/note.html
+uv run zotero-paperread note-tags <run_dir>/summary.json
+uv run zotero-paperread preview-note <run_dir>/note.md
+uv run zotero-paperread preview-note <run_dir>/note.html
+uv run zotero-paperread gate-run <run_dir> --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE" --output <run_dir>/gate-report.json
+uv run zotero-paperread prepare-write-payload <run_dir>/gate-report.json --output <run_dir>/write-payload.json
 ```
 
 Write only through Zotero MCP:
 
 ```text
-write_note(action="create", parentKey=<item_key>, content=<contents of note.html>, tags=<parsed note-tags list>)
+write_note(action="create", parentKey=<payload parentKey>, content=<contents of note.html>, tags=<payload tags>)
 ```
 
 Never overwrite an existing Codex summary. Same-day repeats must use

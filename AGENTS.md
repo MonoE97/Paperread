@@ -57,7 +57,11 @@ uv run zotero-paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/zot
 ## 写入规则
 
 - 默认先 dry-run。
+- Zotero exact 搜索出现多个 normalized title 相同的条目时，停止分析和写入，要求用户先在 Zotero 去重；不要替用户选择父条目。
+- MCP 原始 `get_item_details` 响应必须先落盘，再用 `save-item-details` 生成规范化的 `item-details.json`，后续本地命令只读规范化文件。
+- 用户提供微信公众号、新闻稿、博客等网页时，只作为二级材料 capture，用于 cross-check 和补充背景；`evidence_summary` 只能引用 `context.md` 和 `figure_context.md`。
 - `prepare-item`、`extract-pdf`、`extract-figures` 默认处理完整 PDF；只有用户明确要求快速调试、预览或截断抽取时才传 `--max-pages <N>`。
 - 真实写入 Zotero 前，必须展示 `note.md` 与 `note.html` 预览和目标 Zotero item 标题。
+- 真实写入 Zotero 前必须完成最终门禁：`validate-summary-json -> apply-review -> lint-summary -> validate-trusted-summary -> next-version-suffix -> finalize-note --html-output -> note-tags -> preview-note note.md/note.html -> gate-run -> prepare-write-payload`，且 `gate-report.json` 必须为 `write_ready`。
 - 真实写入 Zotero 时，`write_note(content=...)` 必须使用 `note.html` 的内容，避免 Markdown 表格在 Zotero 中被当作普通文本。
 - 重复运行不覆盖旧 note；同日重复创建时使用 `[Codex Summary] <paper title> - YYYY-MM-DD (v2)`、`(v3)` 等标题后缀创建新版本。

@@ -98,7 +98,10 @@ uv run zotero-paperread prepare-item runs/<date>/<paper-slug>/item-details.json 
 uv run zotero-paperread extract-pdf path/to/paper.pdf --output runs/<date>/<paper-slug>/extract.json
 uv run zotero-paperread extract-figures path/to/paper.pdf --output-dir runs/<date>/<paper-slug>/figures --top-k 4
 uv run zotero-paperread validate-summary-json runs/<date>/<paper-slug>/summary.json
+uv run zotero-paperread apply-review runs/<date>/<paper-slug>/summary.json runs/<date>/<paper-slug>/review.json
 uv run zotero-paperread lint-summary runs/<date>/<paper-slug>/summary.json
+uv run zotero-paperread validate-trusted-summary runs/<date>/<paper-slug>/summary.json
+uv run zotero-paperread next-version-suffix runs/<date>/<paper-slug>/item-details.json --paper-title "<title>" --generated-date "<YYYY-MM-DD>"
 uv run zotero-paperread render-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md
 uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md
 uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md --html-output runs/<date>/<paper-slug>/note.html
