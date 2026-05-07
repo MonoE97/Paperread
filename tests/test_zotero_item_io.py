@@ -55,8 +55,13 @@ def test_write_item_details_files_enriches_missing_extra_from_sqlite(monkeypatch
         assert item_key == "ABC123"
         return {
             "extra": "https://mp.weixin.qq.com/s/example",
-            "warnings": ["sqlite_immutable_snapshot_used"],
-            "provenance": {"source": "zotero_sqlite", "item_key": "ABC123", "sqlite_mode": "immutable"},
+            "warnings": [],
+            "provenance": {
+                "source": "zotero_sqlite",
+                "item_key": "ABC123",
+                "sqlite_mode": "immutable",
+                "diagnostics": ["sqlite_immutable_snapshot_used"],
+            },
         }
 
     monkeypatch.setattr("zotero_paperread.zotero_item_io.lookup_extra_by_item_key", fake_lookup, raising=False)
@@ -66,8 +71,9 @@ def test_write_item_details_files_enriches_missing_extra_from_sqlite(monkeypatch
 
     assert result["extra_source"] == "zotero_sqlite"
     assert normalized["extra"] == "https://mp.weixin.qq.com/s/example"
-    assert normalized["_paperread"]["warnings"] == ["sqlite_immutable_snapshot_used"]
+    assert normalized["_paperread"]["warnings"] == []
     assert normalized["_paperread"]["enrichment"]["extra"]["source"] == "zotero_sqlite"
+    assert normalized["_paperread"]["enrichment"]["extra"]["diagnostics"] == ["sqlite_immutable_snapshot_used"]
 
 
 def test_write_item_details_files_keeps_mcp_extra_without_sqlite_lookup(monkeypatch, tmp_path: Path) -> None:

@@ -41,6 +41,60 @@ def test_lookup_extra_by_item_key_reads_extra_without_writing(tmp_path: Path) ->
     assert result["warnings"] == []
 
 
+def test_lookup_extra_retries_read_only_before_immutable(monkeypatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "zotero.sqlite"
+    make_zotero_db(db_path)
+    calls: list[bool] = []
+
+    def fake_lookup(item_key: str, sqlite_path: Path, *, immutable: bool) -> tuple[str, bool]:
+        calls.append(immutable)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return "https://mp.weixin.qq.com/s/retry-success", True
+
+    monkeypatch.setattr("zotero_paperread.zotero_sqlite._lookup_with_mode", fake_lookup)
+
+    result = lookup_extra_by_item_key(
+        "ABC123",
+        sqlite_path=db_path,
+        ro_retries=1,
+        retry_sleep_seconds=0,
+    )
+
+    assert result["extra"] == "https://mp.weixin.qq.com/s/retry-success"
+    assert result["warnings"] == []
+    assert result["provenance"]["sqlite_mode"] == "ro"
+    assert result["provenance"]["diagnostics"] == ["sqlite_ro_retry_after_locked"]
+    assert calls == [False, False]
+
+
+def test_lookup_extra_records_successful_immutable_as_diagnostic(monkeypatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "zotero.sqlite"
+    make_zotero_db(db_path)
+    calls: list[bool] = []
+
+    def fake_lookup(item_key: str, sqlite_path: Path, *, immutable: bool) -> tuple[str, bool]:
+        calls.append(immutable)
+        if not immutable:
+            raise sqlite3.OperationalError("database is locked")
+        return "https://mp.weixin.qq.com/s/immutable-success", True
+
+    monkeypatch.setattr("zotero_paperread.zotero_sqlite._lookup_with_mode", fake_lookup)
+
+    result = lookup_extra_by_item_key(
+        "ABC123",
+        sqlite_path=db_path,
+        ro_retries=0,
+        retry_sleep_seconds=0,
+    )
+
+    assert result["extra"] == "https://mp.weixin.qq.com/s/immutable-success"
+    assert result["warnings"] == []
+    assert result["provenance"]["sqlite_mode"] == "immutable"
+    assert result["provenance"]["diagnostics"] == ["sqlite_immutable_snapshot_used"]
+    assert calls == [False, True]
+
+
 def test_lookup_extra_by_item_key_soft_fails_when_db_missing(tmp_path: Path) -> None:
     result = lookup_extra_by_item_key("ABC123", sqlite_path=tmp_path / "missing.sqlite")
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -55,6 +56,8 @@ def lookup_extra_by_item_key(
     *,
     sqlite_path: Path = DEFAULT_ZOTERO_SQLITE_PATH,
     allow_immutable: bool = True,
+    ro_retries: int = 2,
+    retry_sleep_seconds: float = 0.05,
 ) -> dict[str, Any]:
     """Read a Zotero item's Extra field from zotero.sqlite without mutating the DB."""
     key = str(item_key).strip()
@@ -62,32 +65,46 @@ def lookup_extra_by_item_key(
     if not key or not db_path.exists():
         return {"extra": "", "warnings": ["sqlite_extra_unavailable"], "provenance": {}}
 
-    warnings: list[str] = []
+    diagnostics: list[str] = []
     mode = "ro"
-    try:
-        extra, exists = _lookup_with_mode(key, db_path, immutable=False)
-    except sqlite3.OperationalError as error:
-        if not allow_immutable or not _is_locked_error(error):
-            return {"extra": "", "warnings": ["sqlite_extra_unavailable"], "provenance": {}}
-        warnings.append("sqlite_immutable_snapshot_used")
-        mode = "immutable"
+    attempt = 0
+    while True:
         try:
-            extra, exists = _lookup_with_mode(key, db_path, immutable=True)
+            extra, exists = _lookup_with_mode(key, db_path, immutable=False)
+            if attempt > 0:
+                diagnostics.append("sqlite_ro_retry_after_locked")
+            break
+        except sqlite3.OperationalError as error:
+            if not _is_locked_error(error):
+                return {"extra": "", "warnings": ["sqlite_extra_unavailable"], "provenance": {}}
+            if attempt < max(0, ro_retries):
+                attempt += 1
+                if retry_sleep_seconds > 0:
+                    time.sleep(retry_sleep_seconds)
+                continue
+            if not allow_immutable:
+                return {"extra": "", "warnings": ["sqlite_extra_unavailable"], "provenance": {}}
+            mode = "immutable"
+            diagnostics.append("sqlite_immutable_snapshot_used")
+            try:
+                extra, exists = _lookup_with_mode(key, db_path, immutable=True)
+                break
+            except sqlite3.Error:
+                return {"extra": "", "warnings": ["sqlite_extra_unavailable"], "provenance": {}}
         except sqlite3.Error:
             return {"extra": "", "warnings": ["sqlite_extra_unavailable"], "provenance": {}}
-    except sqlite3.Error:
-        return {"extra": "", "warnings": ["sqlite_extra_unavailable"], "provenance": {}}
 
     if not exists:
-        return {"extra": "", "warnings": warnings + ["sqlite_extra_item_not_found"], "provenance": {}}
+        return {"extra": "", "warnings": ["sqlite_extra_item_not_found"], "provenance": {}}
 
     return {
         "extra": extra,
-        "warnings": warnings,
+        "warnings": [],
         "provenance": {
             "source": "zotero_sqlite",
             "item_key": key,
             "sqlite_path": str(db_path),
             "sqlite_mode": mode,
+            "diagnostics": diagnostics,
         },
     }
