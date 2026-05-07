@@ -7,6 +7,7 @@ from typing import Any
 HTTP_URL_RE = re.compile(r"https?://[^\s<>()\"']+")
 TRAILING_URL_PUNCTUATION = ".,;:!?)，。；：！？）】》"
 USAGE_BOUNDARY = "cross-check only; must not be cited in evidence_summary"
+NON_ACTIONABLE_WARNING_CODES = {"sqlite_immutable_snapshot_used", "sqlite_ro_retry_after_locked"}
 
 
 def _clean_url(url: str) -> str:
@@ -46,7 +47,13 @@ def _paperread_warnings(details: dict[str, Any]) -> list[str]:
     warnings = paperread.get("warnings")
     if not isinstance(warnings, list):
         return []
-    return [str(item) for item in warnings if str(item).strip()]
+    cleaned: list[str] = []
+    for item in warnings:
+        warning = str(item).strip()
+        if not warning or warning in NON_ACTIONABLE_WARNING_CODES:
+            continue
+        cleaned.append(warning)
+    return cleaned
 
 
 def build_secondary_sources(details: dict[str, Any]) -> dict[str, Any]:

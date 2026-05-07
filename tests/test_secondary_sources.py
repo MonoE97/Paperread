@@ -24,8 +24,14 @@ def test_build_secondary_sources_records_cross_check_boundary() -> None:
         "title": "Example Paper",
         "extra": "Related: https://mp.weixin.qq.com/s/example?scene=334",
         "_paperread": {
-            "enrichment": {"extra": {"source": "zotero_sqlite", "sqlite_mode": "immutable"}},
-            "warnings": ["sqlite_immutable_snapshot_used"],
+            "enrichment": {
+                "extra": {
+                    "source": "zotero_sqlite",
+                    "sqlite_mode": "immutable",
+                    "diagnostics": ["sqlite_immutable_snapshot_used"],
+                }
+            },
+            "warnings": [],
         },
     }
 
@@ -33,7 +39,7 @@ def test_build_secondary_sources_records_cross_check_boundary() -> None:
 
     assert payload["item_key"] == "ABC123"
     assert payload["usage_boundary"] == "cross-check only; must not be cited in evidence_summary"
-    assert payload["warnings"] == ["sqlite_immutable_snapshot_used"]
+    assert payload["warnings"] == []
     assert payload["sources"] == [
         {
             "source_id": "secondary-001",
@@ -43,6 +49,29 @@ def test_build_secondary_sources_records_cross_check_boundary() -> None:
             "capture_status": "pending_capture",
         }
     ]
+
+
+def test_build_secondary_sources_does_not_promote_successful_sqlite_diagnostics_to_warnings() -> None:
+    payload = build_secondary_sources(
+        {
+            "key": "ABC123",
+            "title": "Example",
+            "extra": "https://mp.weixin.qq.com/s/example",
+            "_paperread": {
+                "warnings": ["sqlite_immutable_snapshot_used"],
+                "enrichment": {
+                    "extra": {
+                        "source": "zotero_sqlite",
+                        "sqlite_mode": "immutable",
+                        "diagnostics": ["sqlite_immutable_snapshot_used"],
+                    }
+                },
+            },
+        }
+    )
+
+    assert payload["sources"][0]["source_provenance"] == "zotero_sqlite"
+    assert payload["warnings"] == []
 
 
 def test_build_secondary_sources_soft_handles_missing_extra() -> None:
