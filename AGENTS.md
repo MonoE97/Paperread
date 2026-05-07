@@ -59,6 +59,7 @@ uv run zotero-paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/zot
 - 默认先 dry-run。
 - Zotero exact 搜索出现多个 normalized title 相同的条目时，停止分析和写入，要求用户先在 Zotero 去重；不要替用户选择父条目。
 - MCP 原始 `get_item_details` 响应必须先落盘，再用 `save-item-details` 生成规范化的 `item-details.json`，后续本地命令只读规范化文件。
+- 当 MCP 响应缺少 `extra` 时，`save-item-details` 可用只读 Zotero SQLite fallback 补齐 `Extra` / `其他`；成功补齐只记录 `_paperread.enrichment.extra.diagnostics`，不写入 `_paperread.warnings`；缺失、不可读或找不到条目才保留 warning。
 - 用户提供微信公众号、新闻稿、博客等网页时，只作为二级材料 capture，用于 cross-check 和补充背景；`evidence_summary` 只能引用 `context.md` 和 `figure_context.md`。
 - `prepare-item`、`extract-pdf`、`extract-figures` 默认处理完整 PDF；只有用户明确要求快速调试、预览或截断抽取时才传 `--max-pages <N>`。
 - 真实写入 Zotero 前，必须展示 `note.md` 与 `note.html` 预览和目标 Zotero item 标题。

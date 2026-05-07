@@ -39,6 +39,12 @@ before calling local preparation commands. Downstream local commands should read
 the normalized `item-details.json`, while the raw response remains an audit
 artifact.
 
+When MCP omits Zotero `Extra` / `其他`, `save-item-details` may recover it from
+the read-only SQLite fallback. A successful immutable SQLite read is provenance
+diagnostic data under `_paperread.enrichment.extra.diagnostics`, not a workflow
+warning. Missing, unreadable, locked, or item-not-found fallback states remain
+warnings and must be carried into the item audit.
+
 ## Candidate Freeze
 
 Build the complete candidate set first, then freeze it in `manifest.json`.
@@ -57,11 +63,22 @@ child note matches any marker:
 - note metadata tags include `codex-summary`;
 - note body includes `Tags: codex-summary, paper-summary`.
 
-When a user provides a supplemental webpage for an item, capture it into that
-item's run directory with `skills/zotero-paper-summary/scripts/capture-secondary-url.mjs`.
-Treat the resulting `secondary_context.md` as cross-check material only. It must
-not appear as a locator in `evidence_summary`; primary evidence remains
-`context.md` and `figure_context.md`.
+When a user provides a supplemental webpage for an item, or when
+`prepare-item` emits links from Zotero `Extra` into `secondary_sources.json`,
+capture each URL into that item's run directory with the CDP helper:
+
+```bash
+mkdir -p <run_dir>/secondary_contexts
+node skills/zotero-paper-summary/scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_contexts/secondary-001.md --request-retries 2 --request-retry-ms 500
+```
+
+Treat `secondary_context.md` and `secondary_contexts/*.md` as cross-check
+material only. They must not appear as locators in `evidence_summary`; primary
+evidence remains `context.md` and `figure_context.md`. A recovered transient CDP
+request may still record `capture_warning` while keeping
+`source_status: secondary_context`. Persistent CDP failures write
+`source_status: secondary_context_unavailable`; do not use those files as
+secondary material.
 
 For historical note-content migrations, store the raw note content and a
 SHA-256 hash before conversion. Before updating Zotero, re-read the current note

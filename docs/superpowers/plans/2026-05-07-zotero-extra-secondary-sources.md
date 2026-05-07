@@ -10,6 +10,23 @@
 
 ---
 
+## Implementation Reality Update
+
+2026-05-07 hardening supersedes two diagnostic details in the original task
+snippets below:
+
+- successful immutable SQLite Extra fallback is now recorded under
+  `_paperread.enrichment.extra.diagnostics`, not `_paperread.warnings`;
+- CDP secondary capture should use `--request-retries 2 --request-retry-ms 500`
+  for normal WeChat/secondary-source capture.
+
+The architecture and cross-check-only boundary remain current. For exact retry
+and warning policy, use
+`docs/superpowers/plans/2026-05-07-extra-fallback-and-cdp-retry-hardening.md`
+and the runbook in `docs/references/zotero-batch-write-runbook.md`.
+
+---
+
 ## Review Decision
 
 Scheme A is accepted with constraints. The core direction is correct: make Extra-link discovery a first-class run artifact instead of a manual SQLite inspection. The important correction is where boundaries sit:
@@ -962,13 +979,13 @@ uv run zotero-paperread save-item-details <run_dir>/mcp-response.json --output <
 Modify `/Users/jwxi/Desktop/AIflow/Zotero_paperread/README.md` in the Secondary Context section with this wording:
 
 ````markdown
-`save-item-details` also smooths Zotero `Extra` / `其他` handling. If the MCP `get_item_details` response omits `extra`, the command uses a read-only SQLite fallback against `~/Zotero/zotero.sqlite` and records warnings in normalized `item-details.json`. Disable this fallback with `--no-sqlite-extra-fallback`.
+`save-item-details` also smooths Zotero `Extra` / `其他` handling. If the MCP `get_item_details` response omits `extra`, the command uses a read-only SQLite fallback against `~/Zotero/zotero.sqlite`. Successful immutable SQLite Extra reads are recorded as provenance diagnostics under `_paperread.enrichment.extra.diagnostics`, not normal workflow warnings. Actual missing or unreadable Extra fallback remains a warning. Disable this fallback with `--no-sqlite-extra-fallback`.
 
 `prepare-item` reads normalized `item-details.json`, extracts `http://` / `https://` URLs from `extra`, and writes `<run_dir>/secondary_sources.json`. When `sources` is non-empty, capture each URL with:
 
 ```bash
 mkdir -p <run_dir>/secondary_contexts
-node skills/zotero-paper-summary/scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_contexts/secondary-001.md
+node skills/zotero-paper-summary/scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_contexts/secondary-001.md --request-retries 2 --request-retry-ms 500
 ```
 
 Captured secondary contexts are cross-check only and must not be cited in `evidence_summary`. Trusted evidence remains limited to `context.md` and `figure_context.md`.

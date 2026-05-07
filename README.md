@@ -13,15 +13,22 @@ runs/<date>/<paper-slug>/
 `create-run` initializes that directory and writes `run.json` as the run manifest. Typical contents are:
 
 - `run.json`
+- `mcp-response.json`
 - `item-details.json`
+- `item-details.raw.json`
 - `metadata.json`
 - `extract.json`
 - `context.md`
+- `secondary_sources.json`
+- `secondary_contexts/`
 - `figures.json`
 - `figure_context.md`
 - `summary.json`
+- `review.json`
 - `note.md`
 - `note.html`
+- `gate-report.json`
+- `write-payload.json`
 - `figures/`
 
 These are intermediate and audit artifacts. Keep them while reviewing a run. Delete old runs manually when they are no longer useful.
@@ -33,12 +40,14 @@ Given a Zotero paper title, Codex can:
 1. find the Zotero item through `zotero-mcp`;
 2. locate the attached PDF path, preferring the main paper over appendices or supporting-information PDFs;
 3. create and reuse a local `runs/<date>/<paper-slug>/` bundle for that paper;
-4. extract PDF text with a local `uv`-managed Python CLI;
-5. extract figures, backfill nearby captions for embedded images, and analyze key images when available;
-6. generate a Chinese structured paper summary with figure-aware analysis;
-7. render a small set of normalized English key labels at the end of the note;
-8. validate summary JSON, render auditable Markdown plus Zotero-ready HTML, and preview the note;
-9. create a Zotero child note only when explicitly requested.
+4. normalize item details and recover missing Zotero `Extra` / `其他` through a read-only SQLite fallback when needed;
+5. extract PDF text with a local `uv`-managed Python CLI;
+6. extract figures, backfill nearby captions for embedded images, and analyze key images when available;
+7. capture Extra/web links as secondary context for cross-checking only;
+8. generate a Chinese structured paper summary with figure-aware analysis;
+9. render a small set of normalized English key labels at the end of the note;
+10. validate summary JSON, render auditable Markdown plus Zotero-ready HTML, and preview the note;
+11. create a Zotero child note only when explicitly requested.
 
 The normal Zotero path is native `zotero-mcp` tool access. This repository intentionally does not implement an HTTP JSON-RPC fallback client for Zotero writes; if a Codex session lacks native Zotero MCP tools, treat it as a session/tool-injection issue and start a fresh session or verify the MCP registration.
 
