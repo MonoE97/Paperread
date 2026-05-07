@@ -269,6 +269,29 @@ def test_prepare_item_bundle_distinguishes_pdf_attachment_without_local_path(tmp
     assert "missing_pdf_attachment" not in extract["warnings"]
 
 
+def test_prepare_item_bundle_writes_secondary_sources_json(tmp_path: Path) -> None:
+    details = {
+        "key": "WEB123",
+        "title": "Paper With Secondary Web Source",
+        "creators": [],
+        "date": "2026",
+        "DOI": "",
+        "url": "https://example.org/paper",
+        "zoteroUrl": "zotero://select/library/items/WEB123",
+        "abstractNote": "",
+        "extra": "https://mp.weixin.qq.com/s/example?scene=334",
+        "attachments": [],
+    }
+
+    result = prepare_item_bundle(details, tmp_path / "bundle")
+
+    secondary_path = Path(result["secondary_sources_json"])
+    secondary = json.loads(secondary_path.read_text(encoding="utf-8"))
+    assert secondary_path.name == "secondary_sources.json"
+    assert secondary["sources"][0]["url"] == "https://mp.weixin.qq.com/s/example?scene=334"
+    assert secondary["sources"][0]["capture_status"] == "pending_capture"
+
+
 def test_prepare_item_bundle_keeps_base_bundle_when_figure_extraction_fails(tmp_path: Path) -> None:
     pdf_path = tmp_path / "paper.pdf"
     make_pdf(pdf_path, ["Abstract\nThis paper studies CSP with AI.", "Methods\nExtra page for truncation."])
@@ -342,6 +365,7 @@ def test_prepare_item_bundle_updates_existing_run_manifest(tmp_path: Path) -> No
         "url": "https://example.org/manifest",
         "zoteroUrl": "zotero://select/library/items/RUN123",
         "abstractNote": "Manifest abstract.",
+        "extra": "https://mp.weixin.qq.com/s/manifest",
         "attachments": [
             {
                 "key": "PDFRUN",
@@ -395,6 +419,9 @@ def test_prepare_item_bundle_updates_existing_run_manifest(tmp_path: Path) -> No
     assert manifest["figure_context_md"] == result["figure_context_md"]
     assert manifest["arxiv_id"] == "2401.01234"
     assert manifest["warnings"] == ["truncated_to_1_pages"]
+    assert manifest["secondary_sources_json"] == result["secondary_sources_json"]
+    secondary = json.loads(Path(result["secondary_sources_json"]).read_text(encoding="utf-8"))
+    assert secondary["sources"][0]["url"] == "https://mp.weixin.qq.com/s/manifest"
 
 
 def test_prepare_item_bundle_removes_stale_figure_artifacts_on_rerun_failure(tmp_path: Path) -> None:

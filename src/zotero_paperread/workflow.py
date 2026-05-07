@@ -7,6 +7,7 @@ from typing import Any
 from zotero_paperread.figures import extract_figures
 from zotero_paperread.pdf_extract import extract_pdf
 from zotero_paperread.runs import write_run_manifest
+from zotero_paperread.secondary_sources import build_secondary_sources
 
 LOW_PRIORITY_PDF_TERMS = (
     "appendix",
@@ -220,15 +221,21 @@ def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int |
     metadata_path = bundle_dir / "metadata.json"
     extract_path = bundle_dir / "extract.json"
     context_path = bundle_dir / "context.md"
+    secondary_sources_path = bundle_dir / "secondary_sources.json"
     figures_path: Path | None = None
     figure_context_path: Path | None = None
     figures_payload: dict[str, Any] | None = None
     source_attempts: list[dict[str, Any]] = []
     figure_error_warning: str | None = None
+    secondary_sources = build_secondary_sources(details)
 
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     extract_path.write_text(json.dumps(extract, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     context_path.write_text(build_context_markdown(metadata, extract), encoding="utf-8")
+    secondary_sources_path.write_text(
+        json.dumps(secondary_sources, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     if pdf_path:
         try:
@@ -261,6 +268,7 @@ def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int |
         "metadata_json": str(metadata_path),
         "extract_json": str(extract_path),
         "context_md": str(context_path),
+        "secondary_sources_json": str(secondary_sources_path),
         "figures_json": str(figures_path) if figures_path else None,
         "figure_context_md": str(figure_context_path) if figure_context_path else None,
         "arxiv_id": figures_payload.get("arxiv_id") if figures_payload else None,
@@ -276,6 +284,7 @@ def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int |
                 "pdf_path": pdf_path,
                 "metadata_json": result["metadata_json"],
                 "extract_json": result["extract_json"],
+                "secondary_sources_json": result["secondary_sources_json"],
                 "figures_json": result["figures_json"],
                 "figure_context_md": result["figure_context_md"],
                 "arxiv_id": result["arxiv_id"],
