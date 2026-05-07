@@ -23,6 +23,7 @@ from zotero_paperread.summary_lint import lint_summary
 from zotero_paperread.workflow import prepare_item_bundle
 from zotero_paperread.write_payload import build_write_payload
 from zotero_paperread.zotero_details import next_version_suffix_from_details
+from zotero_paperread.zotero_sqlite import DEFAULT_ZOTERO_SQLITE_PATH
 from zotero_paperread.zotero_item_io import write_item_details_files
 
 app = typer.Typer(help="Zotero-first paper reading utilities.")
@@ -418,10 +419,26 @@ def save_item_details_command(
     input_json: Path,
     output: Path = typer.Option(..., "--output", "-o", help="Write normalized item details JSON."),
     raw_output: Path | None = typer.Option(None, "--raw-output", help="Optionally write raw MCP payload JSON."),
+    zotero_sqlite: Path = typer.Option(
+        DEFAULT_ZOTERO_SQLITE_PATH,
+        "--zotero-sqlite",
+        help="Read-only Zotero SQLite path for missing Extra fallback.",
+    ),
+    sqlite_extra_fallback: bool = typer.Option(
+        True,
+        "--sqlite-extra-fallback/--no-sqlite-extra-fallback",
+        help="Use read-only SQLite to fill missing Extra.",
+    ),
 ) -> None:
     """Save raw MCP item details as normalized run item-details.json."""
     payload = json.loads(input_json.read_text(encoding="utf-8"))
-    result = write_item_details_files(payload, normalized_path=output, raw_path=raw_output)
+    result = write_item_details_files(
+        payload,
+        normalized_path=output,
+        raw_path=raw_output,
+        sqlite_path=zotero_sqlite,
+        sqlite_extra_fallback=sqlite_extra_fallback,
+    )
     typer.echo(json.dumps(result, ensure_ascii=False))
 
 
