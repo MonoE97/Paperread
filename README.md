@@ -141,6 +141,17 @@ When the user provides a WeChat article, press release, blog, or other webpage a
 node skills/zotero-paper-summary/scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_context.md
 ```
 
+`save-item-details` also smooths Zotero `Extra` / `其他` handling. If the MCP `get_item_details` response omits `extra`, the command uses a read-only SQLite fallback against `~/Zotero/zotero.sqlite` and records warnings in normalized `item-details.json`. Disable this fallback with `--no-sqlite-extra-fallback`.
+
+`prepare-item` reads normalized `item-details.json`, extracts `http://` / `https://` URLs from `extra`, and writes `<run_dir>/secondary_sources.json`. When `sources` is non-empty, capture each URL with:
+
+```bash
+mkdir -p <run_dir>/secondary_contexts
+node skills/zotero-paper-summary/scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_contexts/secondary-001.md
+```
+
+Captured secondary contexts are `cross-check only; must not be cited in evidence_summary`. Trusted evidence remains limited to `context.md` and `figure_context.md`.
+
 The capture script waits up to `60000` ms for browser navigation and non-empty page text. Use `--timeout-ms <ms>` and `--poll-ms <ms>` only for debugging or tests. A successful capture contains `source_status: secondary_context` and can be used for cross-checking, background, and follow-up questions, but `evidence_summary` must not cite secondary context. If the page never leaves `about:blank` or never yields text before timeout, the file contains `source_status: secondary_context_unavailable` and `capture_warning: navigation_timeout`; do not treat it as usable secondary material. Trusted evidence remains limited to `context.md` and `figure_context.md`.
 
 ## Trusted Notes

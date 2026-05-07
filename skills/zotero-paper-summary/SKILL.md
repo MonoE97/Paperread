@@ -95,6 +95,14 @@ uv run zotero-paperread save-item-details <run_dir>/mcp-response.json --output <
 ```
 
    - 后续命令只读取规范化后的 `<run_dir>/item-details.json`；`item-details.raw.json` 作为 MCP 原始返回审计件保留。
+   - `save-item-details` 默认在 MCP 响应缺少 `extra` 字段时，用只读 Zotero SQLite fallback 补齐 Zotero `Extra` / `其他` 字段。
+   - 该 fallback 只读 `~/Zotero/zotero.sqlite`，不会写 Zotero；如果 SQLite 不可读、被锁、缺少 item 或没有 extra，保留 warning 并继续主 PDF workflow。
+   - 如需禁用 fallback，追加 `--no-sqlite-extra-fallback`：
+
+```bash
+uv run zotero-paperread save-item-details <run_dir>/mcp-response.json --output <run_dir>/item-details.json --raw-output <run_dir>/item-details.raw.json --no-sqlite-extra-fallback
+```
+
    - 如果返回中 `attachments[].path` 已有本地 PDF 路径，直接交给 `prepare-item`。
    - 如果没有 PDF path，但有 PDF attachment key，先报告 `missing_pdf_path_in_item_details`，不要直接猜 Zotero storage 路径；只有用户明确要求排障时才进行本机路径探测。
 
@@ -120,6 +128,7 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
      - `metadata.json`
      - `extract.json`
      - `context.md`
+     - `secondary_sources.json`
      - `figures.json`
      - `figure_context.md`
      - `figures/`
@@ -264,13 +273,22 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
 
 ## 二级材料 capture
 
-当用户提供微信公众号、新闻稿、博客或其他网页作为补充材料时，先用二级材料 capture，不要把网页正文混入 PDF 主证据。
+当用户提供微信公众号、新闻稿、博客或其他网页作为补充材料，或 `secondary_sources.json` 从 Zotero `Extra` / `其他` 检测到链接时，先用二级材料 capture，不要把网页正文混入 PDF 主证据。
 
 ```bash
 node skills/zotero-paper-summary/scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_context.md
 ```
 
+如果 `<run_dir>/secondary_sources.json` 中存在 `sources`，逐条使用现有 CDP capture 脚本写入 `<run_dir>/secondary_contexts/<source_id>.md`：
+
+```bash
+mkdir -p <run_dir>/secondary_contexts
+node skills/zotero-paper-summary/scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_contexts/secondary-001.md
+```
+
 微信公众号默认使用 Chrome CDP。脚本默认最多等待 `60000` ms，直到页面完成导航且正文非空；只有调试或测试时才使用 `--timeout-ms <ms>` / `--poll-ms <ms>` 缩短等待。成功输出文件必须包含 `source_status: secondary_context`。如果页面一直停在 `about:blank` 或超时仍没有正文，输出 `source_status: secondary_context_unavailable` 和 `capture_warning: navigation_timeout`，不要把它当成可用二级材料。`evidence_summary` must not cite secondary context；它只能用于 cross-check、补充阅读背景和提示后续问题。
+
+`secondary_contexts/*.md` 和 `secondary_sources.json` 都是 `cross-check only; must not be cited in evidence_summary`。可信证据仍只来自 `context.md` 和 `figure_context.md`。
 
 8. 初始渲染和验证 note（dry-run 审查输入）：
 

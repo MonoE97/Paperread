@@ -56,6 +56,19 @@ def test_secondary_context_is_documented_as_non_evidence() -> None:
     assert "navigation_timeout" in readme
 
 
+def test_docs_explain_zotero_extra_secondary_sources() -> None:
+    skill = (PROJECT_ROOT / "skills" / "zotero-paper-summary" / "SKILL.md").read_text(encoding="utf-8")
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    for text in (skill, readme):
+        assert "secondary_sources.json" in text
+        assert "Extra" in text or "其他" in text
+        assert "secondary_contexts" in text
+        assert "cross-check only" in text
+        assert "must not be cited in evidence_summary" in text
+        assert "--no-sqlite-extra-fallback" in text
+
+
 def test_docs_show_smoothed_write_gate_command_chain() -> None:
     skill = (PROJECT_ROOT / "skills" / "zotero-paper-summary" / "SKILL.md").read_text(encoding="utf-8")
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
