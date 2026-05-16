@@ -1,0 +1,69 @@
+{
+  "batch_id": "fixture-batch-001",
+  "target_collection_path": "CATL/固态电池",
+  "generated_date": "2026-05-11",
+  "state": "frozen",
+  "items": [
+    {
+      "item_key": "ABC123",
+      "title": "Stable sulfide electrolyte",
+      "normalized_title": "stable sulfide electrolyte",
+      "source_collection_path": "CATL/固态电池",
+      "status": "write_ready",
+      "run_dir": "runs/2026-05-11/stable-sulfide-electrolyte-abc123",
+      "existing_summary_notes": [],
+      "secondary_sources": [
+        {
+          "kind": "wechat",
+          "url": "https://mp.weixin.qq.com/s/example",
+          "status": "captured"
+        }
+      ],
+      "primary_pdf_status": "available",
+      "trust_status": "trusted",
+      "review_status": "passed",
+      "note_title": "[Codex Summary] Stable sulfide electrolyte - 2026-05-11",
+      "note_tags": ["codex-summary", "paper-summary"],
+      "write_payload": "runs/2026-05-11/stable-sulfide-electrolyte-abc123/write-payload.json",
+      "written_note_key": "",
+      "blocked_reason": "",
+      "error_detail": ""
+    },
+    {
+      "item_key": "DEF456",
+      "title": "Already summarized paper",
+      "normalized_title": "already summarized paper",
+      "source_collection_path": "CATL/固态电池",
+      "status": "skipped_existing_summary",
+      "run_dir": "",
+      "existing_summary_notes": [
+        {
+          "key": "NOTE1",
+          "title": "[Codex Summary] Already summarized paper - 2026-05-10"
+        }
+      ],
+      "secondary_sources": [],
+      "primary_pdf_status": "not_checked",
+      "trust_status": "",
+      "review_status": "",
+      "note_title": "",
+      "note_tags": [],
+      "write_payload": "",
+      "written_note_key": "",
+      "blocked_reason": "existing_codex_summary",
+      "error_detail": ""
+    }
+  ],
+  "counts": {
+    "discovered": 2,
+    "queued": 0,
+    "skipped_existing_summary": 1,
+    "skipped_invalid_item": 0,
+    "blocked_duplicate_normalized_title": 0,
+    "blocked": 0,
+    "write_ready": 1,
+    "written": 0,
+    "verified": 0,
+    "failed": 0
+  }
+}

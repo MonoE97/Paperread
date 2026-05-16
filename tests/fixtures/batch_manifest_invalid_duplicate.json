@@ -1,0 +1,58 @@
+{
+  "batch_id": "fixture-batch-duplicate",
+  "target_collection_path": "CATL/固态电池",
+  "generated_date": "2026-05-11",
+  "state": "frozen",
+  "items": [
+    {
+      "item_key": "DUP111",
+      "title": "Duplicate title",
+      "normalized_title": "duplicate title",
+      "source_collection_path": "CATL/固态电池",
+      "status": "queued",
+      "run_dir": "runs/2026-05-11/duplicate-title-dup111",
+      "existing_summary_notes": [],
+      "secondary_sources": [],
+      "primary_pdf_status": "available",
+      "trust_status": "",
+      "review_status": "",
+      "note_title": "",
+      "note_tags": [],
+      "write_payload": "",
+      "written_note_key": "",
+      "blocked_reason": "",
+      "error_detail": ""
+    },
+    {
+      "item_key": "DUP222",
+      "title": "Duplicate title",
+      "normalized_title": "duplicate title",
+      "source_collection_path": "CATL/固态电池",
+      "status": "queued",
+      "run_dir": "runs/2026-05-11/duplicate-title-dup222",
+      "existing_summary_notes": [],
+      "secondary_sources": [],
+      "primary_pdf_status": "available",
+      "trust_status": "",
+      "review_status": "",
+      "note_title": "",
+      "note_tags": [],
+      "write_payload": "",
+      "written_note_key": "",
+      "blocked_reason": "",
+      "error_detail": ""
+    }
+  ],
+  "counts": {
+    "discovered": 2,
+    "queued": 2,
+    "skipped_existing_summary": 0,
+    "skipped_invalid_item": 0,
+    "blocked_duplicate_normalized_title": 0,
+    "blocked": 0,
+    "write_ready": 0,
+    "written": 0,
+    "verified": 0,
+    "failed": 0
+  }
+}
