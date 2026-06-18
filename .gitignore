@@ -16,6 +16,7 @@ htmlcov/
 
 # Local outputs and previews
 .worktrees/
+.superpowers/
 *.log
 tmp/
 .tmp/

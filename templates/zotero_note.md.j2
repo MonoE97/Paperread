@@ -2,7 +2,7 @@
 
 > {{ one_sentence_summary }}
 
-## 0. 速读决策
+## 0. 阅读结论
 
 - **30 秒结论**: {% if tldr %}{{ tldr }}{% else %}{{ one_sentence_summary }}{% endif %}
 - **阅读决策**: {{ reading_decision }}
@@ -41,7 +41,7 @@
 | 核心结果 | {{ core_result_short | table_cell }} |
 | 质量评分 | {{ quality_score | table_cell }} |
 
-## 1. 论文核心
+## 1. 论文主张
 
 ### 背景问题
 
@@ -65,7 +65,7 @@
 {{ abstract_translation }}
 {% endif %}
 
-## 2. 方法怎么做
+## 2. 方法与设计
 
 ### 方法总览
 
@@ -99,7 +99,7 @@
 - none
 {% endif %}
 
-## 3. 结果是否站得住
+## 3. 结果可信度
 
 ### 关键结果表
 
@@ -195,17 +195,7 @@
 - none
 {% endif %}
 
-## 5. 局限、适用边界与潜在 gap
-
-### 主要贡献
-
-{% if contributions %}
-{% for item in contributions %}
-- {{ item }}
-{% endfor %}
-{% else %}
-- none
-{% endif %}
+## 5. 边界与机会
 
 ### 作者明示局限
 
@@ -251,7 +241,7 @@
 - none
 {% endif %}
 
-## 6. 可迁移启发
+## 6. 我能怎么用
 
 ### 可迁移启发
 
@@ -277,7 +267,9 @@
 - none
 {% endif %}
 
-## 7. 术语与概念卡片
+## 7. 术语与检索
+
+### 核心概念
 
 {% if concept_cards %}
 {% for item in concept_cards %}
@@ -292,58 +284,11 @@
 - none
 {% endif %}
 
-## 8. 后续检索关键词
+### 后续检索关键词
 
 {% if follow_up_keywords %}
 {% for item in follow_up_keywords %}
 - {{ item }}
-{% endfor %}
-{% else %}
-- none
-{% endif %}
-
-## 9. 元数据
-
-| 字段 | 内容 |
-| --- | --- |
-| Zotero Key | {{ key | table_cell }} |
-| 标题 | {{ title | table_cell }} |
-| 作者 | {{ creators | table_cell }} |
-| 日期 | {{ date | table_cell }} |
-| DOI | {{ doi | table_cell }} |
-| URL | {{ url | table_cell }} |
-| Zotero 链接 | {{ zotero_url | table_cell }} |
-| 生成日期 | {{ generated_date | table_cell }} |
-
-## 10. 证据链附录
-
-{% if evidence_summary %}
-{% for item in evidence_summary %}
-### Claim {{ loop.index }}
-
-**结论**: {{ item.claim }}
-
-**证据**:
-{% if item.evidence %}
-{% for evidence in item.evidence %}
-- {{ evidence.line }}
-{% endfor %}
-{% else %}
-- none
-{% endif %}
-
-{% endfor %}
-{% else %}
-- none
-{% endif %}
-
-## 11. 补充优化记录
-
-{% if improvement_notes %}
-- **改进状态**: {{ improvement_status }}
-
-{% for item in improvement_notes %}
-- {{ item.issue }}{% if item.action %}: {{ item.action }}{% endif %}{% if item.source %} (source: {{ item.source }}){% endif %}{{ "\n" }}
 {% endfor %}
 {% else %}
 - none

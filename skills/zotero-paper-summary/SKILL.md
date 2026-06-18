@@ -40,6 +40,21 @@ Use `skills/zotero-paper-summary/SKILL.md` in this repository first.
 
 在本项目和用户约定中，“输出笔记”是 Zotero write-through 意图，不是单纯打印 Markdown；但仍必须通过完整写入门禁，且只有 `zotero-mcp write_note` 可以执行真实写入。
 
+## 当前 Zotero note 渲染结构
+
+最终写入 Zotero 的阅读笔记采用 0-7 reading-thread layout：
+
+1. `0. 阅读结论`：30 秒结论、阅读决策、研究相关性、可信状态、主要风险、推荐先读章节和图表。
+2. `1. 论文主张`：背景问题、已有缺口、本文切入点、一句话贡献和摘要翻译。
+3. `2. 方法与设计`：方法总览、模块拆解、workflow 和必要技术细节。
+4. `3. 结果可信度`：关键结果表、baseline/comparison、结果证据说明和证据质量。核心数值和 locator 只在这里完整展开。
+5. `4. 图表导读`：说明关键图回答什么问题、如何支撑主线、图像/抽取质量如何；不要把图表段写成第二份结果总结。
+6. `5. 边界与机会`：作者明示局限、Codex 推断限制、适用边界和 potential gaps。
+7. `6. 我能怎么用`：可迁移启发、workflow lessons 和后续问题。
+8. `7. 术语与检索`：核心概念卡片、后续检索关键词和 trailing tags。
+
+`metadata`、`evidence_summary`、`review_status`、`improvement_status`、`improvement_notes` 是 audit-only for rendered note。它们必须保留在 JSON artifacts 和 gate inputs 中，但不要作为 `元数据`、`证据链附录` 或 `补充优化记录` 专门渲染进 Zotero note。
+
 ## 输入
 
 接受 Zotero 条目标题或标题片段。V2 仍只处理单篇论文，不处理 collection 批量任务。
@@ -314,7 +329,7 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
    - `main_risk_short` 只写一个最重要的风险；完整告警保留在 `extraction_warnings` 和 `review_issues`。
    - `workflow_steps` 可以是 Markdown string，也可以是 string list。
    - `recommended_sections` 和 `recommended_figures` 只列最值得先看的 1-5 项，locator 使用 canonical form。
-   - `baseline_or_comparison` 和 `result_evidence_notes` 用于支撑 `## 3. 结果是否站得住`，低置信 table/value candidate 必须写 caveat。
+   - `baseline_or_comparison` 和 `result_evidence_notes` 用于支撑 `## 3. 结果可信度`，低置信 table/value candidate 必须写 caveat。
    - `author_stated_limitations` 只放作者明示的局限，object form 使用 `source_type: "author_stated"`。
    - `inferred_limits` 只放 Codex/读者基于范围、数据或缺失实验推断出的限制，object form 使用 `source_type: "inferred"`，不得写成作者声称。
    - `potential_gaps` 是后续研究 gap，必须包含 evidence locator 或显式 uncertainty。

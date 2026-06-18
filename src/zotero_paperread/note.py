@@ -9,18 +9,14 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from markdown_it import MarkdownIt
 
 REQUIRED_SECTIONS = [
-    "0. 速读决策",
-    "1. 论文核心",
-    "2. 方法怎么做",
-    "3. 结果是否站得住",
+    "0. 阅读结论",
+    "1. 论文主张",
+    "2. 方法与设计",
+    "3. 结果可信度",
     "4. 图表导读",
-    "5. 局限、适用边界与潜在 gap",
-    "6. 可迁移启发",
-    "7. 术语与概念卡片",
-    "8. 后续检索关键词",
-    "9. 元数据",
-    "10. 证据链附录",
-    "11. 补充优化记录",
+    "5. 边界与机会",
+    "6. 我能怎么用",
+    "7. 术语与检索",
 ]
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "templates"
@@ -592,7 +588,8 @@ def build_note_title(
 
 def normalize_markdown_list_boundaries(note: str) -> str:
     """Restore list-item newlines that Jinja block trimming can remove."""
-    return re.sub(r"(?<=[.)。；;])- (?=(?:\*\*|[A-Za-z0-9\u4e00-\u9fff]))", "\n- ", note)
+    note = re.sub(r"(?<=[.)。；;])- (?=(?:\*\*|[A-Za-z0-9\u4e00-\u9fff]))", "\n- ", note)
+    return re.sub(r"(?m)^((?:-|\d+\.) .+)\n(#{2,3} )", r"\1\n\n\2", note)
 
 
 def next_same_day_version_suffix(

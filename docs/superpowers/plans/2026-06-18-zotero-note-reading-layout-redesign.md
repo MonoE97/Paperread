@@ -29,6 +29,8 @@
 - Modify `skills/zotero-paper-summary/SKILL.md`
   - Update note-writing instructions so future analyses generate content for the new reading layout and treat metadata/evidence appendix/review notes as audit-only.
 - Optionally modify `skills/zotero-batch-note-writing/SKILL.md` if it names the old 9/10/11 rendered sections.
+- Modify `README.md`
+  - Keep the current rendered note structure documentation aligned with the 0-7 reading-thread layout.
 - Use existing run artifacts:
   - `runs/2026-06-18/polyanion-stabilized-amorphous-halide-electrolytes-with-low-lithium-content-for-all-solid-state-lithium-batteries/summary.json`
   - same directory `item-details.json`, `review.json`, `note.md`, `note.html`, `gate-report.json`, `write-payload.json`
@@ -271,6 +273,7 @@ write_ready still requires trusted summary status
 
 **Files:**
 - Modify: `skills/zotero-paper-summary/SKILL.md`
+- Modify: `README.md`
 - Inspect and modify if necessary: `skills/zotero-batch-note-writing/SKILL.md`
 
 - [ ] **Step 1: Find old layout references**
@@ -302,6 +305,8 @@ Also state:
 metadata、evidence_summary、review_status、improvement_status、improvement_notes are audit-only for the rendered Zotero note. Keep them in JSON artifacts and gate inputs, but do not render them as dedicated note sections.
 ```
 
+Update the README rendered-note paragraph with the same 0-7 section list and audit-only rule.
+
 - [ ] **Step 3: Verify no stale rendered section guidance remains**
 
 Run:
@@ -319,16 +324,16 @@ Expected: no stale rendered-layout references except historical docs/tests inten
   - `runs/2026-06-18/polyanion-stabilized-amorphous-halide-electrolytes-with-low-lithium-content-for-all-solid-state-lithium-batteries/note.md`
   - same directory `note.html`, previews, gate report, write payload
 
-- [ ] **Step 1: Regenerate note and HTML from existing summary**
+- [ ] **Step 1: Apply review fields, then regenerate note and HTML from existing summary**
 
 Use the existing run directory:
 
 ```bash
 RUN_DIR="runs/2026-06-18/polyanion-stabilized-amorphous-halide-electrolytes-with-low-lithium-content-for-all-solid-state-lithium-batteries"
+uv run zotero-paperread apply-review "$RUN_DIR/summary.json" "$RUN_DIR/review.json"
 uv run zotero-paperread finalize-note \
   "$RUN_DIR/item-details.json" \
   "$RUN_DIR/summary.json" \
-  --review "$RUN_DIR/review.json" \
   --output "$RUN_DIR/note.md" \
   --html-output "$RUN_DIR/note.html"
 ```
@@ -354,16 +359,12 @@ Run the existing write-gate sequence for the regenerated note:
 uv run zotero-paperread lint-summary "$RUN_DIR/summary.json"
 uv run zotero-paperread validate-trusted-summary "$RUN_DIR/summary.json"
 uv run zotero-paperread gate-run \
-  "$RUN_DIR/item-details.json" \
-  "$RUN_DIR/summary.json" \
-  "$RUN_DIR/review.json" \
-  "$RUN_DIR/note.md" \
+  "$RUN_DIR" \
+  --paper-title "Polyanion-stabilized amorphous halide electrolytes with low lithium content for all-solid-state lithium batteries" \
+  --generated-date "2026-06-18" \
   --output "$RUN_DIR/gate-report.json"
 uv run zotero-paperread prepare-write-payload \
-  "$RUN_DIR/item-details.json" \
-  "$RUN_DIR/note.html" \
-  --summary "$RUN_DIR/summary.json" \
-  --gate-report "$RUN_DIR/gate-report.json" \
+  "$RUN_DIR/gate-report.json" \
   --output "$RUN_DIR/write-payload.json"
 ```
 
