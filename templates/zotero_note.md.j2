@@ -131,7 +131,7 @@
 
 {% if key_figures %}
 {% for item in key_figures %}
-### {{ item.figure_id }}{% if item.title_short %}：{{ item.title_short }}{% endif %}
+### {{ item.display_label }}{% if item.title_short %}：{{ item.title_short }}{% endif %}
 
 - **图注**: {{ item.caption }}
 - **页码**: {{ item.page }}
@@ -241,37 +241,7 @@
 | Zotero 链接 | {{ zotero_url | table_cell }} |
 | 生成日期 | {{ generated_date | table_cell }} |
 
-## 10. 自动抽取质量报告
-
-### 抽取告警
-
-{% if extraction_warnings %}
-{% for item in extraction_warnings %}
-- {{ item }}
-{% endfor %}
-{% else %}
-- none
-{% endif %}
-
-### 审查问题
-
-{% if review_issues %}
-{% for item in review_issues %}
-- {{ item.severity }}: {{ item.issue }}{% if item.suggested_fix %} 建议: {{ item.suggested_fix }}{% endif %}{{ "\n" }}
-{% endfor %}
-{% else %}
-- none
-{% endif %}
-
-### 可信度判断
-
-{{ trust_rationale }}
-
-### 审查状态
-
-{{ review_status }}
-
-## 11. 证据链附录
+## 10. 证据链附录
 
 {% if evidence_summary %}
 {% for item in evidence_summary %}
@@ -293,7 +263,7 @@
 - none
 {% endif %}
 
-## 12. 补充优化记录
+## 11. 补充优化记录
 
 {% if improvement_notes %}
 - **改进状态**: {{ improvement_status }}

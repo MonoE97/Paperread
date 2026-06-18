@@ -19,6 +19,7 @@ htmlcov/
 tmp/
 .tmp/
 runs/
+papers/
 dist/
 build/
 *.pdf.txt

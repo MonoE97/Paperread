@@ -144,9 +144,8 @@ def test_render_note_contains_required_learning_sections() -> None:
         "## 7. 术语与概念卡片",
         "## 8. 后续检索关键词",
         "## 9. 元数据",
-        "## 10. 自动抽取质量报告",
-        "## 11. 证据链附录",
-        "## 12. 补充优化记录",
+        "## 10. 证据链附录",
+        "## 11. 补充优化记录",
     ]
     for section in expected_sections:
         assert section in note
@@ -187,7 +186,7 @@ def test_render_note_renders_learning_fields() -> None:
     assert "把科学问题拆成动力学采样模型和可观测量响应模型。" in note
     assert "用 field-conditioned ML potential 学习外场下的结构动力学。" in note
     assert "该 framework 能否迁移到电池 SEI / 电解液分解界面？" in note
-    assert "### fig_p1_1：Overall pipeline" in note
+    assert "### Figure 1：Overall pipeline" in note
     assert "### finite-field molecular dynamics" in note
     assert "- **相关关键词**: finite field, electric field, electrochemical interface" in note
 
@@ -307,7 +306,7 @@ def test_render_note_prefers_specific_visual_quality_warning() -> None:
     assert "| fig_p1_1 | 1 | 测试图作用。 | unknown | image_too_small |" in note
 
 
-def test_render_note_places_quality_and_evidence_in_rear_sections() -> None:
+def test_render_note_places_evidence_in_rear_sections_without_quality_report() -> None:
     note = render_note(
         METADATA,
         {
@@ -321,27 +320,25 @@ def test_render_note_places_quality_and_evidence_in_rear_sections() -> None:
 
     warning = "figure_visual_quality:fig_p1_1:image_too_small"
     quality_report_marker = "## 10. 自动抽取质量报告"
-    evidence_marker = "## 11. 证据链附录"
+    evidence_marker = "## 10. 证据链附录"
     claim_text = "The method uses a learned inverse-design model."
     page_evidence_line = "- page 3 method section: The method section describes the learned mapping"
-    quality_report_start = note.find(quality_report_marker)
+    evidence_start = note.find(evidence_marker)
 
-    assert quality_report_start != -1
-    front_matter = note[:quality_report_start]
-    quality_and_rear_sections = note[quality_report_start:]
-    quality_report = quality_and_rear_sections.split(evidence_marker, maxsplit=1)[0]
+    assert quality_report_marker not in note
+    assert evidence_start != -1
+    front_matter = note[:evidence_start]
     assert warning not in front_matter
+    assert warning not in note
     assert claim_text not in front_matter
     assert page_evidence_line not in front_matter
-    assert warning in quality_and_rear_sections
-    assert warning in quality_report
-    assert "## 11. 证据链附录" in note
+    assert "## 10. 证据链附录" in note
     assert "### Claim 1" in note
     assert f"**结论**: {claim_text}" in note
     assert page_evidence_line in note
     assert "\n-   - 证据:" not in note
     assert "\n  - 证据:" not in note
-    assert note.index("## 10. 自动抽取质量报告") < note.index("## 11. 证据链附录")
+    assert note.index("## 9. 元数据") < note.index("## 10. 证据链附录")
 
 
 def test_render_note_uses_date_only_for_first_version_suffix() -> None:
@@ -373,8 +370,102 @@ def test_render_note_contains_figure_sections() -> None:
     note = render_note(METADATA, SUMMARY_WITH_FIGURES, generated_date="2026-04-23")
 
     assert "## 4. 图表导读" in note
-    assert "### fig_p1_1：Overall pipeline" in note
+    assert "### Figure 1：Overall pipeline" in note
     assert "Figure 1. Overall pipeline." in note
+
+
+def test_render_note_falls_back_to_ordered_figure_labels_without_caption_number() -> None:
+    summary = {
+        **SUMMARY,
+        "figure_overview": "图表总览。",
+        "key_figures": [
+            {
+                "figure_id": "p1-f1",
+                "caption": "Overview of the model pipeline.",
+                "title_short": "Pipeline",
+                "page": 1,
+                "why_it_matters": "第一张图。",
+                "analysis": "第一张图分析。",
+            },
+            {
+                "figure_id": "source-2-image-panel",
+                "caption": "",
+                "title_short": "Results",
+                "page": 2,
+                "why_it_matters": "第二张图。",
+                "analysis": "第二张图分析。",
+            },
+        ],
+    }
+
+    note = render_note(METADATA, summary, generated_date="2026-04-23")
+
+    assert "### Figure 1：Pipeline" in note
+    assert "### Figure 2：Results" in note
+    assert "### p1-f1：Pipeline" not in note
+    assert "### source-2-image-panel：Results" not in note
+
+
+def test_render_note_fallback_figure_labels_ignore_skipped_items() -> None:
+    summary = {
+        **SUMMARY,
+        "figure_overview": "图表总览。",
+        "key_figures": [
+            "not-a-dict",
+            {
+                "figure_id": "p1-f1",
+                "caption": "Overview of the model pipeline.",
+                "title_short": "Pipeline",
+                "page": 1,
+                "why_it_matters": "第一张图。",
+                "analysis": "第一张图分析。",
+            },
+        ],
+    }
+
+    note = render_note(METADATA, summary, generated_date="2026-04-23")
+
+    assert "### Figure 1：Pipeline" in note
+    assert "### Figure 2：Pipeline" not in note
+
+
+def test_render_note_normalizes_common_figure_label_forms() -> None:
+    summary = {
+        **SUMMARY,
+        "figure_overview": "图表总览。",
+        "key_figures": [
+            {
+                "figure_id": "source-0-rawfig",
+                "caption": "Fig. 2a. Conductivity comparison.",
+                "title_short": "Conductivity",
+                "page": 3,
+                "why_it_matters": "展示电导率对比。",
+                "analysis": "图 2a 分析。",
+            },
+            {
+                "figure_id": "source-1-scheme",
+                "caption": "Scheme 1. Synthesis workflow.",
+                "title_short": "Workflow",
+                "page": 4,
+                "why_it_matters": "展示合成流程。",
+                "analysis": "Scheme 1 分析。",
+            },
+            {
+                "figure_id": "source-2-range",
+                "caption": "Figure 3-4. Stability analysis.",
+                "title_short": "Stability",
+                "page": 5,
+                "why_it_matters": "展示稳定性分析。",
+                "analysis": "图 3-4 分析。",
+            },
+        ],
+    }
+
+    note = render_note(METADATA, summary, generated_date="2026-04-23")
+
+    assert "### Figure 2a：Conductivity" in note
+    assert "### Scheme 1：Workflow" in note
+    assert "### Figure 3-4：Stability" in note
 
 
 def test_render_note_contains_trust_and_evidence_section() -> None:
@@ -383,10 +474,10 @@ def test_render_note_contains_trust_and_evidence_section() -> None:
     assert "## 0. 速读卡片" in note
     assert "| 论文类型 | 研究论文 (research_article) |" in note
     assert "| 可信状态 | 可信 (trusted) |" in note
-    assert "## 10. 自动抽取质量报告" in note
-    assert "### 审查状态\n\npassed_with_caveats" in note
-    assert "## 11. 证据链附录" in note
-    assert "## 12. 补充优化记录" in note
+    assert "## 10. 自动抽取质量报告" not in note
+    assert "### 审查状态\n\npassed_with_caveats" not in note
+    assert "## 10. 证据链附录" in note
+    assert "## 11. 补充优化记录" in note
     assert "- **改进状态**: completed" in note
     assert "The method uses a learned inverse-design model." in note
     assert "page 3 method section" in note
@@ -394,10 +485,6 @@ def test_render_note_contains_trust_and_evidence_section() -> None:
     assert "Method section was too generic." in note
     assert "\n- page 3 method section: The method section describes the learned mapping" in note
     assert "\n- fig_p1_1: The framework figure shows the optimization loop." in note
-    quality_report = note.split("## 10. 自动抽取质量报告\n\n", maxsplit=1)[1].split(
-        "\n## 11. 证据链附录", maxsplit=1
-    )[0]
-    assert "The method uses a learned inverse-design model." not in quality_report
 
 
 def test_render_note_places_evidence_and_review_before_trailing_tags() -> None:
@@ -405,9 +492,9 @@ def test_render_note_places_evidence_and_review_before_trailing_tags() -> None:
 
     assert "## 本文标签" not in note
     assert note.count("\nTags: codex-summary, paper-summary") == 1
-    assert note.index("## 10. 自动抽取质量报告") < note.index("## 11. 证据链附录")
-    assert note.index("## 11. 证据链附录") < note.index("## 12. 补充优化记录")
-    assert note.index("## 12. 补充优化记录") < note.index("---\n\nTags: codex-summary, paper-summary")
+    assert "## 10. 自动抽取质量报告" not in note
+    assert note.index("## 10. 证据链附录") < note.index("## 11. 补充优化记录")
+    assert note.index("## 11. 补充优化记录") < note.index("---\n\nTags: codex-summary, paper-summary")
 
 
 def test_render_note_keeps_evidence_bullets_contiguous() -> None:
@@ -447,8 +534,8 @@ def test_render_note_keeps_evidence_bullets_contiguous() -> None:
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
 
-    evidence_section = note.split("## 11. 证据链附录\n\n", maxsplit=1)[1].split(
-        "\n## 12. 补充优化记录", maxsplit=1
+    evidence_section = note.split("## 10. 证据链附录\n\n", maxsplit=1)[1].split(
+        "\n## 11. 补充优化记录", maxsplit=1
     )[0].strip()
 
     assert (
@@ -495,8 +582,8 @@ def test_render_note_formats_evidence_lines_when_locator_or_summary_is_missing()
     }
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
-    evidence_section = note.split("## 11. 证据链附录\n\n", maxsplit=1)[1].split(
-        "\n## 12. 补充优化记录", maxsplit=1
+    evidence_section = note.split("## 10. 证据链附录\n\n", maxsplit=1)[1].split(
+        "\n## 11. 补充优化记录", maxsplit=1
     )[0].strip()
 
     assert "- Only summary is available." in evidence_section
@@ -526,8 +613,8 @@ def test_render_note_flattens_multiline_evidence_into_single_bullet() -> None:
     }
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
-    evidence_section = note.split("## 11. 证据链附录\n\n", maxsplit=1)[1].split(
-        "\n## 12. 补充优化记录", maxsplit=1
+    evidence_section = note.split("## 10. 证据链附录\n\n", maxsplit=1)[1].split(
+        "\n## 11. 补充优化记录", maxsplit=1
     )[0].strip()
 
     assert (
@@ -541,7 +628,7 @@ def test_render_note_flattens_multiline_evidence_into_single_bullet() -> None:
     assert "\n- nested summary bullet" not in evidence_section
 
 
-def test_render_note_separates_review_issue_bullets() -> None:
+def test_render_note_omits_review_issue_bullets_but_separates_improvements() -> None:
     note = render_note(
         METADATA,
         {
@@ -559,7 +646,8 @@ def test_render_note_separates_review_issue_bullets() -> None:
         generated_date="2026-04-26",
     )
 
-    assert "- medium: First issue. 建议: Fix first.\n\n- low: Second issue." in note
+    assert "- medium: First issue. 建议: Fix first." not in note
+    assert "- low: Second issue. 建议: Fix second." not in note
     assert "- First improvement.: Done. (source: review.json)\n\n- Second improvement." in note
 
 
@@ -585,8 +673,8 @@ def test_render_note_flattens_multiline_claim_into_single_bullet() -> None:
     }
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
-    evidence_section = note.split("## 11. 证据链附录\n\n", maxsplit=1)[1].split(
-        "\n## 12. 补充优化记录", maxsplit=1
+    evidence_section = note.split("## 10. 证据链附录\n\n", maxsplit=1)[1].split(
+        "\n## 11. 补充优化记录", maxsplit=1
     )[0].strip()
 
     assert (
@@ -633,14 +721,14 @@ def test_render_note_keeps_evidence_section_stable_without_review_or_improvement
     }
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
-    evidence_section = note.split("## 11. 证据链附录\n\n", maxsplit=1)[1].split(
-        "\n## 12. 补充优化记录", maxsplit=1
+    evidence_section = note.split("## 10. 证据链附录\n\n", maxsplit=1)[1].split(
+        "\n## 11. 补充优化记录", maxsplit=1
     )[0].strip()
 
     assert evidence_section.endswith("- fig_p1_1: The framework figure shows the optimization loop.")
     assert "\n\n  - 证据:" not in evidence_section
-    assert "### 审查问题\n\n- none" in note
-    assert "## 12. 补充优化记录\n\n- none" in note
+    assert "### 审查问题\n\n- none" not in note
+    assert "## 11. 补充优化记录\n\n- none" in note
     assert "- **改进状态**: completed\n\n- none" not in note
 
 

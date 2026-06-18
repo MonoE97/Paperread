@@ -19,9 +19,8 @@ REQUIRED_SECTIONS = [
     "7. 术语与概念卡片",
     "8. 后续检索关键词",
     "9. 元数据",
-    "10. 自动抽取质量报告",
-    "11. 证据链附录",
-    "12. 补充优化记录",
+    "10. 证据链附录",
+    "11. 补充优化记录",
 ]
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "templates"
@@ -332,17 +331,36 @@ def normalize_figure_image_quality(item: dict[str, Any]) -> str:
     return "unknown"
 
 
+def extract_figure_display_label(caption: str, *, fallback_index: int) -> str:
+    """Return a human-facing figure label without exposing extraction IDs."""
+    match = re.search(
+        r"\b(?P<prefix>fig(?:ure)?\.?|scheme)\s*(?P<number>[A-Za-z]?\d+(?:\s*[-–]\s*[A-Za-z]?\d+)?[A-Za-z]?)",
+        caption,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return f"Figure {fallback_index}"
+
+    prefix = match.group("prefix").lower().rstrip(".")
+    number = re.sub(r"\s*[-–]\s*", "-", match.group("number").strip())
+    label_prefix = "Scheme" if prefix == "scheme" else "Figure"
+    return f"{label_prefix} {number}"
+
+
 def clean_key_figures(summary: dict[str, Any]) -> list[dict[str, Any]]:
     items = safe_list(summary.get("key_figures", []))
     cleaned: list[dict[str, Any]] = []
     for item in items[:10]:
         if not isinstance(item, dict):
             continue
+        fallback_index = len(cleaned) + 1
         image_quality = normalize_figure_image_quality(item)
+        caption = str(item.get("caption", "")).strip()
         cleaned.append(
             {
                 "figure_id": str(item.get("figure_id", "")).strip(),
-                "caption": str(item.get("caption", "")).strip(),
+                "display_label": extract_figure_display_label(caption, fallback_index=fallback_index),
+                "caption": caption,
                 "page": item.get("page", ""),
                 "priority_score": item.get("priority_score", ""),
                 "why_it_matters": str(item.get("why_it_matters", "")).strip(),
