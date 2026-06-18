@@ -270,6 +270,28 @@ def test_render_note_renders_recommendations_result_evidence_and_gap_fields() ->
     assert "uncertainty: AI inference" in rendered
 
 
+def test_render_note_does_not_duplicate_follow_up_questions_as_potential_gaps() -> None:
+    summary = {
+        **SUMMARY,
+        "follow_up_questions": [
+            "Can this workflow transfer to SEI interfaces?",
+            "Can the response model predict charge density?",
+        ],
+    }
+
+    rendered = render_note(METADATA, summary, generated_date="2026-06-18")
+    gap_section = rendered.split("### 潜在 gap / 后续问题\n\n", maxsplit=1)[1].split(
+        "\n## 6. 可迁移启发", maxsplit=1
+    )[0]
+    transfer_section = rendered.split("## 6. 可迁移启发\n\n", maxsplit=1)[1].split(
+        "\n## 7. 术语与概念卡片", maxsplit=1
+    )[0]
+
+    assert gap_section.strip() == "- none"
+    assert "- Can this workflow transfer to SEI interfaces?" in transfer_section
+    assert rendered.count("Can this workflow transfer to SEI interfaces?") == 1
+
+
 def test_render_note_escapes_pipe_characters_inside_markdown_table_cells() -> None:
     note = render_note(
         {**METADATA, "title": "Alpha | Beta"},

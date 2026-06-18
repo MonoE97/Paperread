@@ -247,10 +247,6 @@
 {% for item in potential_gaps %}
 - {{ item.text }}{% if item.basis %} (basis: {{ item.basis }}){% endif %}{% if item.uncertainty %} (uncertainty: {{ item.uncertainty }}){% endif %}{% if item.locator %} ({{ item.locator }}){% endif %}
 {% endfor %}
-{% elif follow_up_questions %}
-{% for item in follow_up_questions %}
-- {{ item }}
-{% endfor %}
 {% else %}
 - none
 {% endif %}
