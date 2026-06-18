@@ -15,6 +15,7 @@ htmlcov/
 .venv/
 
 # Local outputs and previews
+.worktrees/
 *.log
 tmp/
 .tmp/
