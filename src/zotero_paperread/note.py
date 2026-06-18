@@ -9,13 +9,13 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from markdown_it import MarkdownIt
 
 REQUIRED_SECTIONS = [
-    "0. 速读卡片",
-    "1. 论文解决了什么问题？",
-    "2. 方法框架",
-    "3. 关键结果与数值",
+    "0. 速读决策",
+    "1. 论文核心",
+    "2. 方法怎么做",
+    "3. 结果是否站得住",
     "4. 图表导读",
-    "5. 贡献、局限与适用边界",
-    "6. 对 AI4S / 电池 / 材料研究的启发",
+    "5. 局限、适用边界与潜在 gap",
+    "6. 可迁移启发",
     "7. 术语与概念卡片",
     "8. 后续检索关键词",
     "9. 元数据",
@@ -144,6 +144,78 @@ def clean_key_results_table(value: Any) -> list[dict[str, str]]:
                 "result": result,
                 "value": safe_text(item.get("value")),
                 "meaning": safe_text(item.get("meaning")),
+            }
+        )
+    return cleaned
+
+
+def clean_recommendations(value: Any, *, label_keys: tuple[str, ...], limit: int = 5) -> list[dict[str, str]]:
+    items = safe_list(value)
+    cleaned: list[dict[str, str]] = []
+    for item in items[:limit]:
+        if not isinstance(item, dict):
+            continue
+        label = ""
+        for key in label_keys:
+            label = optional_text(item.get(key))
+            if label:
+                break
+        reason = fallback_text(item.get("reason"), item.get("result"), "")
+        locator = optional_text(item.get("locator"))
+        if label and reason:
+            cleaned.append({"label": label, "reason": reason, "locator": locator})
+    return cleaned
+
+
+def clean_result_evidence_notes(value: Any) -> list[dict[str, str]]:
+    items = safe_list(value)
+    cleaned: list[dict[str, str]] = []
+    for item in items[:8]:
+        if not isinstance(item, dict):
+            continue
+        result = optional_text(item.get("result"))
+        if not result:
+            continue
+        cleaned.append(
+            {
+                "result": result,
+                "evidence": optional_text(item.get("evidence")),
+                "locator": optional_text(item.get("locator")),
+                "confidence": safe_text(item.get("confidence"), "unknown"),
+            }
+        )
+    return cleaned
+
+
+def clean_limitation_objects(value: Any, *, expected_source_type: str | None = None) -> list[dict[str, str]]:
+    items = safe_list(value)
+    cleaned: list[dict[str, str]] = []
+    for item in items[:8]:
+        if isinstance(item, str):
+            text = safe_text(item)
+            if text != "unknown":
+                cleaned.append(
+                    {
+                        "text": text,
+                        "basis": "",
+                        "locator": "",
+                        "source_type": expected_source_type or "",
+                        "uncertainty": "",
+                    }
+                )
+            continue
+        if not isinstance(item, dict):
+            continue
+        text = optional_text(item.get("text"))
+        if not text:
+            continue
+        cleaned.append(
+            {
+                "text": text,
+                "basis": optional_text(item.get("basis")),
+                "locator": optional_text(item.get("locator")),
+                "source_type": optional_text(item.get("source_type")) or (expected_source_type or ""),
+                "uncertainty": optional_text(item.get("uncertainty")),
             }
         )
     return cleaned
@@ -615,7 +687,27 @@ def render_note(
         "workflow_steps": clean_workflow_steps(summary.get("workflow_steps", "")),
         "technical_details": clean_string_list(summary.get("technical_details", [])),
         "key_results_table": clean_key_results_table(summary.get("key_results_table", [])),
+        "recommended_sections": clean_recommendations(
+            summary.get("recommended_sections", []), label_keys=("section",)
+        ),
+        "recommended_figures": clean_recommendations(
+            summary.get("recommended_figures", []), label_keys=("figure_id",)
+        ),
+        "baseline_or_comparison": clean_recommendations(
+            summary.get("baseline_or_comparison", []), label_keys=("target",), limit=8
+        ),
+        "result_evidence_notes": clean_result_evidence_notes(summary.get("result_evidence_notes", [])),
+        "evidence_quality_summary": optional_text(summary.get("evidence_quality_summary")),
         "applicability_limits": clean_string_list(summary.get("applicability_limits", [])),
+        "author_stated_limitations": clean_limitation_objects(
+            summary.get("author_stated_limitations", []),
+            expected_source_type="author_stated",
+        ),
+        "inferred_limits": clean_limitation_objects(
+            summary.get("inferred_limits", []),
+            expected_source_type="inferred",
+        ),
+        "potential_gaps": clean_limitation_objects(summary.get("potential_gaps", [])),
         "transferable_insight": fallback_text(summary.get("transferable_insight"), summary.get("ai4s_relevance")),
         "workflow_lessons": clean_string_list(summary.get("workflow_lessons", [])),
         "follow_up_questions": clean_string_list(summary.get("follow_up_questions", [])),

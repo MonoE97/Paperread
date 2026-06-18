@@ -129,7 +129,7 @@ The recommended dry-run manual sequence is:
 ```bash
 uv run zotero-paperread create-run --title "<title>" --item-key "<item_key>"
 uv run zotero-paperread prepare-item runs/<date>/<paper-slug>/item-details.json --workdir runs/<date>/<paper-slug>
-# Codex then reads context.md / figure_context.md and writes summary.json.
+# Codex then reads context.md / section_context.md / figure_context.md and writes summary.json.
 uv run zotero-paperread validate-summary-json runs/<date>/<paper-slug>/summary.json
 uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md --html-output runs/<date>/<paper-slug>/note.html
 uv run zotero-paperread preview-note runs/<date>/<paper-slug>/note.md
@@ -139,6 +139,8 @@ uv run zotero-paperread preview-note runs/<date>/<paper-slug>/note.html
 `create-run` prints a JSON payload containing `run_dir`, `manifest_path`, `slug`, and `date`. Use the returned `run_dir` instead of guessing the final slug when there may already be a same-day run for the same title.
 
 By default, `prepare-item`, `extract-pdf`, and `extract-figures` process the full PDF. Use `--max-pages <N>` only for explicit debugging or deliberately shortened dry runs.
+
+`prepare-item` writes `section_context.md` when structured extraction data is available. Codex should read it as a navigation aid for sections and table/value candidates, but it is not a canonical evidence source. Final `evidence_summary` locators must still cite canonical sources such as `context.md page 3 section Methods`, `context.md page 6 section Results table_candidate 1`, or `figure_context.md fig_p4_1`.
 
 `validate-summary-json` only verifies that the file is readable UTF-8 JSON with an object at the top level. It is not a semantic schema validator. `render-note` and `finalize-note` use the same friendly JSON error path, so malformed or missing JSON fails before any partial note is written.
 
@@ -202,9 +204,9 @@ Actual Zotero write-through still requires explicit write intent and uses only `
 
 `prepare-write-payload does not write to Zotero`. It records `parentKey`, tags, `note_html_path`, `contentLength`, and readback checks. The actual write remains an explicit `zotero-mcp write_note` action performed by the agent after the gate report is `write_ready`.
 
-The rendered note is a layered learning note. It opens with `## 0. 速读卡片` so the first screen shows paper type, research object, core problem, core method, core result, trust status, main risk, reading decision, and relevance to AI4S / battery / materials research. The main body then follows problem, method, results, figures, contributions, limits, transferable workflows, concept cards, and follow-up keywords. Metadata, extraction warnings, review issues, trust rationale, evidence chains, and improvement notes are kept in rear sections (`## 9` through `## 12`) so provenance remains available without interrupting the reading flow.
+The rendered note is a two-layer learning note. It opens with `## 0. 速读决策` so the first screen shows the 30-second takeaway, reading decision, trust status, main risk, relevance to AI4S / battery / materials research, and recommended sections/figures. The main body then follows `## 1. 论文核心`, `## 2. 方法怎么做`, `## 3. 结果是否站得住`, figures, limitations/gaps, transferable workflows, concept cards, and follow-up keywords. Metadata, extraction warnings, review issues, trust rationale, evidence chains, and improvement notes are kept in rear sections (`## 9` through `## 11`) so provenance remains available without interrupting the reading flow.
 
-New learning-note fields such as `method_modules`, `key_results_table`, `concept_cards`, `workflow_lessons`, and `reading_decision` are optional. Old `summary.json` files still render through safe fallbacks: `method_overview` falls back to `method`, `core_result_short` falls back to `one_sentence_summary`, and `transferable_insight` falls back to `ai4s_relevance`.
+New learning-note fields such as `method_modules`, `key_results_table`, `concept_cards`, `workflow_lessons`, `reading_decision`, `recommended_sections`, `recommended_figures`, `baseline_or_comparison`, `result_evidence_notes`, `author_stated_limitations`, `inferred_limits`, `potential_gaps`, and `evidence_quality_summary` are optional. Old `summary.json` files still render through safe fallbacks: `method_overview` falls back to `method`, `core_result_short` falls back to `one_sentence_summary`, and `transferable_insight` falls back to `ai4s_relevance`. Author-stated limitations, Codex-inferred limits, and potential gaps should be kept separate so inferred reading judgments are not presented as paper-authored claims.
 
 ## Historical Note Table Migration
 

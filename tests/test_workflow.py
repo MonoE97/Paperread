@@ -192,6 +192,7 @@ def test_prepare_item_bundle_writes_metadata_extract_and_context(tmp_path: Path)
     metadata = json.loads(Path(result["metadata_json"]).read_text(encoding="utf-8"))
     extract = json.loads(Path(result["extract_json"]).read_text(encoding="utf-8"))
     context = Path(result["context_md"]).read_text(encoding="utf-8")
+    section_context = Path(result["section_context_md"]).read_text(encoding="utf-8")
     figures = json.loads(Path(result["figures_json"]).read_text(encoding="utf-8"))
     figure_context = Path(result["figure_context_md"]).read_text(encoding="utf-8")
 
@@ -206,6 +207,13 @@ def test_prepare_item_bundle_writes_metadata_extract_and_context(tmp_path: Path)
     assert figures == figures_payload
     assert "Perspective on CSP and AI." in context
     assert "This paper studies CSP with AI." in context
+    assert Path(result["section_context_md"]).exists()
+    assert "# Section Context" in section_context
+    assert "## Extraction Summary" in section_context
+    assert "Section Count:" in section_context
+    assert "Table Candidate Count:" in section_context
+    assert "Locator: context.md page" in section_context
+    assert "## Table / Value Candidates" in section_context
     assert "Figure 1. Workflow overview." in figure_context
     assert "arxiv_source_download_failed" in figure_context
 
@@ -417,6 +425,7 @@ def test_prepare_item_bundle_updates_existing_run_manifest(tmp_path: Path) -> No
     assert manifest["extract_json"] == result["extract_json"]
     assert manifest["figures_json"] == result["figures_json"]
     assert manifest["figure_context_md"] == result["figure_context_md"]
+    assert manifest["section_context_md"] == result["section_context_md"]
     assert manifest["arxiv_id"] == "2401.01234"
     assert manifest["warnings"] == ["truncated_to_1_pages"]
     assert manifest["secondary_sources_json"] == result["secondary_sources_json"]

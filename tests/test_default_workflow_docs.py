@@ -91,3 +91,17 @@ def test_docs_show_smoothed_write_gate_command_chain() -> None:
         assert "prepare-write-payload" in text
         assert "write_note" in text
         assert "prepare-write-payload does not write to Zotero" in text
+
+
+def test_docs_describe_section_context_and_two_layer_note_contract() -> None:
+    skill = (PROJECT_ROOT / "skills" / "zotero-paper-summary" / "SKILL.md").read_text(encoding="utf-8")
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    for text in (skill, readme):
+        assert "section_context.md" in text
+        assert "context.md page 3 section Methods" in text
+        assert "context.md page 6 section Results table_candidate 1" in text
+        assert "author_stated_limitations" in text
+        assert "inferred_limits" in text
+        assert "potential_gaps" in text
+        assert "not a canonical evidence source" in text

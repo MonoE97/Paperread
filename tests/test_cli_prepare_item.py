@@ -165,6 +165,7 @@ def test_prepare_item_command_outputs_bundle_paths(monkeypatch, tmp_path: Path) 
     assert Path(payload["metadata_json"]).exists()
     assert Path(payload["extract_json"]).exists()
     assert Path(payload["context_md"]).exists()
+    assert Path(payload["section_context_md"]).exists()
     assert Path(payload["figures_json"]).exists()
     assert Path(payload["figure_context_md"]).exists()
     assert seen["pdf_path"] == pdf_path

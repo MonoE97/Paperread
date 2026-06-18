@@ -128,12 +128,14 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
      - `metadata.json`
      - `extract.json`
      - `context.md`
+     - `section_context.md`
      - `secondary_sources.json`
      - `figures.json`
      - `figure_context.md`
      - `figures/`
    - 默认处理完整 PDF，不限制页数。只有用户明确要求快速调试、预览或截断抽取时，才显式追加 `--max-pages <N>`。
    - `context.md` 是默认总结输入源，包含元数据、摘要、抽取告警和 PDF 正文。
+   - `section_context.md` 是章节和 table/value candidate 导航材料，not a canonical evidence source；最终 `evidence_summary` locator 仍必须引用 `context.md page 3 section Methods`、`context.md page 6 section Results table_candidate 1` 或 `figure_context.md fig_p4_1` 这类 canonical source。
    - `figure_context.md` 用于关键图片筛选与分析，包含 figure provenance、source attempts、warnings 和候选图摘要。
    - `metadata.json` 中的 PDF 默认选择主论文；文件名、路径或标题含 appendix、supplement、supporting information 等低优先级信号的 PDF 会排在主文后面。
    - `figure_context.md` 的每张图包含 `Caption Confidence`。caption confidence 低或 caption 缺失时，图分析必须保守表述。
@@ -202,7 +204,60 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
       "meaning": ""
     }
   ],
+  "recommended_sections": [
+    {
+      "section": "",
+      "locator": "context.md page 3 section Methods",
+      "reason": ""
+    }
+  ],
+  "recommended_figures": [
+    {
+      "figure_id": "",
+      "locator": "figure_context.md fig_p4_1",
+      "reason": ""
+    }
+  ],
+  "baseline_or_comparison": [
+    {
+      "target": "",
+      "result": "",
+      "locator": "context.md page 6 section Results table_candidate 1"
+    }
+  ],
+  "result_evidence_notes": [
+    {
+      "result": "",
+      "evidence": "",
+      "locator": "context.md page 6 section Results table_candidate 1",
+      "confidence": "medium"
+    }
+  ],
   "applicability_limits": [],
+  "author_stated_limitations": [
+    {
+      "text": "",
+      "locator": "context.md page 8 section Discussion",
+      "source_type": "author_stated"
+    }
+  ],
+  "inferred_limits": [
+    {
+      "text": "",
+      "basis": "",
+      "locator": "context.md page 6 section Results",
+      "source_type": "inferred"
+    }
+  ],
+  "potential_gaps": [
+    {
+      "text": "",
+      "basis": "",
+      "locator": "context.md page 7 section Results",
+      "uncertainty": "AI inference"
+    }
+  ],
+  "evidence_quality_summary": "",
   "transferable_insight": "",
   "workflow_lessons": [],
   "follow_up_questions": [],
@@ -258,6 +313,11 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
    - `reading_decision` 必须从 `strongly_recommended`、`recommended`、`skim_only`、`not_priority`、`unknown` 中选择。
    - `main_risk_short` 只写一个最重要的风险；完整告警保留在 `extraction_warnings` 和 `review_issues`。
    - `workflow_steps` 可以是 Markdown string，也可以是 string list。
+   - `recommended_sections` 和 `recommended_figures` 只列最值得先看的 1-5 项，locator 使用 canonical form。
+   - `baseline_or_comparison` 和 `result_evidence_notes` 用于支撑 `## 3. 结果是否站得住`，低置信 table/value candidate 必须写 caveat。
+   - `author_stated_limitations` 只放作者明示的局限，object form 使用 `source_type: "author_stated"`。
+   - `inferred_limits` 只放 Codex/读者基于范围、数据或缺失实验推断出的限制，object form 使用 `source_type: "inferred"`，不得写成作者声称。
+   - `potential_gaps` 是后续研究 gap，必须包含 evidence locator 或显式 uncertainty。
    - `method_modules` 优先用于 AI4S、computational materials、battery、simulation 和 method papers，拆出方法模块的输入、目标、输出和作用。
    - `key_results_table` 汇总 RMSE、MAE、speedup、capacitance、energy density、cycle life、rate performance、diffusion barrier、conductivity、OOD performance 等关键结果。
    - `concept_cards` 写 3-8 个核心概念。

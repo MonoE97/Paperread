@@ -12,6 +12,15 @@ SECONDARY_EVIDENCE_PREFIXES = (
     "secondary_sources.json",
     "wechat-context",
 )
+CANONICAL_CONTEXT_LOCATOR = re.compile(
+    r"^context\.md page \d+(?: section [A-Za-z0-9][A-Za-z0-9 /&().,+:_-]*)?(?: table_candidate \d+)?$"
+)
+CANONICAL_FIGURE_LOCATOR = re.compile(r"^figure_context\.md [A-Za-z0-9_.:-]+$")
+
+
+def is_canonical_trusted_locator(locator: str) -> bool:
+    """Return whether a locator cites an allowed primary paper artifact."""
+    return bool(CANONICAL_CONTEXT_LOCATOR.match(locator) or CANONICAL_FIGURE_LOCATOR.match(locator))
 
 
 def lint_summary(summary: dict[str, Any]) -> list[dict[str, str]]:
@@ -41,6 +50,34 @@ def lint_summary(summary: dict[str, Any]) -> list[dict[str, str]]:
                         "message": f"evidence_summary[{claim_index}].evidence[{evidence_index}] cites secondary context",
                     }
                 )
+            elif locator and not is_canonical_trusted_locator(locator):
+                issues.append(
+                    {
+                        "code": "malformed_trusted_evidence_locator",
+                        "message": (
+                            f"evidence_summary[{claim_index}].evidence[{evidence_index}] "
+                            "has malformed trusted locator"
+                        ),
+                    }
+                )
+
+    for index, item in enumerate(summary.get("author_stated_limitations", []) or []):
+        if isinstance(item, dict) and item.get("source_type") not in {"author_stated", None, ""}:
+            issues.append(
+                {
+                    "code": "author_stated_limitation_source_type_invalid",
+                    "message": f"author_stated_limitations[{index}] source_type must be author_stated",
+                }
+            )
+
+    for index, item in enumerate(summary.get("inferred_limits", []) or []):
+        if isinstance(item, dict) and item.get("source_type") not in {"inferred", None, ""}:
+            issues.append(
+                {
+                    "code": "inferred_limit_source_type_invalid",
+                    "message": f"inferred_limits[{index}] source_type must be inferred",
+                }
+            )
 
     for index, figure in enumerate(summary.get("key_figures", []) or []):
         if not isinstance(figure, dict):

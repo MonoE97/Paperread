@@ -105,6 +105,69 @@ def build_context_markdown(metadata: dict[str, Any], extract: dict[str, Any]) ->
     )
 
 
+def build_section_context_markdown(metadata: dict[str, Any], extract: dict[str, Any]) -> str:
+    """Build a section-aware navigation aid while preserving canonical locators."""
+    pages = extract.get("pages", []) if isinstance(extract.get("pages"), list) else []
+    sections = extract.get("sections", []) if isinstance(extract.get("sections"), list) else []
+    table_candidates = extract.get("table_candidates", [])
+    table_candidates = table_candidates if isinstance(table_candidates, list) else []
+
+    section_blocks: list[str] = []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        section_blocks.append(
+            "\n".join(
+                [
+                    f"### {section.get('title', 'Unknown')}",
+                    f"- Kind: {section.get('kind', 'unknown')}",
+                    f"- Pages: {section.get('start_page', '')}-{section.get('end_page', '')}",
+                    f"- Confidence: {section.get('confidence', 'unknown')}",
+                    f"- Locator: {section.get('locator', '')}",
+                    "",
+                    str(section.get("text", "")).strip() or "_No section text available._",
+                ]
+            )
+        )
+
+    candidate_blocks: list[str] = []
+    for index, candidate in enumerate(table_candidates, start=1):
+        if not isinstance(candidate, dict):
+            continue
+        signals = candidate.get("signals", [])
+        signal_text = ", ".join(str(signal) for signal in signals) if isinstance(signals, list) else ""
+        candidate_blocks.append(
+            "\n".join(
+                [
+                    f"### Candidate {index}",
+                    f"- Locator: {candidate.get('locator', '')}",
+                    f"- Confidence: {candidate.get('confidence', 'unknown')}",
+                    f"- Signals: {signal_text}",
+                    "",
+                    str(candidate.get("text", "")).strip() or "_No candidate text available._",
+                ]
+            )
+        )
+
+    sections_body = "\n\n".join(section_blocks) if section_blocks else "_No sections detected._"
+    candidates_body = "\n\n".join(candidate_blocks) if candidate_blocks else "_No table/value candidates detected._"
+    return (
+        "# Section Context\n\n"
+        "## Extraction Summary\n\n"
+        f"- PDF Path: {extract.get('pdf_path', '')}\n"
+        f"- Title: {metadata.get('title', '')}\n"
+        f"- Page Count: {extract.get('page_count', 0)}\n"
+        f"- Extracted Pages: {extract.get('extracted_pages', 0)}\n"
+        f"- Page Record Count: {len(pages)}\n"
+        f"- Section Count: {len(section_blocks)}\n"
+        f"- Table Candidate Count: {len(candidate_blocks)}\n\n"
+        "## Sections\n\n"
+        f"{sections_body}\n\n"
+        "## Table / Value Candidates\n\n"
+        f"{candidates_body}\n"
+    )
+
+
 def build_figure_context_markdown(figures_payload: dict[str, Any]) -> str:
     """Build a markdown summary of extracted figure candidates."""
     warnings = figures_payload.get("warnings", [])
@@ -221,6 +284,7 @@ def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int |
     metadata_path = bundle_dir / "metadata.json"
     extract_path = bundle_dir / "extract.json"
     context_path = bundle_dir / "context.md"
+    section_context_path = bundle_dir / "section_context.md"
     secondary_sources_path = bundle_dir / "secondary_sources.json"
     figures_path: Path | None = None
     figure_context_path: Path | None = None
@@ -232,6 +296,7 @@ def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int |
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     extract_path.write_text(json.dumps(extract, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     context_path.write_text(build_context_markdown(metadata, extract), encoding="utf-8")
+    section_context_path.write_text(build_section_context_markdown(metadata, extract), encoding="utf-8")
     secondary_sources_path.write_text(
         json.dumps(secondary_sources, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -268,6 +333,7 @@ def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int |
         "metadata_json": str(metadata_path),
         "extract_json": str(extract_path),
         "context_md": str(context_path),
+        "section_context_md": str(section_context_path),
         "secondary_sources_json": str(secondary_sources_path),
         "figures_json": str(figures_path) if figures_path else None,
         "figure_context_md": str(figure_context_path) if figure_context_path else None,
@@ -284,6 +350,7 @@ def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int |
                 "pdf_path": pdf_path,
                 "metadata_json": result["metadata_json"],
                 "extract_json": result["extract_json"],
+                "section_context_md": result["section_context_md"],
                 "secondary_sources_json": result["secondary_sources_json"],
                 "figures_json": result["figures_json"],
                 "figure_context_md": result["figure_context_md"],

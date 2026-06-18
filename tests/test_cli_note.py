@@ -39,7 +39,7 @@ def test_render_note_command_writes_markdown(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert output_path.exists()
     note = output_path.read_text(encoding="utf-8")
-    assert "## 0. 速读卡片" in note
+    assert "## 0. 速读决策" in note
     assert "## 10. 证据链附录" in note
 
 

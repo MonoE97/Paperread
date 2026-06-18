@@ -134,13 +134,13 @@ def test_render_note_contains_required_learning_sections() -> None:
     note = render_note(METADATA, SUMMARY, generated_date="2026-04-23")
 
     expected_sections = [
-        "## 0. 速读卡片",
-        "## 1. 论文解决了什么问题？",
-        "## 2. 方法框架",
-        "## 3. 关键结果与数值",
+        "## 0. 速读决策",
+        "## 1. 论文核心",
+        "## 2. 方法怎么做",
+        "## 3. 结果是否站得住",
         "## 4. 图表导读",
-        "## 5. 贡献、局限与适用边界",
-        "## 6. 对 AI4S / 电池 / 材料研究的启发",
+        "## 5. 局限、适用边界与潜在 gap",
+        "## 6. 可迁移启发",
         "## 7. 术语与概念卡片",
         "## 8. 后续检索关键词",
         "## 9. 元数据",
@@ -164,10 +164,9 @@ def test_render_note_renders_learning_fields() -> None:
     )
 
     assert "| 论文类型 | 研究论文 (research_article) |" in note
-    assert "| 可信状态 | 可信 (trusted) |" in note
-    assert "| 是否值得精读 | 强烈建议精读 (strongly_recommended) |" in note
-    assert "| 与我的研究关系 | 对 AI4S、电池界面模拟和 learned observable workflow 有直接参考价值。 |" in note
-    assert "### 30 秒结论" in note
+    assert "- **可信状态**: 可信 (trusted)" in note
+    assert "- **阅读决策**: 强烈建议精读 (strongly_recommended)" in note
+    assert "- **与我的研究关系**: 对 AI4S、电池界面模拟和 learned observable workflow 有直接参考价值。" in note
     assert "Au(100)/NaCl(aq) electrochemical interface" in note
     assert "Figure 2-4 crop 过小，图像细节不能独立复核。" in note
     assert "电化学界面需要同时描述电势、电解液极化、离子吸附和界面水取向。" in note
@@ -189,6 +188,86 @@ def test_render_note_renders_learning_fields() -> None:
     assert "### Figure 1：Overall pipeline" in note
     assert "### finite-field molecular dynamics" in note
     assert "- **相关关键词**: finite field, electric field, electrochemical interface" in note
+
+
+def test_render_note_renders_recommendations_result_evidence_and_gap_fields() -> None:
+    summary = {
+        **SUMMARY_WITH_FIGURES,
+        **TRUSTED_FIELDS,
+        **LEARNING_FIELDS,
+        "recommended_sections": [
+            {
+                "section": "Methods",
+                "locator": "context.md page 2 section Methods",
+                "reason": "Best source for model design.",
+            }
+        ],
+        "recommended_figures": [
+            {
+                "figure_id": "fig_p1_1",
+                "locator": "figure_context.md fig_p1_1",
+                "reason": "Shows the overall workflow.",
+            }
+        ],
+        "baseline_or_comparison": [
+            {
+                "target": "DFT baseline",
+                "result": "Lower MAE on formation energy prediction.",
+                "locator": "context.md page 3 section Results table_candidate 1",
+            }
+        ],
+        "result_evidence_notes": [
+            {
+                "result": "Conductivity improved.",
+                "evidence": "Reported with numeric comparison.",
+                "locator": "context.md page 3 section Results table_candidate 1",
+                "confidence": "medium",
+            }
+        ],
+        "author_stated_limitations": [
+            {
+                "text": "The authors evaluate one material family.",
+                "locator": "context.md page 8 section Discussion",
+                "source_type": "author_stated",
+            }
+        ],
+        "inferred_limits": [
+            {
+                "text": "Transfer to sulfide solid electrolytes is not established.",
+                "basis": "The experiments cover oxide examples only.",
+                "locator": "context.md page 6 section Results",
+                "source_type": "inferred",
+            }
+        ],
+        "potential_gaps": [
+            {
+                "text": "Reactive battery interfaces remain open.",
+                "basis": "The paper validates non-reactive examples.",
+                "locator": "context.md page 7 section Results",
+                "uncertainty": "AI inference",
+            }
+        ],
+        "evidence_quality_summary": "Full text and figure context are available; table candidates are medium-confidence.",
+    }
+
+    rendered = render_note(METADATA, summary, generated_date="2026-06-18")
+
+    assert "## 0. 速读决策" in rendered
+    assert "### 推荐先读章节" in rendered
+    assert "Methods: Best source for model design. (context.md page 2 section Methods)" in rendered
+    assert "fig_p1_1: Shows the overall workflow. (figure_context.md fig_p1_1)" in rendered
+    assert "## 3. 结果是否站得住" in rendered
+    assert "DFT baseline" in rendered
+    assert "Conductivity improved." in rendered
+    assert "Full text and figure context are available" in rendered
+    assert "### 作者明示局限" in rendered
+    assert "The authors evaluate one material family. (context.md page 8 section Discussion)" in rendered
+    assert "### Codex 推断限制" in rendered
+    assert "Transfer to sulfide solid electrolytes is not established." in rendered
+    assert "basis: The experiments cover oxide examples only." in rendered
+    assert "### 潜在 gap / 后续问题" in rendered
+    assert "Reactive battery interfaces remain open." in rendered
+    assert "uncertainty: AI inference" in rendered
 
 
 def test_render_note_escapes_pipe_characters_inside_markdown_table_cells() -> None:
@@ -471,9 +550,9 @@ def test_render_note_normalizes_common_figure_label_forms() -> None:
 def test_render_note_contains_trust_and_evidence_section() -> None:
     note = render_note(METADATA, {**SUMMARY_WITH_FIGURES, **TRUSTED_FIELDS}, generated_date="2026-04-23")
 
-    assert "## 0. 速读卡片" in note
+    assert "## 0. 速读决策" in note
     assert "| 论文类型 | 研究论文 (research_article) |" in note
-    assert "| 可信状态 | 可信 (trusted) |" in note
+    assert "- **可信状态**: 可信 (trusted)" in note
     assert "## 10. 自动抽取质量报告" not in note
     assert "### 审查状态\n\npassed_with_caveats" not in note
     assert "## 10. 证据链附录" in note
@@ -703,7 +782,7 @@ def test_render_note_ignores_string_values_for_list_sections() -> None:
     assert "\n- n\n- o\n- t\n" not in note
     assert "### n" not in note
     figure_section = note.split("## 4. 图表导读\n\n", maxsplit=1)[1].split(
-        "## 5. 贡献、局限与适用边界", maxsplit=1
+        "## 5. 局限、适用边界与潜在 gap", maxsplit=1
     )[0]
 
     assert (
@@ -781,5 +860,5 @@ def test_validate_note_requires_figure_overview_section() -> None:
 def test_validate_note_rejects_missing_required_section() -> None:
     errors = validate_note("# title\n\n## 旧结构\ncontent")
 
-    assert "missing_section: 0. 速读卡片" in errors
+    assert "missing_section: 0. 速读决策" in errors
     assert "missing_section: 9. 元数据" in errors

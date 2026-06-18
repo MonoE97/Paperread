@@ -84,3 +84,54 @@ def test_lint_summary_flags_low_quality_figure_without_note() -> None:
     issues = lint_summary(summary)
 
     assert any(issue["code"] == "low_quality_figure_missing_quality_note" for issue in issues)
+
+
+def test_lint_summary_flags_section_context_locator() -> None:
+    summary = {
+        "evidence_summary": [
+            {
+                "claim": "Claim",
+                "evidence": [{"locator": "section_context.md section Methods", "summary": "Not canonical"}],
+            }
+        ],
+        "key_figures": [],
+    }
+
+    issues = lint_summary(summary)
+
+    assert any(issue["code"] == "malformed_trusted_evidence_locator" for issue in issues)
+
+
+def test_lint_summary_allows_canonical_context_and_figure_locators() -> None:
+    summary = {
+        "evidence_summary": [
+            {
+                "claim": "Claim",
+                "evidence": [
+                    {"locator": "context.md page 3 section Methods", "summary": "Text"},
+                    {"locator": "context.md page 6 section Results table_candidate 1", "summary": "Table hint"},
+                    {"locator": "figure_context.md fig_p4_1", "summary": "Figure"},
+                ],
+            }
+        ],
+        "key_figures": [],
+    }
+
+    issues = lint_summary(summary)
+
+    assert not any(issue["code"] == "malformed_trusted_evidence_locator" for issue in issues)
+
+
+def test_lint_summary_flags_structured_limitation_source_type_mismatch() -> None:
+    summary = {
+        "author_stated_limitations": [{"text": "Claimed limit.", "source_type": "inferred"}],
+        "inferred_limits": [{"text": "Reader limit.", "source_type": "author_stated"}],
+        "evidence_summary": [],
+        "key_figures": [],
+    }
+
+    issues = lint_summary(summary)
+
+    codes = [issue["code"] for issue in issues]
+    assert "author_stated_limitation_source_type_invalid" in codes
+    assert "inferred_limit_source_type_invalid" in codes

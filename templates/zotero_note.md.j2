@@ -2,7 +2,35 @@
 
 > {{ one_sentence_summary }}
 
-## 0. 速读卡片
+## 0. 速读决策
+
+- **30 秒结论**: {% if tldr %}{{ tldr }}{% else %}{{ one_sentence_summary }}{% endif %}
+- **阅读决策**: {{ reading_decision }}
+- **与我的研究关系**: {{ relevance_to_user }}
+- **可信状态**: {{ trust_status }}
+- **主要风险**: {{ main_risk_short }}
+
+### 推荐先读章节
+
+{% if recommended_sections %}
+{% for item in recommended_sections %}
+- {{ item.label }}: {{ item.reason }}{% if item.locator %} ({{ item.locator }}){% endif %}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+### 推荐先看图表
+
+{% if recommended_figures %}
+{% for item in recommended_figures %}
+- {{ item.label }}: {{ item.reason }}{% if item.locator %} ({{ item.locator }}){% endif %}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+### 速读信息
 
 | 项目 | 内容 |
 | --- | --- |
@@ -11,19 +39,9 @@
 | 核心问题 | {{ research_question_short | table_cell }} |
 | 核心方法 | {{ core_method_short | table_cell }} |
 | 核心结果 | {{ core_result_short | table_cell }} |
-| 可信状态 | {{ trust_status | table_cell }} |
 | 质量评分 | {{ quality_score | table_cell }} |
-| 最大风险 | {{ main_risk_short | table_cell }} |
-| 是否值得精读 | {{ reading_decision | table_cell }} |
-| 与我的研究关系 | {{ relevance_to_user | table_cell }} |
 
-{% if tldr %}
-### 30 秒结论
-
-{{ tldr }}
-{% endif %}
-
-## 1. 论文解决了什么问题？
+## 1. 论文核心
 
 ### 背景问题
 
@@ -37,13 +55,17 @@
 
 {{ paper_entry_point }}
 
+### 一句话贡献
+
+{{ one_sentence_summary }}
+
 {% if abstract_translation %}
 ### 摘要翻译
 
 {{ abstract_translation }}
 {% endif %}
 
-## 2. 方法框架
+## 2. 方法怎么做
 
 ### 方法总览
 
@@ -77,7 +99,7 @@
 - none
 {% endif %}
 
-## 3. 关键结果与数值
+## 3. 结果是否站得住
 
 ### 关键结果表
 
@@ -105,6 +127,34 @@
 ### 实验与证据摘要
 
 {{ experiments }}
+{% endif %}
+
+### baseline / comparison
+
+{% if baseline_or_comparison %}
+{% for item in baseline_or_comparison %}
+- {{ item.label }}: {{ item.reason }}{% if item.locator %} ({{ item.locator }}){% endif %}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+### 结果证据说明
+
+{% if result_evidence_notes %}
+{% for item in result_evidence_notes %}
+- {{ item.result }}: {{ item.evidence }}{% if item.locator %} ({{ item.locator }}{% if item.confidence %}; confidence: {{ item.confidence }}{% endif %}){% endif %}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+### 证据质量
+
+{% if evidence_quality_summary %}
+{{ evidence_quality_summary }}
+{% else %}
+- none
 {% endif %}
 
 ## 4. 图表导读
@@ -145,7 +195,7 @@
 - none
 {% endif %}
 
-## 5. 贡献、局限与适用边界
+## 5. 局限、适用边界与潜在 gap
 
 ### 主要贡献
 
@@ -157,11 +207,25 @@
 - none
 {% endif %}
 
-### 局限与风险
+### 作者明示局限
 
-{% if limitations %}
+{% if author_stated_limitations %}
+{% for item in author_stated_limitations %}
+- {{ item.text }}{% if item.locator %} ({{ item.locator }}){% endif %}
+{% endfor %}
+{% elif limitations %}
 {% for item in limitations %}
 - {{ item }}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+### Codex 推断限制
+
+{% if inferred_limits %}
+{% for item in inferred_limits %}
+- {{ item.text }}{% if item.basis %} (basis: {{ item.basis }}){% endif %}{% if item.locator %} ({{ item.locator }}){% endif %}
 {% endfor %}
 {% else %}
 - none
@@ -177,7 +241,21 @@
 - none
 {% endif %}
 
-## 6. 对 AI4S / 电池 / 材料研究的启发
+### 潜在 gap / 后续问题
+
+{% if potential_gaps %}
+{% for item in potential_gaps %}
+- {{ item.text }}{% if item.basis %} (basis: {{ item.basis }}){% endif %}{% if item.uncertainty %} (uncertainty: {{ item.uncertainty }}){% endif %}{% if item.locator %} ({{ item.locator }}){% endif %}
+{% endfor %}
+{% elif follow_up_questions %}
+{% for item in follow_up_questions %}
+- {{ item }}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+## 6. 可迁移启发
 
 ### 可迁移启发
 
