@@ -42,7 +42,7 @@ ResearchWiki suggests a useful principle: a reading note should not only summari
 
 1. Add section-aware PDF extraction without breaking old `extract.json` consumers.
 2. Add conservative table/value candidates for scientific results and numeric comparisons.
-3. Generate a new `section_context.md` artifact for source-grounded summarization.
+3. Generate a new `section_context.md` artifact to help source-grounded summarization while preserving canonical evidence locators.
 4. Make evidence locators more precise and stable.
 5. Redesign the Zotero note as a two-layer reading note:
    - early compact decision layer
@@ -79,7 +79,7 @@ item-details.json
   -> gate-run
 ```
 
-`context.md` stays as the full-text fallback. `section_context.md` is an additional summarization aid, not a replacement. If section detection is weak or fails, the workflow still works with page-level context and records a warning.
+`context.md` stays as the full-text fallback. `section_context.md` is an additional summarization aid, not a replacement and not a new canonical evidence source. If section detection is weak or fails, the workflow still works with page-level `context.md` locators and records a warning.
 
 ## Structured Extraction
 
@@ -270,10 +270,10 @@ figure_context.md fig_p4_1
 
 Locator rules:
 
-1. Trusted evidence still comes only from `context.md`, `section_context.md`, and `figure_context.md`.
+1. Trusted evidence locators remain limited to `context.md` and `figure_context.md`.
 2. Secondary contexts remain cross-check material and must not be cited in `evidence_summary`.
-3. `section_context.md` locators are allowed only if they point back to page/section information derived from the PDF.
-4. Low-confidence section and table candidates can be cited only with caveats in the evidence summary.
+3. `section_context.md` may help Codex find section and table/value candidates, but final `evidence_summary` locators should cite the canonical source form such as `context.md page 3 section Methods`.
+4. Low-confidence section and table candidates can be cited only through canonical `context.md ...` locators and with caveats in the evidence summary.
 5. `lint-summary` should reject secondary context locators and malformed trusted locators.
 
 ## Summary Contract Additions
@@ -354,13 +354,51 @@ Short evidence-quality notes for major results:
 
 Limitations stated by the paper authors. These should be separated from inferred limits.
 
+Preferred object form:
+
+```json
+[
+  {
+    "text": "The authors state that only one material family was evaluated.",
+    "locator": "context.md page 8 section Discussion",
+    "source_type": "author_stated"
+  }
+]
+```
+
 ### `inferred_limits`
 
 Limits inferred by Codex or the reader from scope, dataset, missing experiments, or weak extraction. These must not be presented as author claims.
 
+Preferred object form:
+
+```json
+[
+  {
+    "text": "Generalization to sulfide solid electrolytes is not established.",
+    "basis": "The experiments cover oxide examples only.",
+    "locator": "context.md page 6 section Results",
+    "source_type": "inferred"
+  }
+]
+```
+
 ### `potential_gaps`
 
 Follow-up research gaps suggested by the paper. Each gap should include either paper evidence or an explicit uncertainty label.
+
+Preferred object form:
+
+```json
+[
+  {
+    "text": "Whether the workflow transfers to reactive battery interfaces remains open.",
+    "basis": "The paper validates non-reactive interface examples.",
+    "locator": "context.md page 7 section Results",
+    "uncertainty": "AI inference"
+  }
+]
+```
 
 ### `evidence_quality_summary`
 
@@ -468,9 +506,11 @@ The evidence chain remains near the end so provenance is available without inter
 
 1. secondary context is not used as trusted evidence
 2. malformed trusted locators are flagged
-3. low-confidence table candidates are not presented as high-confidence evidence
-4. inferred limits are not mixed into author-stated limitations
+3. `author_stated_limitations` entries, when using object form, have `source_type: "author_stated"`
+4. `inferred_limits` entries, when using object form, have `source_type: "inferred"`
 5. `workflow_steps` remains readable as multi-line Markdown or normalized list text
+
+Semantic checks that require paper understanding should stay in the review pass, not in deterministic lint. In particular, the review pass should check whether low-confidence table candidates are over-claimed and whether inferred limits are written as paper-authored limitations.
 
 `validate_trusted_summary` should remain focused on write-through readiness. It should not require every new optional field, but write-ready notes should still require core evidence, trust, review, and improvement fields.
 
@@ -493,7 +533,7 @@ Deliverables:
 - additive `pages`, `sections`, and `table_candidates` in `extract.json`
 - `section_context.md`
 - run manifest support for `section_context_md`
-- docs and skill updates explaining that Codex should read `section_context.md` when available
+- docs and skill updates explaining that Codex should read `section_context.md` when available, while final evidence locators remain `context.md ...` or `figure_context.md ...`
 
 ### Phase 2: Note Layout and Summary Contract
 
@@ -513,7 +553,7 @@ Deliverables:
 - new two-layer note section order
 - safe cleaning/rendering for optional new fields
 - old-summary compatibility
-- summary lint checks for new evidence locator rules
+- summary lint checks for canonical evidence locator rules and structured limitation fields
 - docs and skill updates for the new note structure
 
 ## Verification
