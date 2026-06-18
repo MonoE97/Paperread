@@ -453,6 +453,7 @@ target Zotero item title has been shown
    - note 正文末尾 `Tags:` 和 Zotero note metadata tags 必须使用同一套标签：固定标签 `codex-summary`、`paper-summary`，加上 `summary.json` 中 `note_labels` 归一化后的最多 4 个推断标签。
    - `prepare-write-payload does not write to Zotero`; it only prepares metadata for the agent-side `write_note` call and readback checklist. Real writes still happen only through `zotero-mcp write_note`.
    - 真实写入仍必须来自用户明确写入意图，且只能调用 `zotero-mcp write_note`。调用前读取 `<run_dir>/write-payload.json` 和 `<run_dir>/note.html`，传给 `write_note(action="create", parentKey=<payload parentKey>, content=<contents of note.html>, tags=<payload tags>)`。
+   - 如果尝试更新既有 note 时 `write_note(action="update", ...)` 超时，必须先读回确认是否生效；若读回仍是旧内容，不要改用 Zotero HTTP API、SQLite 或其他写入路径。改为重新读取 live 子笔记标题，计算同日 ` (v2)` / ` (v3)` 后缀，重新 `finalize-note` + `gate-run`，再用 `write_note(action="create", parentKey=<payload parentKey>, content=<contents of note.html>, tags=<payload tags>)` 创建新版本 note。
    - 成功后回读一次 `get_item_details`，确认子笔记已经挂载到目标条目下。
 
 ## Better Notes 兼容

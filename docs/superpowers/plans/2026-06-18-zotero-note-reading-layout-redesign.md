@@ -490,7 +490,7 @@ Expected:
 {"status":"write_ready","parentKey":"CABS9KGA",...}
 ```
 
-- [ ] **Step 2: Update the existing same-day Codex note**
+- [ ] **Step 2: Update the existing same-day Codex note, or create a versioned note if update fails**
 
 Use Zotero MCP `write_note` with:
 
@@ -504,9 +504,22 @@ Use Zotero MCP `write_note` with:
 
 This updates only the just-created 2026-06-18 note and does not overwrite the older 2026-05-06 note.
 
+If `write_note(action="update", ...)` times out, read back the note before trying another write. If readback still shows old content, do not use Zotero HTTP writes, SQLite writes, or any non-MCP write path. Refresh live child-note titles, compute the next same-day suffix, regenerate `note.md` / `note.html`, rerun `gate-run`, and create a new versioned child note with:
+
+```json
+{
+  "action": "create",
+  "parentKey": "CABS9KGA",
+  "content": "<contents of RUN_DIR/note.html>",
+  "tags": ["codex-summary", "paper-summary", "..."]
+}
+```
+
+Actual execution note: `write_note(update)` timed out twice and readback showed no content change, so the workflow created `[Codex Summary] ... - 2026-06-18 (v2)` as note key `GVZQD7HJ`.
+
 - [ ] **Step 3: Read back note details**
 
-Use Zotero MCP `get_item_details` for `6UMI3FZ8`.
+Use Zotero MCP `get_item_details` for the updated or newly created note key.
 
 Expected:
 
@@ -520,4 +533,4 @@ Expected:
 - No placeholders: all commands, file paths, and expected outcomes are explicit.
 - Type consistency: no new function signatures are introduced beyond updating constants/template behavior.
 - TDD coverage: renderer behavior changes start with failing tests before production template/code edits.
-- Safety: Zotero write occurs only after local gates and targets the same explicit same-day note key.
+- Safety: Zotero write occurs only after local gates and uses `zotero-mcp write_note`; if update readback fails, create a versioned same-day note instead of using a second write path.
