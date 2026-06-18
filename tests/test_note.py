@@ -268,6 +268,13 @@ def test_render_note_renders_recommendations_result_evidence_and_gap_fields() ->
     assert "### 潜在 gap / 后续问题" in rendered
     assert "Reactive battery interfaces remain open." in rendered
     assert "uncertainty: AI inference" in rendered
+    assert "\n- **阅读决策**:" in rendered
+    assert "\n- **与我的研究关系**:" in rendered
+    assert "\n- Transfer to sulfide solid electrolytes is not established." in rendered
+    assert "\n- Reactive battery interfaces remain open." in rendered
+    assert ")- **" not in rendered
+    assert ")- Transfer to sulfide solid electrolytes is not established." not in rendered
+    assert ")- Reactive battery interfaces remain open." not in rendered
 
 
 def test_render_note_does_not_duplicate_follow_up_questions_as_potential_gaps() -> None:

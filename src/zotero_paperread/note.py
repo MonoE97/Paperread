@@ -590,6 +590,11 @@ def build_note_title(
     return f"[Codex Summary] {title} - {generated_date}{version_suffix}"
 
 
+def normalize_markdown_list_boundaries(note: str) -> str:
+    """Restore list-item newlines that Jinja block trimming can remove."""
+    return re.sub(r"(?<=[.)。；;])- (?=(?:\*\*|[A-Za-z0-9\u4e00-\u9fff]))", "\n- ", note)
+
+
 def next_same_day_version_suffix(
     existing_titles: list[str],
     *,
@@ -713,7 +718,8 @@ def render_note(
         "follow_up_questions": clean_string_list(summary.get("follow_up_questions", [])),
         "concept_cards": clean_concept_cards(summary.get("concept_cards", [])),
     }
-    return template.render(**context).strip() + "\n"
+    rendered = template.render(**context)
+    return normalize_markdown_list_boundaries(rendered).strip() + "\n"
 
 
 def render_note_html(note: str) -> str:
