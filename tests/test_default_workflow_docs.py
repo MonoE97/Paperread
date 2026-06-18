@@ -96,12 +96,21 @@ def test_docs_show_smoothed_write_gate_command_chain() -> None:
 def test_docs_describe_section_context_and_two_layer_note_contract() -> None:
     skill = (PROJECT_ROOT / "skills" / "zotero-paper-summary" / "SKILL.md").read_text(encoding="utf-8")
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    agents = (PROJECT_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    batch_skill = (PROJECT_ROOT / "skills" / "zotero-batch-note-writing" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    worker_contract = (
+        PROJECT_ROOT / "skills" / "zotero-batch-note-writing" / "references" / "worker-contract.md"
+    ).read_text(encoding="utf-8")
 
-    for text in (skill, readme):
+    for text in (skill, readme, agents, batch_skill, worker_contract):
         assert "section_context.md" in text
         assert "context.md page 3 section Methods" in text
         assert "context.md page 6 section Results table_candidate 1" in text
+        assert "not a canonical evidence source" in text
+
+    for text in (skill, readme):
         assert "author_stated_limitations" in text
         assert "inferred_limits" in text
         assert "potential_gaps" in text
-        assert "not a canonical evidence source" in text

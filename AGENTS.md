@@ -2,7 +2,7 @@
 
 ## 项目目标
 
-本项目实现 Zotero-first 文献总结工作流：输入 Zotero 中的文章标题，Codex 通过 Zotero MCP 定位条目，使用本地 Python 工具默认抽取完整 PDF 内容，生成中文结构化论文总结，并在用户明确要求写入时创建 Zotero 子笔记。审计源保留为 `note.md`，真实写入 Zotero 时使用由同一份 Markdown 转换出的 `note.html`。
+本项目实现 Zotero-first 文献总结工作流：输入 Zotero 中的文章标题，Codex 通过 Zotero MCP 定位条目，使用本地 Python 工具默认抽取完整 PDF 内容、章节上下文和表格/数值候选，生成中文结构化论文总结，并在用户明确要求写入时创建 Zotero 子笔记。审计源保留为 `note.md`，真实写入 Zotero 时使用由同一份 Markdown 转换出的 `note.html`。
 
 ## 目录约定
 
@@ -12,6 +12,12 @@
 - `skills/`：Codex skill 定义。
 - `docs/references/`：外部项目参考、设计取舍记录和可复用 runbook。
 - `docs/superpowers/plans/`：实施计划。
+
+## 运行产物与证据边界
+
+- `prepare-item` 默认生成 `context.md`，并在结构化抽取可用时生成 `section_context.md`；`section_context.md` 只用于帮助 Codex 定位章节、表格候选和值候选。
+- `section_context.md` is not a canonical evidence source；它只辅助阅读定位。最终 `evidence_summary` locator 必须引用 `context.md` 或 `figure_context.md`，例如 `context.md page 3 section Methods`、`context.md page 6 section Results table_candidate 1`、`figure_context.md fig_p4_1`。
+- 用户提供微信公众号、新闻稿、博客等网页时，只作为二级材料 capture，用于 cross-check 和补充背景；`evidence_summary` 只能引用 `context.md` 和 `figure_context.md`。
 
 ## 环境与依赖
 
@@ -60,7 +66,6 @@ uv run zotero-paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/zot
 - Zotero exact 搜索出现多个 normalized title 相同的条目时，停止分析和写入，要求用户先在 Zotero 去重；不要替用户选择父条目。
 - MCP 原始 `get_item_details` 响应必须先落盘，再用 `save-item-details` 生成规范化的 `item-details.json`，后续本地命令只读规范化文件。
 - 当 MCP 响应缺少 `extra` 时，`save-item-details` 可用只读 Zotero SQLite fallback 补齐 `Extra` / `其他`；成功补齐只记录 `_paperread.enrichment.extra.diagnostics`，不写入 `_paperread.warnings`；缺失、不可读或找不到条目才保留 warning。
-- 用户提供微信公众号、新闻稿、博客等网页时，只作为二级材料 capture，用于 cross-check 和补充背景；`evidence_summary` 只能引用 `context.md` 和 `figure_context.md`。
 - `prepare-item`、`extract-pdf`、`extract-figures` 默认处理完整 PDF；只有用户明确要求快速调试、预览或截断抽取时才传 `--max-pages <N>`。
 - 真实写入 Zotero 前，必须展示 `note.md` 与 `note.html` 预览和目标 Zotero item 标题。
 - 真实写入 Zotero 前必须完成最终门禁：`validate-summary-json -> apply-review -> lint-summary -> validate-trusted-summary -> next-version-suffix -> finalize-note --html-output -> note-tags -> preview-note note.md/note.html -> gate-run -> prepare-write-payload`，且 `gate-report.json` 必须为 `write_ready`。

@@ -21,11 +21,12 @@ Use this skill to coordinate a batch run across Zotero collection items. It is o
 3. Mark existing Codex summaries via `[Codex Summary]`, `codex-summary`, or `Tags: codex-summary, paper-summary`.
 4. Block duplicate normalized titles before analysis; do not choose parent item for user.
 5. Dispatch bounded parallel workers only for local run artifacts.
-6. Treat WeChat/news/blog links as secondary cross-check material; never cite them in `evidence_summary`.
-7. Run central per-item gate chain: `create-run -> prepare-item -> validate-summary-json -> apply-review -> validate-trusted-summary -> next-version-suffix -> finalize-note --html-output -> note-tags -> preview-note -> gate-run -> prepare-write-payload`.
-8. Generate `write-preview.md` and stop for explicit user confirmation.
-9. After confirmation, serialize `write_note` and verify each with `get_item_details`.
-10. Generate compact `write-report.md`.
+6. Treat `section_context.md` as a navigation aid for sections and table/value candidates; it is not a canonical evidence source and must not be used as an `evidence_summary` locator source. Valid locators should look like `context.md page 3 section Methods`, `context.md page 6 section Results table_candidate 1`, or `figure_context.md fig_p4_1`.
+7. Treat WeChat/news/blog links as secondary cross-check material; never cite them in `evidence_summary`.
+8. Run central per-item gate chain: `create-run -> prepare-item -> validate-summary-json -> apply-review -> lint-summary -> validate-trusted-summary -> next-version-suffix -> finalize-note --html-output -> note-tags -> preview-note -> gate-run -> prepare-write-payload`.
+9. Generate `write-preview.md` and stop for explicit user confirmation.
+10. After confirmation, serialize `write_note` and verify each with `get_item_details`.
+11. Generate compact `write-report.md`.
 
 ## State Model
 

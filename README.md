@@ -19,6 +19,7 @@ runs/<date>/<paper-slug>/
 - `metadata.json`
 - `extract.json`
 - `context.md`
+- `section_context.md`
 - `secondary_sources.json`
 - `secondary_contexts/`
 - `figures.json`
@@ -41,7 +42,7 @@ Given a Zotero paper title, Codex can:
 2. locate the attached PDF path, preferring the main paper over appendices or supporting-information PDFs;
 3. create and reuse a local `runs/<date>/<paper-slug>/` bundle for that paper;
 4. normalize item details and recover missing Zotero `Extra` / `其他` through a read-only SQLite fallback when needed;
-5. extract PDF text with a local `uv`-managed Python CLI;
+5. extract PDF text, page records, section records, and conservative table/value candidates with a local `uv`-managed Python CLI;
 6. extract figures, backfill nearby captions for embedded images, and analyze key images when available;
 7. capture Extra/web links as secondary context for cross-checking only;
 8. generate a Chinese structured paper summary with figure-aware analysis;

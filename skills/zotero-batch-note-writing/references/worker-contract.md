@@ -24,6 +24,7 @@ A successful worker should leave these files for coordinator gates:
 
 - `item-details.json`
 - `context.md`
+- `section_context.md`
 - `figure_context.md`
 - `summary.json`
 - `review.json`
@@ -32,5 +33,7 @@ A successful worker should leave these files for coordinator gates:
 If any required input is missing, the worker should stop with a short `blocked_reason` and put detailed diagnostics in `error_detail`.
 
 ## Secondary Material Boundary
+
+`section_context.md` is a navigation aid for sections and table/value candidates. Workers may use it to draft source-grounded summaries, but it is not a canonical evidence source. Final `evidence_summary` locators must cite `context.md` or `figure_context.md`, for example `context.md page 3 section Methods`, `context.md page 6 section Results table_candidate 1`, or `figure_context.md fig_p4_1`.
 
 WeChat, news, blog, press-release, and other webpage links are secondary cross-check material only. Workers may capture them for background or consistency checks, but `evidence_summary` must cite only primary paper artifacts such as `context.md` and `figure_context.md`.
