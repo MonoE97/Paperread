@@ -417,6 +417,7 @@ uv run zotero-paperread lint-summary <run_dir>/summary.json
 uv run zotero-paperread validate-trusted-summary <run_dir>/summary.json
 PAPER_TITLE="<paper title>"
 GENERATED_DATE="<YYYY-MM-DD>"
+uv run zotero-paperread refresh-live-notes <run_dir>/item-details.json --output <run_dir>/item-details.json
 VERSION_SUFFIX="$(uv run zotero-paperread next-version-suffix <run_dir>/item-details.json --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE")"
 uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --generated-date "$GENERATED_DATE" --version-suffix "$VERSION_SUFFIX" --output <run_dir>/note.md --html-output <run_dir>/note.html
 NOTE_TAGS_JSON="$(uv run zotero-paperread note-tags <run_dir>/summary.json)"

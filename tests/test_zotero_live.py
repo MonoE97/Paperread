@@ -238,3 +238,30 @@ def test_verify_note_snapshot_checks_expected_content_hash() -> None:
         )
 
     assert f"content hash mismatch: expected {'0' * 64}, got {content_hash}" in exc.value.errors
+
+
+def test_verify_note_snapshot_content_hash_ignores_trailing_newline() -> None:
+    html = "<h1>[Codex Summary] Paper - 2026-06-22 (v2)</h1><h2>0. 阅读结论</h2><p>body</p>"
+    snapshot = {
+        "key": "N1",
+        "data": {
+            "itemType": "note",
+            "parentItem": "P1",
+            "note": html + "\n",
+            "tags": [{"tag": "codex-summary"}, {"tag": "paper-summary"}],
+        },
+    }
+    content_hash = hashlib.sha256(html.encode("utf-8")).hexdigest()
+
+    report = verify_note_snapshot(
+        snapshot,
+        expected_parent="P1",
+        expected_title="[Codex Summary] Paper - 2026-06-22 (v2)",
+        required_headings=["0. 阅读结论"],
+        forbidden_headings=[],
+        expected_tags=["codex-summary", "paper-summary"],
+        min_content_length=20,
+        expected_content_sha256=content_hash,
+    )
+
+    assert report["contentSha256"] == content_hash

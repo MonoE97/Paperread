@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import Any
+
+from zotero_paperread.note_hash import note_html_sha256
 
 
 def build_write_payload(gate_report: dict[str, Any]) -> dict[str, Any]:
@@ -14,7 +15,7 @@ def build_write_payload(gate_report: dict[str, Any]) -> dict[str, Any]:
     note_title = str(gate_report.get("note_title", ""))
     version_suffix = str(gate_report.get("version_suffix", ""))
     title_prefix = note_title[:120]
-    content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    content_sha256 = note_html_sha256(content)
     parent_key = str(gate_report.get("parentKey", ""))
     tags = [str(tag) for tag in gate_report.get("tags", []) if str(tag)]
     return {

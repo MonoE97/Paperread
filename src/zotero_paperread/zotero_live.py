@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import datetime, timezone
 from html import escape
@@ -8,6 +7,8 @@ from html.parser import HTMLParser
 from typing import Any, Callable
 from urllib.parse import quote
 from urllib.request import urlopen
+
+from zotero_paperread.note_hash import note_html_sha256
 
 
 FetchJson = Callable[[str], object]
@@ -178,7 +179,7 @@ def verify_note_snapshot(
         if isinstance(tag, dict) and str(tag.get("tag", "")).strip()
     ]
     title, headings = _parse_headings(note)
-    content_sha256 = hashlib.sha256(note.encode("utf-8")).hexdigest()
+    content_sha256 = note_html_sha256(note)
     errors: list[str] = []
 
     if data.get("itemType") != "note":

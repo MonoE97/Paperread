@@ -166,3 +166,15 @@ def test_write_gate_documents_prepare_candidate_and_readback_order() -> None:
         assert positions == sorted(positions)
     assert "refresh-live-notes" in batch_skill
     assert "prepare-write-payload" in batch_skill
+
+
+def test_skill_manual_gate_block_refreshes_live_notes_before_version_suffix() -> None:
+    skill = (PROJECT_ROOT / "skills" / "zotero-paper-summary" / "SKILL.md").read_text(encoding="utf-8")
+    block = skill[
+        skill.index("uv run zotero-paperread validate-summary-json <run_dir>/summary.json") : skill.index(
+            "10. 补充优化"
+        )
+    ]
+
+    assert "refresh-live-notes" in block
+    assert block.index("refresh-live-notes") < block.index("next-version-suffix")

@@ -374,6 +374,14 @@ def prepare_write_payload_command(
     output: Path = typer.Option(..., "--output", "-o", help="Write write-payload JSON."),
 ) -> None:
     """Prepare a safe local write payload summary without writing to Zotero."""
+    if output.resolve() == gate_report_json.resolve():
+        console.print(f"write payload output path must differ from gate report JSON: {output}", soft_wrap=True)
+        raise typer.Exit(1)
+    if output.exists():
+        if output.is_dir():
+            console.print(f"write payload output path is a directory: {output}", soft_wrap=True)
+            raise typer.Exit(1)
+        output.unlink()
     gate_report = read_json_or_exit(gate_report_json, label="gate report JSON")
     try:
         payload = build_write_payload(gate_report)

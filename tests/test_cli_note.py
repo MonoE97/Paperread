@@ -494,6 +494,30 @@ def test_prepare_write_payload_command_writes_payload(tmp_path: Path) -> None:
     assert json.loads(output.read_text(encoding="utf-8"))["parentKey"] == "ABC123"
 
 
+def test_prepare_write_payload_command_removes_stale_output_when_gate_blocked(tmp_path: Path) -> None:
+    gate_report = tmp_path / "gate-report.json"
+    gate_report.write_text(json.dumps({"status": "blocked", "blockers": ["bad"]}), encoding="utf-8")
+    output = tmp_path / "write-payload.json"
+    output.write_text(json.dumps({"action": "create", "parentKey": "stale"}), encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["prepare-write-payload", str(gate_report), "--output", str(output)])
+
+    assert result.exit_code == 1
+    assert "gate report is not write_ready" in result.stdout
+    assert not output.exists()
+
+
+def test_prepare_write_payload_command_rejects_same_input_and_output_path(tmp_path: Path) -> None:
+    gate_report = tmp_path / "gate-report.json"
+    gate_report.write_text(json.dumps({"status": "blocked", "blockers": ["bad"]}), encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["prepare-write-payload", str(gate_report), "--output", str(gate_report)])
+
+    assert result.exit_code == 1
+    assert "write payload output path must differ from gate report JSON" in result.stdout
+    assert json.loads(gate_report.read_text(encoding="utf-8")) == {"status": "blocked", "blockers": ["bad"]}
+
+
 def test_finalize_note_command_reports_invalid_summary_json(tmp_path: Path) -> None:
     metadata_path = tmp_path / "metadata.json"
     summary_path = tmp_path / "summary.json"
