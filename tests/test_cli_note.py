@@ -546,6 +546,34 @@ def test_prepare_write_payload_command_rejects_output_matching_note_html_path_wi
     assert note_html.read_text(encoding="utf-8") == html
 
 
+def test_prepare_write_payload_command_rejects_non_payload_filename_without_overwriting(tmp_path: Path) -> None:
+    note_html = tmp_path / "note.html"
+    note_html.write_text("<h1>Title</h1>", encoding="utf-8")
+    gate_report = tmp_path / "gate-report.json"
+    gate_report.write_text(
+        json.dumps(
+            {
+                "status": "write_ready",
+                "parentKey": "ABC123",
+                "note_html_path": str(note_html),
+                "tags": ["codex-summary"],
+                "note_title": "[Codex Summary] Title - 2026-05-06",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    summary = tmp_path / "summary.json"
+    original_summary = {"one_sentence_summary": "keep me"}
+    summary.write_text(json.dumps(original_summary, ensure_ascii=False), encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["prepare-write-payload", str(gate_report), "--output", str(summary)])
+
+    assert result.exit_code == 1
+    assert "write payload output filename must be write-payload.json" in result.stdout
+    assert json.loads(summary.read_text(encoding="utf-8")) == original_summary
+
+
 def test_finalize_note_command_reports_invalid_summary_json(tmp_path: Path) -> None:
     metadata_path = tmp_path / "metadata.json"
     summary_path = tmp_path / "summary.json"

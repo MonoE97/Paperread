@@ -383,6 +383,9 @@ def prepare_write_payload_command(
     if note_html_path and output_resolved == Path(note_html_path).resolve():
         console.print(f"write payload output path must differ from note HTML path: {output}", soft_wrap=True)
         raise typer.Exit(1)
+    if output.name != "write-payload.json":
+        console.print(f"write payload output filename must be write-payload.json: {output}", soft_wrap=True)
+        raise typer.Exit(1)
     if output.exists():
         if output.is_dir():
             console.print(f"write payload output path is a directory: {output}", soft_wrap=True)
