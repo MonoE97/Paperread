@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Implementation Status:** Completed and merged to `main` by 2026-06-23. The rendered Zotero note now uses the 0-7 reading-thread layout; metadata, evidence appendix, review status, and improvement notes remain in JSON artifacts and write gates instead of dedicated Zotero note sections.
+
 **Goal:** Render Zotero paper-reading notes as a concise 0-7 reading layout, keep audit fields in JSON/gates, sync the skill instructions, and regenerate the Polyanion example note with the new logic.
 
 **Architecture:** This is a render-layer redesign. The summary schema and gate pipeline remain intact; `templates/zotero_note.md.j2` and `src/zotero_paperread/note.py` decide which fields are shown in the final Markdown/HTML note. Tests prove the new headings, the absence of audit-only sections, and continued evidence validation.

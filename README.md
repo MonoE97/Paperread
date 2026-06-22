@@ -45,10 +45,11 @@ Given a Zotero paper title, Codex can:
 5. extract PDF text, page records, section records, and conservative table/value candidates with a local `uv`-managed Python CLI;
 6. extract figures, backfill nearby captions for embedded images, and analyze key images when available;
 7. capture Extra/web links as secondary context for cross-checking only;
-8. generate a Chinese structured paper summary with figure-aware analysis;
-9. render a small set of normalized English key labels at the end of the note;
-10. validate summary JSON, render auditable Markdown plus Zotero-ready HTML, and preview the note;
-11. create a Zotero child note only when explicitly requested.
+8. generate a Chinese structured paper summary with figure-aware analysis and the 0-7 reading-thread layout;
+9. validate summary JSON, apply review, lint and trusted-summary gates, then render auditable Markdown plus Zotero-ready HTML;
+10. prepare a versioned write candidate that refreshes live child-note titles, computes the same-day suffix, previews both `note.md` and `note.html`, and writes `gate-report.json` plus `write-payload.json`;
+11. create a new Zotero child note only when explicitly requested, using `zotero-mcp write_note(action="create", ...)`;
+12. verify the written note through read-only Zotero local API readback.
 
 The normal Zotero path is native `zotero-mcp` tool access. This repository intentionally does not implement an HTTP JSON-RPC fallback client for Zotero writes; if a Codex session lacks native Zotero MCP tools, treat it as a session/tool-injection issue and start a fresh session or verify the MCP registration.
 
@@ -92,6 +93,24 @@ finalize-note --html-output <run_dir>/note.html -> preview-note note.md -> previ
 
 Same-day regenerated notes should not overwrite earlier notes. Use a date-only title for the first note and pass `--version-suffix " (v2)"`, `--version-suffix " (v3)"`, etc. for later notes on the same date.
 
+## Current Stable Single-Paper Flow
+
+Use this flow for new paper notes:
+
+1. Search Zotero through MCP and stop on duplicate normalized titles.
+2. Save the raw `get_item_details(mode="complete")` response, then normalize it with `save-item-details`.
+3. Run `prepare-item` with the full PDF by default.
+4. Draft `summary.json` from `context.md`, `figure_context.md`, and `section_context.md`; use `section_context.md` only for navigation.
+5. Produce `review.json`, apply the review, lint and validate trusted summary fields.
+6. Run `prepare-write-candidate <run_dir> --paper-title "<title>" --generated-date YYYY-MM-DD`, which runs `refresh-live-notes -> next-version-suffix -> finalize-note --html-output -> note-tags -> preview-note -> gate-run -> prepare-write-payload`.
+7. Show the target Zotero title plus `note.md` and `note.html` previews.
+8. After explicit write intent, call only `zotero-mcp write_note(action="create", parentKey=<payload parentKey>, content=<contents of note.html>, tags=<payload tags>)`.
+9. Run `verify-zotero-note` with the payload readback checks.
+
+`prepare-write-candidate` is the normal write-preparation entry point. It uses read-only live note refresh, computes the next version suffix, regenerates `note.md` and `note.html`, writes `preview-note-md.txt` and `preview-note-html.txt`, writes `note-tags.json`, runs `gate-run`, and writes `write-payload.json` only when the gate is `write_ready`.
+
+`write-payload.json` must live at `<run_dir>/write-payload.json`. The CLI rejects attempts to write the payload over `gate-report.json`, over `note.html`, to a non-`write-payload.json` filename, or outside the gate report's run directory. If a rerun is blocked, stale `write-payload.json` is removed so an old payload cannot be mistaken for a fresh write candidate.
+
 ## MCP Tool Discovery
 
 Codex App may lazy-load MCP tool schemas. Before running a Zotero note workflow, use `tool_search` to load the full Zotero tool set with a targeted tool search for `search_library`, `get_item_details`, `get_content`, `write_note`, and `annotations`. `annotations` tools are optional enhancements; the required core tools are `search_library`, `get_item_details`, `get_content`, and `write_note`.
@@ -111,6 +130,7 @@ uv run zotero-paperread validate-summary-json runs/<date>/<paper-slug>/summary.j
 uv run zotero-paperread apply-review runs/<date>/<paper-slug>/summary.json runs/<date>/<paper-slug>/review.json
 uv run zotero-paperread lint-summary runs/<date>/<paper-slug>/summary.json
 uv run zotero-paperread validate-trusted-summary runs/<date>/<paper-slug>/summary.json
+uv run zotero-paperread refresh-live-notes runs/<date>/<paper-slug>/item-details.json --output runs/<date>/<paper-slug>/item-details.json
 uv run zotero-paperread next-version-suffix runs/<date>/<paper-slug>/item-details.json --paper-title "<title>" --generated-date "<YYYY-MM-DD>"
 uv run zotero-paperread render-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md
 uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json runs/<date>/<paper-slug>/summary.json --output runs/<date>/<paper-slug>/note.md
@@ -119,6 +139,8 @@ uv run zotero-paperread finalize-note runs/<date>/<paper-slug>/metadata.json run
 uv run zotero-paperread render-note-html runs/<date>/<paper-slug>/note.md --output runs/<date>/<paper-slug>/note.html
 uv run zotero-paperread gate-run runs/<date>/<paper-slug> --paper-title "<title>" --generated-date "<YYYY-MM-DD>" --output runs/<date>/<paper-slug>/gate-report.json
 uv run zotero-paperread prepare-write-payload runs/<date>/<paper-slug>/gate-report.json --output runs/<date>/<paper-slug>/write-payload.json
+uv run zotero-paperread prepare-write-candidate runs/<date>/<paper-slug> --paper-title "<title>" --generated-date "<YYYY-MM-DD>"
+uv run zotero-paperread verify-zotero-note <note_key> --expected-parent <item_key>
 uv run zotero-paperread note-tags runs/<date>/<paper-slug>/summary.json
 uv run zotero-paperread validate-note runs/<date>/<paper-slug>/note.md
 uv run zotero-paperread preview-note runs/<date>/<paper-slug>/note.md
@@ -211,6 +233,8 @@ target Zotero item title has been shown
 Actual Zotero write-through still requires explicit write intent and uses only `zotero-mcp write_note`. Use `content=<contents of note.html>` for writes so Markdown tables are already converted to Zotero-renderable HTML.
 
 `prepare-write-payload does not write to Zotero`. It records `parentKey`, tags, `note_html_path`, `contentLength`, `contentSha256`, and readback checks. The actual write remains an explicit `zotero-mcp write_note` action performed by the agent after the gate report is `write_ready`.
+
+`contentSha256` is computed with the same terminal-newline normalization used by `verify-zotero-note`, because Zotero readback may trim or normalize trailing newlines. Treat the hash as the canonical readback check; do not recompute it with ad hoc shell commands.
 
 For single-paper summaries, single-paper summary writes always create a new versioned Zotero child note. Do not update an existing `[Codex Summary]` note for normal paper summaries. The recommended daily command is `prepare-write-candidate <run_dir> --paper-title "<paper title>" --generated-date YYYY-MM-DD`; it runs read-only `refresh-live-notes`, computes the next suffix, regenerates `note.md` and `note.html`, writes previews, runs `gate-run`, and writes `write-payload.json`. The lower-level debug chain is `refresh-live-notes -> next-version-suffix -> finalize-note --html-output -> note-tags -> preview-note note.md/note.html -> gate-run -> prepare-write-payload`. The actual persistent write remains `zotero-mcp write_note(action="create", parentKey=<payload parentKey>, content=<contents of note.html>, tags=<payload tags>)`.
 

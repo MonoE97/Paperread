@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Implementation Status:** Completed and merged to `main` on 2026-06-23. The durable workflow is now documented in `README.md`, `AGENTS.md`, `skills/zotero-paper-summary/SKILL.md`, and `docs/references/zotero-batch-write-runbook.md`. Current code includes `prepare-write-candidate`, read-only `refresh-live-notes`, `verify-zotero-note`, canonical note HTML hashing, stale payload removal, and strict `write-payload.json` output path checks.
+
 **Goal:** Make future Zotero paper-summary writes smooth and repeatable by generating a fully checked versioned write candidate from any run directory before the agent calls Zotero MCP.
 
 **Architecture:** Keep all persistent Zotero writes behind `zotero-mcp write_note`; add a project-local read-only Zotero local API client only for live child-note discovery and note verification. Add a one-command `prepare-write-candidate` workflow that runs live refresh, suffix calculation, note regeneration, preview, gate, and payload generation in a fixed order, so daily use does not depend on hand-running a fragile command chain. The write gate must require live note refresh provenance and must verify the generated `note.md`/`note.html` titles match the computed `note_title` before reporting `write_ready`. Historical note migration keeps `write_note(update)` as an explicit migration-only path, but update timeout must stop instead of silently switching write channels.

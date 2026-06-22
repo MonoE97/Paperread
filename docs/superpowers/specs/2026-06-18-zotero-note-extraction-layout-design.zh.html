@@ -279,7 +279,7 @@
     <article>
       <div class="meta">中文阅读版 · 由 docs/superpowers/specs/2026-06-18-zotero-note-extraction-layout-design.zh.md 生成</div>
       <h1 id="zotero-笔记抽取与排版设计">Zotero 笔记抽取与排版设计</h1>
-<p><strong>状态：</strong> 已批准进入实施规划。</p>
+<p><strong>状态：</strong> 已在 <code>main</code> 中实现，完成时间为 2026-06-23；渲染笔记结构后来由 <code>2026-06-18-zotero-note-reading-layout-redesign.md</code> 进一步精简。</p>
 <p><strong>日期：</strong> 2026-06-18</p>
 <p><strong>范围决定：</strong> 只优化 Zotero-first 论文笔记的内容、排版和抽取质量。本项目不创建 ResearchWiki 风格的 <code>wiki/</code>、<code>synthesis/</code> 或 <code>memory/</code> 层。</p>
 <h2 id="摘要">摘要</h2>
@@ -288,7 +288,7 @@
 <li>从论文 PDF 构建更结构化的 source context。</li>
 <li>基于该 source context 渲染双层 Zotero 子笔记。</li>
 </ol>
-<p>第一层通过 section-aware 和 table/value-aware context 提高证据质量。第二层优化最终笔记，让首屏支持快速阅读决策，同时在后续章节保留学习笔记、图表、局限和证据附录。</p>
+<p>第一层通过 section-aware 和 table/value-aware context 提高证据质量。第二层优化最终笔记，让首屏支持快速阅读决策，同时在后续章节保留学习笔记、图表、局限和可复用阅读线索。后续 reading-layout redesign 已把 evidence/review appendices 留在 JSON artifacts 和 write gates 中，不再作为专门的 Zotero note sections 渲染。</p>
 <p>工作流仍保持 Zotero-first：</p>
 <ul>
 <li>Zotero 访问仍然封装在 <code>zotero-mcp</code> 后面。</li>

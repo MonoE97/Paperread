@@ -12,6 +12,7 @@
 - `skills/`：Codex skill 定义。
 - `docs/references/`：外部项目参考、设计取舍记录和可复用 runbook。
 - `docs/superpowers/plans/`：实施计划。
+- `docs/superpowers/specs/`：需求规格和设计评审记录；历史 plan/spec 不等于当前操作入口，当前准则以 `README.md`、`AGENTS.md` 和 repo-local `skills/` 为准。
 
 ## 运行产物与证据边界
 
@@ -69,7 +70,9 @@ uv run zotero-paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/zot
 - `prepare-item`、`extract-pdf`、`extract-figures` 默认处理完整 PDF；只有用户明确要求快速调试、预览或截断抽取时才传 `--max-pages <N>`。
 - 真实写入 Zotero 前，必须展示 `note.md` 与 `note.html` 预览和目标 Zotero item 标题。
 - 真实写入 Zotero 前必须完成最终门禁：推荐运行 `prepare-write-candidate`；等价底层链路为 `validate-summary-json -> apply-review -> lint-summary -> validate-trusted-summary -> refresh-live-notes -> next-version-suffix -> finalize-note --html-output -> note-tags -> preview-note note.md/note.html -> gate-run -> prepare-write-payload`，且 `gate-report.json` 必须为 `write_ready`。
+- `prepare-write-candidate` 是日常写入准备入口；它会删除 stale `write-payload.json`，只在 gate 为 `write_ready` 时重新生成 payload。
+- `prepare-write-payload` 的输出必须是当前 run 目录下的 `write-payload.json`；禁止把 payload 写到 `gate-report.json`、`note.html`、非 `write-payload.json` 文件名或 gate run 目录之外。
 - 真实写入 Zotero 时，只能调用 `zotero-mcp write_note(action="create", parentKey=<payload parentKey>, content=<contents of note.html>, tags=<payload tags>)`；`content` 必须使用 `note.html` 的内容，避免 Markdown 表格在 Zotero 中被当作普通文本。
-- 真实写入 Zotero 后必须用只读 `verify-zotero-note` 回读校验 parent、标题、必需章节、标签、最小长度和 `contentSha256`。
+- 真实写入 Zotero 后必须用只读 `verify-zotero-note` 回读校验 parent、标题、必需章节、标签、最小长度和 `contentSha256`；`contentSha256` 使用项目内 canonical hash，不要用临时 shell hash 替代。
 - single-paper summary writes always create a new versioned Zotero child note；不 update 既有 `[Codex Summary]` 总结 note。真实写入前必须运行 `prepare-write-candidate` 或等价底层链路，用只读 live note refresh 计算同日后缀；同日重复创建时使用 `[Codex Summary] <paper title> - YYYY-MM-DD (v2)`、`(v3)` 等标题后缀创建新版本。
 - Zotero local API is read-only in this project；只允许用于 live 子笔记标题/正文读取和写后验证，禁止通过 Zotero local API、SQLite 或其他非 MCP 路径写入 Zotero。

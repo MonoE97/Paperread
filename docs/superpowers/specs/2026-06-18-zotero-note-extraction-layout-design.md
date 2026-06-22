@@ -1,6 +1,6 @@
 # Zotero Note Extraction and Layout Design
 
-**Status:** Approved for implementation planning.
+**Status:** Implemented in `main` by 2026-06-23, with rendered-note structure later refined by `2026-06-18-zotero-note-reading-layout-redesign.md`.
 
 **Date:** 2026-06-18
 
@@ -13,7 +13,7 @@ This design upgrades `Zotero_paperread` from plain PDF text plus a structured no
 1. Build a more structured source context from the paper PDF.
 2. Render a two-layer Zotero child note from that source context.
 
-The first layer improves evidence quality by adding section-aware and table/value-aware context. The second layer improves the final note so the first screen supports quick reading decisions, while later sections preserve study notes, figures, limitations, and evidence appendices.
+The first layer improves evidence quality by adding section-aware and table/value-aware context. The second layer improves the final note so the first screen supports quick reading decisions, while later sections preserve study notes, figures, limitations, and reusable reading cues. The later reading-layout redesign keeps evidence and review appendices in JSON artifacts and write gates instead of rendering them as dedicated Zotero note sections.
 
 The workflow remains Zotero-first:
 

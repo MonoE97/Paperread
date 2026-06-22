@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Implementation Status:** Completed and merged to `main` by 2026-06-23. Current behavior includes section-aware extraction, conservative table/value candidates, `section_context.md`, canonical evidence locator linting, and the later 0-7 reading-thread rendered note layout. Evidence/review appendices are retained in JSON artifacts and gates rather than rendered as dedicated Zotero note sections.
+
 **Goal:** Implement the approved Zotero note extraction and layout design: additive section/table-aware PDF extraction, `section_context.md`, canonical evidence locator linting, and the two-layer Zotero child note layout.
 
 **Architecture:** Keep PDF structure detection deterministic and conservative inside `src/zotero_paperread/pdf_extract.py`; keep artifact wiring inside `src/zotero_paperread/workflow.py`; keep semantic judgement in the Codex-generated `summary.json` and review pass. Rendering remains permissive for old summaries, while lint and write gates continue to reject untrusted evidence sources before Zotero writes.

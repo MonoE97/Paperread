@@ -20,7 +20,7 @@ Workers are local artifact producers. They receive one frozen manifest item or a
 
 ## Successful Output Paths
 
-A successful worker should leave these files for coordinator gates:
+A successful worker should leave these inputs for coordinator gates:
 
 - `item-details.json`
 - `context.md`
@@ -28,7 +28,12 @@ A successful worker should leave these files for coordinator gates:
 - `figure_context.md`
 - `summary.json`
 - `review.json`
-- `note.md`
+
+The coordinator owns the write-candidate step. It refreshes live notes, computes
+the version suffix, regenerates `note.md` and `note.html`, writes
+`note-tags.json`, runs `gate-run`, and creates `<run_dir>/write-payload.json`.
+Workers may render a dry-run `note.md` for review, but they must not treat it as
+the final write candidate.
 
 If any required input is missing, the worker should stop with a short `blocked_reason` and put detailed diagnostics in `error_detail`.
 

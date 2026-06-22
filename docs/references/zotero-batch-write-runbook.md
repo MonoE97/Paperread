@@ -161,13 +161,16 @@ prepare-write-payload records parentKey, tags, note_html_path, contentLength, an
 user has confirmed the write-ready preview
 ```
 
-Recommended per-item command sequence:
+Recommended per-item command sequence. For single-paper interactive work, prefer
+`prepare-write-candidate`; in batch mode the coordinator may run the equivalent
+expanded chain for clearer manifest state transitions:
 
 ```bash
 uv run zotero-paperread validate-summary-json <run_dir>/summary.json
 uv run zotero-paperread apply-review <run_dir>/summary.json <run_dir>/review.json
 uv run zotero-paperread lint-summary <run_dir>/summary.json
 uv run zotero-paperread validate-trusted-summary <run_dir>/summary.json
+uv run zotero-paperread refresh-live-notes <run_dir>/item-details.json --output <run_dir>/item-details.json
 VERSION_SUFFIX="$(uv run zotero-paperread next-version-suffix <run_dir>/item-details.json --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE")"
 uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --generated-date "$GENERATED_DATE" --version-suffix "$VERSION_SUFFIX" --output <run_dir>/note.md --html-output <run_dir>/note.html
 uv run zotero-paperread note-tags <run_dir>/summary.json
@@ -177,6 +180,18 @@ uv run zotero-paperread gate-run <run_dir> --paper-title "$PAPER_TITLE" --genera
 uv run zotero-paperread prepare-write-payload <run_dir>/gate-report.json --output <run_dir>/write-payload.json
 ```
 
+The shorter wrapper is:
+
+```bash
+uv run zotero-paperread prepare-write-candidate <run_dir> --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE"
+```
+
+`prepare-write-candidate` removes any stale `write-payload.json` before running
+the gate and writes a new payload only when the run is `write_ready`.
+`prepare-write-payload` must write exactly to the gate run directory's
+`write-payload.json`; it rejects output paths that are the gate report itself,
+the note HTML file, a different filename, or a different run directory.
+
 Write only through Zotero MCP:
 
 ```text
@@ -185,6 +200,11 @@ write_note(action="create", parentKey=<payload parentKey>, content=<contents of 
 
 Never overwrite an existing Codex summary. Same-day repeats must use
 `next-version-suffix` and create a new child note.
+
+After each successful `write_note(action="create", ...)`, verify the new note
+with `verify-zotero-note` using the payload's `required_readback_checks`.
+The `contentSha256` check uses the project canonical note HTML hash, which
+matches Zotero readback's terminal-newline normalization.
 
 ## Content Migration Gate
 

@@ -1,6 +1,6 @@
 # Zotero Note Reading Layout Redesign
 
-**Status:** Approved for implementation.
+**Status:** Implemented in `main` by 2026-06-23.
 
 **Date:** 2026-06-18
 

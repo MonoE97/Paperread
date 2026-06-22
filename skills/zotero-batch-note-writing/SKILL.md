@@ -25,8 +25,10 @@ Use this skill to coordinate a batch run across Zotero collection items. It is o
 7. Treat WeChat/news/blog links as secondary cross-check material; never cite them in `evidence_summary`.
 8. Run central per-item gate chain: `create-run -> prepare-item -> validate-summary-json -> apply-review -> lint-summary -> validate-trusted-summary -> refresh-live-notes -> next-version-suffix -> finalize-note --html-output -> note-tags -> preview-note -> gate-run -> prepare-write-payload`. For single-item interactive work, prefer the wrapper `prepare-write-candidate`.
 9. Generate `write-preview.md` and stop for explicit user confirmation.
-10. After confirmation, serialize `write_note` and verify each with `get_item_details`.
+10. After confirmation, serialize `write_note(action="create", ...)` and verify each written note with `verify-zotero-note` using `write-payload.json` readback checks.
 11. Generate compact `write-report.md`.
+
+`prepare-write-payload` must write exactly to `<run_dir>/write-payload.json`; a payload path outside the gate run directory, a non-`write-payload.json` filename, `gate-report.json`, or `note.html` is invalid. If a rerun blocks, stale payloads must not be reused.
 
 ## State Model
 

@@ -1,6 +1,6 @@
 # Zotero 笔记抽取与排版设计
 
-**状态：** 已批准进入实施规划。
+**状态：** 已在 `main` 中实现，完成时间为 2026-06-23；渲染笔记结构后来由 `2026-06-18-zotero-note-reading-layout-redesign.md` 进一步精简。
 
 **日期：** 2026-06-18
 
@@ -13,7 +13,7 @@
 1. 从论文 PDF 构建更结构化的 source context。
 2. 基于该 source context 渲染双层 Zotero 子笔记。
 
-第一层通过 section-aware 和 table/value-aware context 提高证据质量。第二层优化最终笔记，让首屏支持快速阅读决策，同时在后续章节保留学习笔记、图表、局限和证据附录。
+第一层通过 section-aware 和 table/value-aware context 提高证据质量。第二层优化最终笔记，让首屏支持快速阅读决策，同时在后续章节保留学习笔记、图表、局限和可复用阅读线索。后续 reading-layout redesign 已把 evidence/review appendices 留在 JSON artifacts 和 write gates 中，不再作为专门的 Zotero note sections 渲染。
 
 工作流仍保持 Zotero-first：
 
