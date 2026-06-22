@@ -1047,3 +1047,30 @@ def test_verify_zotero_note_command_reports_pass(monkeypatch) -> None:
     report = json.loads(result.stdout)
     assert report["status"] == "passed"
     assert report["noteKey"] == "N1"
+
+
+def test_prepare_write_candidate_command_writes_payload(monkeypatch, tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    def fake_prepare_write_candidate(run_dir_arg: Path, **kwargs):
+        assert run_dir_arg == run_dir
+        assert kwargs["paper_title"] == "Paper"
+        assert kwargs["generated_date"] == "2026-06-22"
+        return {"status": "write_ready", "write_payload_path": str(run_dir / "write-payload.json")}
+
+    monkeypatch.setattr("zotero_paperread.cli.prepare_write_candidate", fake_prepare_write_candidate)
+    result = CliRunner().invoke(
+        app,
+        [
+            "prepare-write-candidate",
+            str(run_dir),
+            "--paper-title",
+            "Paper",
+            "--generated-date",
+            "2026-06-22",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["status"] == "write_ready"

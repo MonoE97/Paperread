@@ -21,6 +21,7 @@ from zotero_paperread.review import apply_review_to_summary
 from zotero_paperread.runs import allocate_run_dir, write_run_manifest
 from zotero_paperread.summary_lint import lint_summary
 from zotero_paperread.workflow import prepare_item_bundle
+from zotero_paperread.write_candidate import prepare_write_candidate
 from zotero_paperread.write_payload import build_write_payload
 from zotero_paperread.zotero_details import next_version_suffix_from_details
 from zotero_paperread.zotero_live import (
@@ -382,6 +383,29 @@ def prepare_write_payload_command(
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@app.command("prepare-write-candidate")
+def prepare_write_candidate_command(
+    run_dir: Path,
+    paper_title: str = typer.Option(..., "--paper-title", help="Paper title used in generated note titles."),
+    generated_date: str = typer.Option(..., "--generated-date", help="Generated note date in YYYY-MM-DD form."),
+    base_url: str = typer.Option("http://127.0.0.1:23119", "--base-url", help="Zotero local API base URL."),
+) -> None:
+    """Prepare a fully gated create-note payload without writing to Zotero."""
+    try:
+        result = prepare_write_candidate(
+            run_dir,
+            paper_title=paper_title,
+            generated_date=generated_date,
+            base_url=base_url,
+        )
+    except Exception as exc:
+        console.print(f"prepare_write_candidate_failed: {exc}", soft_wrap=True)
+        raise typer.Exit(1)
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+    if result.get("status") != "write_ready":
+        raise typer.Exit(1)
 
 
 @app.command("apply-review")
