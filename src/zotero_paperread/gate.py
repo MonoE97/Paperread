@@ -15,6 +15,8 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _has_live_notes_refresh(item_details: dict[str, Any], *, parent_key: str) -> bool:
+    if not parent_key:
+        return False
     paperread = item_details.get("_paperread", {})
     if not isinstance(paperread, dict):
         return False
@@ -27,7 +29,7 @@ def _has_live_notes_refresh(item_details: dict[str, Any], *, parent_key: str) ->
     return (
         live_notes.get("status") == "refreshed"
         and live_notes.get("source") == "zotero_local_api_readonly"
-        and live_notes.get("item_key") == parent_key
+        and str(live_notes.get("item_key", "")).strip() == parent_key
         and bool(str(live_notes.get("refreshed_at", "")).strip())
     )
 
@@ -109,7 +111,9 @@ def build_gate_report(run_dir: Path, *, paper_title: str, generated_date: str) -
     if review.get("needs_improvement") is not False:
         blockers.append("review.json needs_improvement is not false")
 
-    parent_key = str(item_details.get("key", ""))
+    parent_key = str(item_details.get("key", "")).strip()
+    if item_details and not parent_key:
+        blockers.append("item-details.json key is required")
     if item_details and not _has_live_notes_refresh(item_details, parent_key=parent_key):
         blockers.append("item-details.json live_notes refresh missing or stale")
 

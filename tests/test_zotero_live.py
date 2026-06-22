@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -195,3 +196,45 @@ def test_verify_note_snapshot_requires_h1_title_match() -> None:
         )
 
     assert "title mismatch: expected [Codex Summary] Paper - 2026-06-22 (v2), got Wrong Title" in exc.value.errors
+
+
+def test_verify_note_snapshot_checks_expected_content_hash() -> None:
+    note = "<h1>[Codex Summary] Paper - 2026-06-22 (v2)</h1><h2>0. 阅读结论</h2><p>body</p>"
+    snapshot = {
+        "key": "N1",
+        "data": {
+            "itemType": "note",
+            "parentItem": "P1",
+            "note": note,
+            "tags": [{"tag": "codex-summary"}, {"tag": "paper-summary"}],
+        },
+    }
+    content_hash = hashlib.sha256(note.encode("utf-8")).hexdigest()
+
+    report = verify_note_snapshot(
+        snapshot,
+        expected_parent="P1",
+        expected_title="[Codex Summary] Paper - 2026-06-22 (v2)",
+        required_headings=["0. 阅读结论"],
+        forbidden_headings=[],
+        expected_tags=["codex-summary", "paper-summary"],
+        min_content_length=20,
+        expected_content_sha256=content_hash,
+    )
+
+    assert report["status"] == "passed"
+    assert report["contentSha256"] == content_hash
+
+    with pytest.raises(LiveNoteVerificationError) as exc:
+        verify_note_snapshot(
+            snapshot,
+            expected_parent="P1",
+            expected_title="[Codex Summary] Paper - 2026-06-22 (v2)",
+            required_headings=["0. 阅读结论"],
+            forbidden_headings=[],
+            expected_tags=["codex-summary", "paper-summary"],
+            min_content_length=20,
+            expected_content_sha256="0" * 64,
+        )
+
+    assert f"content hash mismatch: expected {'0' * 64}, got {content_hash}" in exc.value.errors

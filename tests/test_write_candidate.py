@@ -87,6 +87,29 @@ def test_prepare_write_candidate_refreshes_live_notes_and_writes_payload(tmp_pat
     ]
 
 
+def test_prepare_write_candidate_removes_stale_payload_when_blocked(tmp_path: Path) -> None:
+    run_dir = prepare_run_dir(tmp_path, title="Paper")
+    write_json(run_dir / "review.json", {"review_status": "failed", "needs_improvement": True})
+    stale_payload_path = run_dir / "write-payload.json"
+    write_json(stale_payload_path, {"action": "create", "parentKey": "stale"})
+
+    def fake_fetch_item_children_notes(item_key: str, *, base_url: str):
+        return []
+
+    result = prepare_write_candidate(
+        run_dir,
+        paper_title="Paper",
+        generated_date="2026-06-22",
+        base_url="http://zotero.test",
+        fetch_live_notes=fake_fetch_item_children_notes,
+        refreshed_at="2026-06-22T12:00:00Z",
+    )
+
+    assert result["status"] == "blocked"
+    assert "review.json needs_improvement is not false" in result["blockers"]
+    assert not stale_payload_path.exists()
+
+
 @pytest.mark.parametrize(
     ("live_titles", "expected_suffix"),
     [

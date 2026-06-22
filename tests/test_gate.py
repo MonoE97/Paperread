@@ -97,6 +97,29 @@ def test_build_gate_report_blocks_without_live_note_refresh(tmp_path: Path) -> N
     assert "item-details.json live_notes refresh missing or stale" in report["blockers"]
 
 
+def test_build_gate_report_blocks_missing_parent_key(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    write_json(run_dir / "summary.json", trusted_summary())
+    write_json(run_dir / "review.json", {"review_status": "passed_with_caveats", "needs_improvement": False})
+    write_json(
+        run_dir / "item-details.json",
+        {
+            "key": "",
+            "title": "Example Paper",
+            "notes": [],
+            **live_notes_enrichment(item_key="", note_count=0),
+        },
+    )
+    (run_dir / "note.md").write_text("# [Codex Summary] Example Paper - 2026-05-06\n", encoding="utf-8")
+    (run_dir / "note.html").write_text("<h1>[Codex Summary] Example Paper - 2026-05-06</h1>", encoding="utf-8")
+
+    report = build_gate_report(run_dir, paper_title="Example Paper", generated_date="2026-05-06")
+
+    assert report["status"] == "blocked"
+    assert "item-details.json key is required" in report["blockers"]
+    assert "item-details.json live_notes refresh missing or stale" in report["blockers"]
+
+
 def test_build_gate_report_uses_live_notes_for_version_suffix(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     write_json(run_dir / "summary.json", trusted_summary())

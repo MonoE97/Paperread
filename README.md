@@ -210,7 +210,7 @@ target Zotero item title has been shown
 
 Actual Zotero write-through still requires explicit write intent and uses only `zotero-mcp write_note`. Use `content=<contents of note.html>` for writes so Markdown tables are already converted to Zotero-renderable HTML.
 
-`prepare-write-payload does not write to Zotero`. It records `parentKey`, tags, `note_html_path`, `contentLength`, and readback checks. The actual write remains an explicit `zotero-mcp write_note` action performed by the agent after the gate report is `write_ready`.
+`prepare-write-payload does not write to Zotero`. It records `parentKey`, tags, `note_html_path`, `contentLength`, `contentSha256`, and readback checks. The actual write remains an explicit `zotero-mcp write_note` action performed by the agent after the gate report is `write_ready`.
 
 For single-paper summaries, single-paper summary writes always create a new versioned Zotero child note. Do not update an existing `[Codex Summary]` note for normal paper summaries. The recommended daily command is `prepare-write-candidate <run_dir> --paper-title "<paper title>" --generated-date YYYY-MM-DD`; it runs read-only `refresh-live-notes`, computes the next suffix, regenerates `note.md` and `note.html`, writes previews, runs `gate-run`, and writes `write-payload.json`. The lower-level debug chain is `refresh-live-notes -> next-version-suffix -> finalize-note --html-output -> note-tags -> preview-note note.md/note.html -> gate-run -> prepare-write-payload`. The actual persistent write remains `zotero-mcp write_note(action="create", parentKey=<payload parentKey>, content=<contents of note.html>, tags=<payload tags>)`.
 
@@ -235,6 +235,7 @@ uv run zotero-paperread verify-zotero-note <note_key> \
   --forbidden-heading "11. 补充优化记录" \
   --expected-tag codex-summary \
   --expected-tag paper-summary \
+  --expected-content-sha256 <payload required_readback_checks.contentSha256> \
   --min-content-length <payload required_readback_checks.contentLengthAtLeast>
 ```
 

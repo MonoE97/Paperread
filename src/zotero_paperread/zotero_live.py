@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from html import escape
@@ -165,6 +166,7 @@ def verify_note_snapshot(
     forbidden_headings: list[str],
     expected_tags: list[str],
     min_content_length: int,
+    expected_content_sha256: str = "",
 ) -> dict[str, Any]:
     data = snapshot.get("data", {})
     if not isinstance(data, dict):
@@ -176,6 +178,7 @@ def verify_note_snapshot(
         if isinstance(tag, dict) and str(tag.get("tag", "")).strip()
     ]
     title, headings = _parse_headings(note)
+    content_sha256 = hashlib.sha256(note.encode("utf-8")).hexdigest()
     errors: list[str] = []
 
     if data.get("itemType") != "note":
@@ -187,6 +190,9 @@ def verify_note_snapshot(
         errors.append(f"title mismatch: expected {expected_title}, got {title}")
     if len(note) < min_content_length:
         errors.append(f"content too short: expected at least {min_content_length}, got {len(note)}")
+    expected_hash = expected_content_sha256.strip()
+    if expected_hash and content_sha256 != expected_hash:
+        errors.append(f"content hash mismatch: expected {expected_hash}, got {content_sha256}")
     for heading in required_headings:
         if heading not in headings:
             errors.append(f"missing required heading: {heading}")
@@ -204,6 +210,7 @@ def verify_note_snapshot(
         "parentKey": parent,
         "title": title,
         "contentLength": len(note),
+        "contentSha256": content_sha256,
         "headings": headings,
         "tags": tags,
     }

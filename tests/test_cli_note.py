@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -1047,6 +1048,48 @@ def test_verify_zotero_note_command_reports_pass(monkeypatch) -> None:
     report = json.loads(result.stdout)
     assert report["status"] == "passed"
     assert report["noteKey"] == "N1"
+
+
+def test_verify_zotero_note_command_checks_content_hash(monkeypatch) -> None:
+    note = "<h1>[Codex Summary] Paper - 2026-06-22 (v2)</h1><h2>0. 阅读结论</h2><p>body</p>"
+
+    def fake_fetch_note_snapshot(note_key: str, *, base_url: str):
+        assert note_key == "N1"
+        return {
+            "key": "N1",
+            "data": {
+                "itemType": "note",
+                "parentItem": "P1",
+                "note": note,
+                "tags": [{"tag": "codex-summary"}, {"tag": "paper-summary"}],
+            },
+        }
+
+    monkeypatch.setattr("zotero_paperread.cli.fetch_note_snapshot", fake_fetch_note_snapshot)
+    result = CliRunner().invoke(
+        app,
+        [
+            "verify-zotero-note",
+            "N1",
+            "--expected-parent",
+            "P1",
+            "--expected-title",
+            "[Codex Summary] Paper - 2026-06-22 (v2)",
+            "--required-heading",
+            "0. 阅读结论",
+            "--expected-tag",
+            "codex-summary",
+            "--expected-content-sha256",
+            "0" * 64,
+        ],
+    )
+
+    assert result.exit_code == 1
+    report = json.loads(result.stdout)
+    assert report["contentSha256"] == hashlib.sha256(note.encode("utf-8")).hexdigest()
+    assert report["errors"] == [
+        f"content hash mismatch: expected {'0' * 64}, got {hashlib.sha256(note.encode('utf-8')).hexdigest()}"
+    ]
 
 
 def test_prepare_write_candidate_command_writes_payload(monkeypatch, tmp_path: Path) -> None:

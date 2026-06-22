@@ -511,6 +511,7 @@ def verify_zotero_note_command(
     required_heading: list[str] = typer.Option([], "--required-heading", help="Required h2 heading text."),
     forbidden_heading: list[str] = typer.Option([], "--forbidden-heading", help="Forbidden h2 heading text."),
     expected_tag: list[str] = typer.Option([], "--expected-tag", help="Tag that must be present on the note."),
+    expected_content_sha256: str = typer.Option("", "--expected-content-sha256", help="Expected note HTML SHA-256."),
     min_content_length: int = typer.Option(0, "--min-content-length", min=0, help="Minimum note HTML length."),
     base_url: str = typer.Option("http://127.0.0.1:23119", "--base-url", help="Zotero local API base URL."),
 ) -> None:
@@ -525,6 +526,7 @@ def verify_zotero_note_command(
             forbidden_headings=forbidden_heading,
             expected_tags=expected_tag,
             min_content_length=min_content_length,
+            expected_content_sha256=expected_content_sha256,
         )
     except LiveNoteVerificationError as exc:
         typer.echo(json.dumps(exc.report, ensure_ascii=False, indent=2))

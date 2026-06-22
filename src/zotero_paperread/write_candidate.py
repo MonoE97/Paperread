@@ -46,6 +46,8 @@ def prepare_write_candidate(
     note_html_path = run_dir / "note.html"
     gate_report_path = run_dir / "gate-report.json"
     write_payload_path = run_dir / "write-payload.json"
+    if write_payload_path.exists():
+        write_payload_path.unlink()
 
     details = _read_json(item_details_path)
     item_key = str(details.get("key", "")).strip()

@@ -158,6 +158,7 @@ def test_write_gate_documents_prepare_candidate_and_readback_order() -> None:
         'write_note(action="create"',
         "verify-zotero-note",
         "--expected-title",
+        "--expected-content-sha256",
     ]
     for text in (readme, skill):
         section = text[text.index("prepare-write-candidate") :]
