@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,66 @@ from zotero_paperread.zotero_details import next_version_suffix_from_details
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _has_live_notes_refresh(item_details: dict[str, Any], *, parent_key: str) -> bool:
+    paperread = item_details.get("_paperread", {})
+    if not isinstance(paperread, dict):
+        return False
+    enrichment = paperread.get("enrichment", {})
+    if not isinstance(enrichment, dict):
+        return False
+    live_notes = enrichment.get("live_notes", {})
+    if not isinstance(live_notes, dict):
+        return False
+    return (
+        live_notes.get("status") == "refreshed"
+        and live_notes.get("source") == "zotero_local_api_readonly"
+        and live_notes.get("item_key") == parent_key
+        and bool(str(live_notes.get("refreshed_at", "")).strip())
+    )
+
+
+class _H1Parser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._inside_h1 = False
+        self._parts: list[str] = []
+        self.title = ""
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() == "h1":
+            self._inside_h1 = True
+            self._parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._inside_h1:
+            self._parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "h1" and self._inside_h1:
+            self.title = " ".join("".join(self._parts).split())
+            self._inside_h1 = False
+            self._parts = []
+
+
+def _markdown_h1_title(path: Path) -> str:
+    if not path.exists():
+        return ""
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip()
+    return ""
+
+
+def _html_h1_title(path: Path) -> str:
+    if not path.exists():
+        return ""
+    parser = _H1Parser()
+    parser.feed(path.read_text(encoding="utf-8"))
+    parser.close()
+    return parser.title
 
 
 def build_gate_report(run_dir: Path, *, paper_title: str, generated_date: str) -> dict[str, Any]:
@@ -48,6 +109,10 @@ def build_gate_report(run_dir: Path, *, paper_title: str, generated_date: str) -
     if review.get("needs_improvement") is not False:
         blockers.append("review.json needs_improvement is not false")
 
+    parent_key = str(item_details.get("key", ""))
+    if item_details and not _has_live_notes_refresh(item_details, parent_key=parent_key):
+        blockers.append("item-details.json live_notes refresh missing or stale")
+
     version_suffix = ""
     if item_details:
         version_suffix = next_version_suffix_from_details(
@@ -55,6 +120,16 @@ def build_gate_report(run_dir: Path, *, paper_title: str, generated_date: str) -
             paper_title=paper_title,
             generated_date=generated_date,
         )
+    note_title = f"[Codex Summary] {paper_title} - {generated_date}{version_suffix}"
+
+    if note_md_path.exists():
+        md_title = _markdown_h1_title(note_md_path)
+        if md_title != note_title:
+            blockers.append(f"note.md title mismatch: expected {note_title}, got {md_title}")
+    if note_html_path.exists():
+        html_title = _html_h1_title(note_html_path)
+        if html_title != note_title:
+            blockers.append(f"note.html h1 mismatch: expected {note_title}, got {html_title}")
 
     tags = build_note_labels(summary) if summary else []
 
@@ -62,11 +137,11 @@ def build_gate_report(run_dir: Path, *, paper_title: str, generated_date: str) -
         "status": "blocked" if blockers else "write_ready",
         "blockers": blockers,
         "run_dir": str(run_dir),
-        "parentKey": str(item_details.get("key", "")),
+        "parentKey": parent_key,
         "paper_title": paper_title,
         "generated_date": generated_date,
         "version_suffix": version_suffix,
-        "note_title": f"[Codex Summary] {paper_title} - {generated_date}{version_suffix}",
+        "note_title": note_title,
         "note_md_path": str(note_md_path),
         "note_html_path": str(note_html_path),
         "tags": tags,
