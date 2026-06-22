@@ -114,3 +114,29 @@ def test_docs_describe_section_context_and_two_layer_note_contract() -> None:
         assert "author_stated_limitations" in text
         assert "inferred_limits" in text
         assert "potential_gaps" in text
+
+
+def test_single_paper_write_contract_uses_versioned_create_only() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    skill = (PROJECT_ROOT / "skills" / "zotero-paper-summary" / "SKILL.md").read_text(encoding="utf-8")
+    batch_skill = (PROJECT_ROOT / "skills" / "zotero-batch-note-writing" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    agents = (PROJECT_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+
+    required = [
+        "single-paper summary writes always create a new versioned Zotero child note",
+        "Zotero local API is read-only in this project",
+        "prepare-write-candidate",
+        "refresh-live-notes",
+        'write_note(action="create"',
+    ]
+    for text in (readme, skill, agents):
+        for phrase in required:
+            assert phrase in text
+
+    assert 'write_note(action="update"' in readme
+    assert "historical note migration" in readme
+    assert "stop and report the failed update readback" in readme
+    assert "refresh-live-notes" in batch_skill
+    assert "prepare-write-payload" in batch_skill

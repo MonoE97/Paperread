@@ -170,7 +170,7 @@ The capture script waits up to `60000` ms for browser navigation and non-empty p
 
 The workflow asks Codex to classify paper type, assign trust status, attach compact evidence pointers, and run a second-pass note quality review before Zotero write-through. If review finds fixable omissions, Codex may perform one bounded improvement pass by re-reading only the current run directory artifacts.
 
-After generating `review.json`, the final write-through gate order is:
+After generating `review.json`, the recommended final write-through preparation for a single-paper summary is:
 
 ```bash
 uv run zotero-paperread validate-summary-json <run_dir>/summary.json
@@ -179,11 +179,18 @@ uv run zotero-paperread lint-summary <run_dir>/summary.json
 uv run zotero-paperread validate-trusted-summary <run_dir>/summary.json
 PAPER_TITLE="<paper title>"
 GENERATED_DATE="<YYYY-MM-DD>"
+uv run zotero-paperread prepare-write-candidate <run_dir> --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE"
+```
+
+The lower-level debug chain inside `prepare-write-candidate` is:
+
+```bash
+uv run zotero-paperread refresh-live-notes <run_dir>/item-details.json --output <run_dir>/item-details.json
 VERSION_SUFFIX="$(uv run zotero-paperread next-version-suffix <run_dir>/item-details.json --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE")"
 uv run zotero-paperread finalize-note <run_dir>/metadata.json <run_dir>/summary.json --generated-date "$GENERATED_DATE" --version-suffix "$VERSION_SUFFIX" --output <run_dir>/note.md --html-output <run_dir>/note.html
-NOTE_TAGS_JSON="$(uv run zotero-paperread note-tags <run_dir>/summary.json)"
-uv run zotero-paperread preview-note <run_dir>/note.md
-uv run zotero-paperread preview-note <run_dir>/note.html
+uv run zotero-paperread note-tags <run_dir>/summary.json
+uv run zotero-paperread preview-note <run_dir>/note.md --output <run_dir>/preview-note-md.txt
+uv run zotero-paperread preview-note <run_dir>/note.html --output <run_dir>/preview-note-html.txt
 uv run zotero-paperread gate-run <run_dir> --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE" --output <run_dir>/gate-report.json
 uv run zotero-paperread prepare-write-payload <run_dir>/gate-report.json --output <run_dir>/write-payload.json
 ```
@@ -205,7 +212,11 @@ Actual Zotero write-through still requires explicit write intent and uses only `
 
 `prepare-write-payload does not write to Zotero`. It records `parentKey`, tags, `note_html_path`, `contentLength`, and readback checks. The actual write remains an explicit `zotero-mcp write_note` action performed by the agent after the gate report is `write_ready`.
 
-If updating an existing note with `write_note(action="update", ...)` times out, read the Zotero note back before taking further action. When readback still shows old content, do not use Zotero HTTP writes, SQLite writes, or any other alternate write path. Instead, refresh live child-note titles, compute the next same-day suffix, regenerate `note.md` / `note.html` with that suffix, rerun `gate-run`, and create a new versioned child note through `write_note(action="create", ...)`.
+For single-paper summaries, single-paper summary writes always create a new versioned Zotero child note. Do not update an existing `[Codex Summary]` note for normal paper summaries. The recommended daily command is `prepare-write-candidate <run_dir> --paper-title "<paper title>" --generated-date YYYY-MM-DD`; it runs read-only `refresh-live-notes`, computes the next suffix, regenerates `note.md` and `note.html`, writes previews, runs `gate-run`, and writes `write-payload.json`. The lower-level debug chain is `refresh-live-notes -> next-version-suffix -> finalize-note --html-output -> note-tags -> preview-note note.md/note.html -> gate-run -> prepare-write-payload`. The actual persistent write remains `zotero-mcp write_note(action="create", parentKey=<payload parentKey>, content=<contents of note.html>, tags=<payload tags>)`.
+
+Zotero local API is read-only in this project. It may be used by `refresh-live-notes` and `verify-zotero-note`, but it must not be used for PUT, PATCH, POST, DELETE, SQLite mutation, or any persistent write.
+
+For historical note migration, `write_note(action="update", ...)` is still allowed after explicit confirmation because the task is a content-format migration, not a new paper summary. If a migration update times out and readback still shows old content, stop and report the failed update readback; do not create a duplicate migration note unless the user explicitly asks for that separate recovery action.
 
 The rendered note is a reading-thread learning note. It opens with `## 0. 阅读结论` so the first screen shows the 30-second takeaway, reading decision, trust status, main risk, relevance to AI4S / battery / materials research, and recommended sections/figures. The main body then follows `## 1. 论文主张`, `## 2. 方法与设计`, `## 3. 结果可信度`, `## 4. 图表导读`, `## 5. 边界与机会`, `## 6. 我能怎么用`, and `## 7. 术语与检索`. Metadata, evidence chains, review status, and improvement notes remain in JSON artifacts and gate reports instead of being rendered as dedicated Zotero note sections.
 

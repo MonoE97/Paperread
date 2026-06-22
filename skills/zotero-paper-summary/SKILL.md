@@ -126,11 +126,13 @@ uv run zotero-paperread save-item-details <run_dir>/mcp-response.json --output <
    - 如果存在标题以 `[Codex Summary]` 开头、包含 `codex-summary` tag、或明显是本 workflow 创建的 Codex summary note，则默认停止，不继续抽取、总结或写入。
    - 停止时告诉用户已存在的 Codex note 标题和 key；如果无法取得标题，至少返回 note key。
    - 只有当用户明确要求“继续分析”“重新生成”“强制分析”“即使已有也继续”等动作时，才继续执行。继续时仍然创建新版本，不覆盖旧 note。
-   - 如果用户明确要求继续创建新版本，最终写入门禁必须用当前 `<run_dir>/item-details.json` 调用 `next-version-suffix` 计算同日版本后缀：
+   - single-paper summary writes always create a new versioned Zotero child note；不要 update 既有 `[Codex Summary]` 总结 note。
+   - 如果用户明确要求继续创建新版本，最终写入门禁必须运行 `prepare-write-candidate` 或等价底层链路，先用只读 live note refresh 刷新当前 Zotero 子笔记标题，再计算同日版本后缀：
      - 当日第一版：`[Codex Summary] <paper title> - YYYY-MM-DD`
      - 当日第二版：`[Codex Summary] <paper title> - YYYY-MM-DD (v2)`
      - 当日第三版：`[Codex Summary] <paper title> - YYYY-MM-DD (v3)`
-   - 调用 `finalize-note` 时用 `--version-suffix` 传入后缀；当日第一版传空后缀。
+   - 日常写入前先运行 `prepare-write-candidate <run_dir> --paper-title "<paper title>" --generated-date YYYY-MM-DD`，它会用只读 Zotero local API 刷新 live 子笔记标题、计算后缀、重新生成 `note.md`/`note.html`、预览、跑 gate 并生成 `write-payload.json`。
+   - 只有调试底层链路时才手动运行 `refresh-live-notes -> next-version-suffix -> finalize-note --html-output -> note-tags -> preview-note -> gate-run -> prepare-write-payload`。
 
 5. 准备 bundle：
    - 运行：
@@ -451,9 +453,11 @@ target Zotero item title has been shown
    - 如果 `review_status` 为 `failed`，停止并报告审查问题，不写入 Zotero。
    - note 标题由模板生成：`[Codex Summary] <paper title> - YYYY-MM-DD`，同日重复创建时追加 ` (v2)`、` (v3)` 等后缀。
    - note 正文末尾 `Tags:` 和 Zotero note metadata tags 必须使用同一套标签：固定标签 `codex-summary`、`paper-summary`，加上 `summary.json` 中 `note_labels` 归一化后的最多 4 个推断标签。
+   - Zotero local API is read-only in this project；只允许用于 `refresh-live-notes` / `verify-zotero-note` 这类读取和验证，不允许 PUT/PATCH/POST/DELETE、SQLite mutation 或任何持久写入。
+   - 日常写入前先运行 `prepare-write-candidate <run_dir> --paper-title "$PAPER_TITLE" --generated-date "$GENERATED_DATE"`；它会固定执行 live refresh、版本后缀计算、`finalize-note --html-output`、preview、`gate-run` 和 `prepare-write-payload`。
    - `prepare-write-payload does not write to Zotero`; it only prepares metadata for the agent-side `write_note` call and readback checklist. Real writes still happen only through `zotero-mcp write_note`.
    - 真实写入仍必须来自用户明确写入意图，且只能调用 `zotero-mcp write_note`。调用前读取 `<run_dir>/write-payload.json` 和 `<run_dir>/note.html`，传给 `write_note(action="create", parentKey=<payload parentKey>, content=<contents of note.html>, tags=<payload tags>)`。
-   - 如果尝试更新既有 note 时 `write_note(action="update", ...)` 超时，必须先读回确认是否生效；若读回仍是旧内容，不要改用 Zotero HTTP API、SQLite 或其他写入路径。改为重新读取 live 子笔记标题，计算同日 ` (v2)` / ` (v3)` 后缀，重新 `finalize-note` + `gate-run`，再用 `write_note(action="create", parentKey=<payload parentKey>, content=<contents of note.html>, tags=<payload tags>)` 创建新版本 note。
+   - 如果历史迁移中尝试更新既有 note 时 `write_note(action="update", ...)` 超时，必须先读回确认是否生效；若读回仍是旧内容，stop and report the failed update readback，不要改用 Zotero HTTP API、SQLite 或其他写入路径，也不要自动创建重复迁移 note。
    - 成功后回读一次 `get_item_details`，确认子笔记已经挂载到目标条目下。
 
 ## Better Notes 兼容
