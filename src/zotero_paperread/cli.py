@@ -386,6 +386,14 @@ def prepare_write_payload_command(
     if output.name != "write-payload.json":
         console.print(f"write payload output filename must be write-payload.json: {output}", soft_wrap=True)
         raise typer.Exit(1)
+    run_dir = str(gate_report.get("run_dir", "")).strip()
+    expected_output = (Path(run_dir) if run_dir else gate_report_json.parent) / "write-payload.json"
+    if output_resolved != expected_output.resolve():
+        console.print(
+            f"write payload output path must be the gate run's write-payload.json: {expected_output}",
+            soft_wrap=True,
+        )
+        raise typer.Exit(1)
     if output.exists():
         if output.is_dir():
             console.print(f"write payload output path is a directory: {output}", soft_wrap=True)

@@ -476,6 +476,7 @@ def test_prepare_write_payload_command_writes_payload(tmp_path: Path) -> None:
         json.dumps(
             {
                 "status": "write_ready",
+                "run_dir": str(tmp_path),
                 "parentKey": "ABC123",
                 "note_html_path": str(note_html),
                 "tags": ["codex-summary"],
@@ -572,6 +573,37 @@ def test_prepare_write_payload_command_rejects_non_payload_filename_without_over
     assert result.exit_code == 1
     assert "write payload output filename must be write-payload.json" in result.stdout
     assert json.loads(summary.read_text(encoding="utf-8")) == original_summary
+
+
+def test_prepare_write_payload_command_rejects_output_outside_gate_run_dir(tmp_path: Path) -> None:
+    run_a = tmp_path / "run-a"
+    run_b = tmp_path / "run-b"
+    run_a.mkdir()
+    run_b.mkdir()
+    note_html = run_a / "note.html"
+    note_html.write_text("<h1>Title</h1>", encoding="utf-8")
+    gate_report = run_a / "gate-report.json"
+    gate_report.write_text(
+        json.dumps(
+            {
+                "status": "write_ready",
+                "run_dir": str(run_a),
+                "parentKey": "ABC123",
+                "note_html_path": str(note_html),
+                "tags": ["codex-summary"],
+                "note_title": "[Codex Summary] Title - 2026-05-06",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    output = run_b / "write-payload.json"
+
+    result = CliRunner().invoke(app, ["prepare-write-payload", str(gate_report), "--output", str(output)])
+
+    assert result.exit_code == 1
+    assert "write payload output path must be the gate run's write-payload.json" in result.stdout
+    assert not output.exists()
 
 
 def test_finalize_note_command_reports_invalid_summary_json(tmp_path: Path) -> None:
