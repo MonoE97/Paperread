@@ -518,6 +518,34 @@ def test_prepare_write_payload_command_rejects_same_input_and_output_path(tmp_pa
     assert json.loads(gate_report.read_text(encoding="utf-8")) == {"status": "blocked", "blockers": ["bad"]}
 
 
+def test_prepare_write_payload_command_rejects_output_matching_note_html_path_without_deleting(
+    tmp_path: Path,
+) -> None:
+    note_html = tmp_path / "note.html"
+    html = "<h1>Title</h1>"
+    note_html.write_text(html, encoding="utf-8")
+    gate_report = tmp_path / "gate-report.json"
+    gate_report.write_text(
+        json.dumps(
+            {
+                "status": "write_ready",
+                "parentKey": "ABC123",
+                "note_html_path": str(note_html),
+                "tags": ["codex-summary"],
+                "note_title": "[Codex Summary] Title - 2026-05-06",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(app, ["prepare-write-payload", str(gate_report), "--output", str(note_html)])
+
+    assert result.exit_code == 1
+    assert "write payload output path must differ from note HTML path" in result.stdout
+    assert note_html.read_text(encoding="utf-8") == html
+
+
 def test_finalize_note_command_reports_invalid_summary_json(tmp_path: Path) -> None:
     metadata_path = tmp_path / "metadata.json"
     summary_path = tmp_path / "summary.json"
