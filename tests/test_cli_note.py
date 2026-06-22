@@ -948,3 +948,102 @@ def test_apply_review_command_output_creates_parent_dirs_and_leaves_original_unc
     assert updated["review_status"] == "passed"
     assert updated["trust_status"] == "trusted"
     assert updated["improvement_status"] == "not_needed"
+
+
+def test_preview_note_command_can_write_output_file(tmp_path: Path) -> None:
+    note_path = tmp_path / "note.md"
+    output_path = tmp_path / "preview.txt"
+    note_path.write_text("# Title\n\nBody\n", encoding="utf-8")
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["preview-note", str(note_path), "--output", str(output_path)])
+
+    assert result.exit_code == 0
+    assert "# Title" in result.stdout
+    assert output_path.read_text(encoding="utf-8") == "# Title\n\nBody\n"
+
+
+def test_refresh_live_notes_command_updates_details(monkeypatch, tmp_path: Path) -> None:
+    details_path = tmp_path / "item-details.json"
+    details_path.write_text(json.dumps({"key": "P1", "title": "Paper", "notes": []}), encoding="utf-8")
+
+    def fake_fetch_item_children_notes(item_key: str, *, base_url: str):
+        assert item_key == "P1"
+        assert base_url == "http://zotero.test"
+        return [
+            {
+                "key": "N1",
+                "parentItem": "P1",
+                "title": "[Codex Summary] Paper - 2026-06-22",
+                "note": "<h1>[Codex Summary] Paper - 2026-06-22</h1><p>large body omitted</p>",
+                "tags": ["codex-summary"],
+            }
+        ]
+
+    monkeypatch.setattr("zotero_paperread.cli.fetch_item_children_notes", fake_fetch_item_children_notes)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "refresh-live-notes",
+            str(details_path),
+            "--output",
+            str(details_path),
+            "--base-url",
+            "http://zotero.test",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(details_path.read_text(encoding="utf-8"))
+    assert payload["notes"] == ["<h1>[Codex Summary] Paper - 2026-06-22</h1>"]
+    assert "large body omitted" not in json.dumps(payload, ensure_ascii=False)
+    assert payload["_paperread"]["enrichment"]["live_notes"]["status"] == "refreshed"
+
+
+def test_verify_zotero_note_command_reports_pass(monkeypatch) -> None:
+    def fake_fetch_note_snapshot(note_key: str, *, base_url: str):
+        assert note_key == "N1"
+        assert base_url == "http://zotero.test"
+        return {
+            "key": "N1",
+            "data": {
+                "itemType": "note",
+                "parentItem": "P1",
+                "note": "<h1>[Codex Summary] Paper - 2026-06-22 (v2)</h1><h2>0. 阅读结论</h2>",
+                "tags": [{"tag": "codex-summary"}, {"tag": "paper-summary"}],
+            },
+        }
+
+    monkeypatch.setattr("zotero_paperread.cli.fetch_note_snapshot", fake_fetch_note_snapshot)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "verify-zotero-note",
+            "N1",
+            "--expected-parent",
+            "P1",
+            "--expected-title",
+            "[Codex Summary] Paper - 2026-06-22 (v2)",
+            "--required-heading",
+            "0. 阅读结论",
+            "--forbidden-heading",
+            "9. 元数据",
+            "--expected-tag",
+            "codex-summary",
+            "--expected-tag",
+            "paper-summary",
+            "--min-content-length",
+            "20",
+            "--base-url",
+            "http://zotero.test",
+        ],
+    )
+
+    assert result.exit_code == 0
+    report = json.loads(result.stdout)
+    assert report["status"] == "passed"
+    assert report["noteKey"] == "N1"

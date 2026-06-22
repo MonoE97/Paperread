@@ -23,6 +23,13 @@ from zotero_paperread.summary_lint import lint_summary
 from zotero_paperread.workflow import prepare_item_bundle
 from zotero_paperread.write_payload import build_write_payload
 from zotero_paperread.zotero_details import next_version_suffix_from_details
+from zotero_paperread.zotero_live import (
+    LiveNoteVerificationError,
+    fetch_item_children_notes,
+    fetch_note_snapshot,
+    refresh_details_with_live_notes,
+    verify_note_snapshot,
+)
 from zotero_paperread.zotero_sqlite import DEFAULT_ZOTERO_SQLITE_PATH
 from zotero_paperread.zotero_item_io import write_item_details_files
 
@@ -409,9 +416,16 @@ def validate_trusted_summary_command(summary_json: Path) -> None:
 
 
 @app.command("preview-note")
-def preview_note_command(note_path: Path) -> None:
+def preview_note_command(
+    note_path: Path,
+    output: Path | None = typer.Option(None, "--output", "-o", help="Also write preview text to this file."),
+) -> None:
     """Print a rendered note without writing to Zotero."""
-    console.print(note_path.read_text(encoding="utf-8"))
+    content = note_path.read_text(encoding="utf-8")
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(content, encoding="utf-8")
+    console.print(content)
 
 
 @app.command("save-item-details")
@@ -440,6 +454,61 @@ def save_item_details_command(
         sqlite_extra_fallback=sqlite_extra_fallback,
     )
     typer.echo(json.dumps(result, ensure_ascii=False))
+
+
+@app.command("refresh-live-notes")
+def refresh_live_notes_command(
+    details_json: Path,
+    output: Path = typer.Option(..., "--output", "-o", help="Write refreshed item details JSON."),
+    base_url: str = typer.Option("http://127.0.0.1:23119", "--base-url", help="Zotero local API base URL."),
+) -> None:
+    """Refresh item-details notes from Zotero local API using read-only GET requests."""
+    details = read_json_or_exit(details_json, label="details JSON")
+    item_key = str(details.get("key", "")).strip()
+    if not item_key:
+        console.print("details JSON missing key")
+        raise typer.Exit(1)
+    try:
+        live_notes = fetch_item_children_notes(item_key, base_url=base_url)
+        refreshed = refresh_details_with_live_notes(details, live_notes=live_notes, base_url=base_url)
+    except Exception as exc:
+        console.print(f"live_notes_refresh_failed: {exc}", soft_wrap=True)
+        raise typer.Exit(1)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(refreshed, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    typer.echo(json.dumps(refreshed["_paperread"]["enrichment"]["live_notes"], ensure_ascii=False))
+
+
+@app.command("verify-zotero-note")
+def verify_zotero_note_command(
+    note_key: str,
+    expected_parent: str = typer.Option(..., "--expected-parent", help="Expected parent Zotero item key."),
+    expected_title: str = typer.Option("", "--expected-title", help="Expected exact h1 note title."),
+    required_heading: list[str] = typer.Option([], "--required-heading", help="Required h2 heading text."),
+    forbidden_heading: list[str] = typer.Option([], "--forbidden-heading", help="Forbidden h2 heading text."),
+    expected_tag: list[str] = typer.Option([], "--expected-tag", help="Tag that must be present on the note."),
+    min_content_length: int = typer.Option(0, "--min-content-length", min=0, help="Minimum note HTML length."),
+    base_url: str = typer.Option("http://127.0.0.1:23119", "--base-url", help="Zotero local API base URL."),
+) -> None:
+    """Verify a Zotero note through read-only Zotero local API."""
+    try:
+        snapshot = fetch_note_snapshot(note_key, base_url=base_url)
+        report = verify_note_snapshot(
+            snapshot,
+            expected_parent=expected_parent,
+            expected_title=expected_title,
+            required_headings=required_heading,
+            forbidden_headings=forbidden_heading,
+            expected_tags=expected_tag,
+            min_content_length=min_content_length,
+        )
+    except LiveNoteVerificationError as exc:
+        typer.echo(json.dumps(exc.report, ensure_ascii=False, indent=2))
+        raise typer.Exit(1)
+    except Exception as exc:
+        console.print(f"zotero_note_verify_failed: {exc}", soft_wrap=True)
+        raise typer.Exit(1)
+    typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
 
 
 @app.command("prepare-item")
