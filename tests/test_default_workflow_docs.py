@@ -140,3 +140,28 @@ def test_single_paper_write_contract_uses_versioned_create_only() -> None:
     assert "stop and report the failed update readback" in readme
     assert "refresh-live-notes" in batch_skill
     assert "prepare-write-payload" in batch_skill
+
+
+def test_write_gate_documents_prepare_candidate_and_readback_order() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    skill = (PROJECT_ROOT / "skills" / "zotero-paper-summary" / "SKILL.md").read_text(encoding="utf-8")
+    batch_skill = (PROJECT_ROOT / "skills" / "zotero-batch-note-writing" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    expected_order = [
+        "prepare-write-candidate",
+        "refresh-live-notes",
+        "next-version-suffix",
+        "finalize-note",
+        "gate-run",
+        "prepare-write-payload",
+        'write_note(action="create"',
+        "verify-zotero-note",
+        "--expected-title",
+    ]
+    for text in (readme, skill):
+        section = text[text.index("prepare-write-candidate") :]
+        positions = [section.index(item) for item in expected_order]
+        assert positions == sorted(positions)
+    assert "refresh-live-notes" in batch_skill
+    assert "prepare-write-payload" in batch_skill

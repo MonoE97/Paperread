@@ -216,6 +216,28 @@ For single-paper summaries, single-paper summary writes always create a new vers
 
 Zotero local API is read-only in this project. It may be used by `refresh-live-notes` and `verify-zotero-note`, but it must not be used for PUT, PATCH, POST, DELETE, SQLite mutation, or any persistent write.
 
+After `write_note(action="create", ...)` returns the new note key, verify readback with the exact expected title from `write-payload.json`:
+
+```bash
+uv run zotero-paperread verify-zotero-note <note_key> \
+  --expected-parent <payload parentKey> \
+  --expected-title "<payload noteTitle>" \
+  --required-heading "0. 阅读结论" \
+  --required-heading "1. 论文主张" \
+  --required-heading "2. 方法与设计" \
+  --required-heading "3. 结果可信度" \
+  --required-heading "4. 图表导读" \
+  --required-heading "5. 边界与机会" \
+  --required-heading "6. 我能怎么用" \
+  --required-heading "7. 术语与检索" \
+  --forbidden-heading "9. 元数据" \
+  --forbidden-heading "10. 证据链附录" \
+  --forbidden-heading "11. 补充优化记录" \
+  --expected-tag codex-summary \
+  --expected-tag paper-summary \
+  --min-content-length <payload required_readback_checks.contentLengthAtLeast>
+```
+
 For historical note migration, `write_note(action="update", ...)` is still allowed after explicit confirmation because the task is a content-format migration, not a new paper summary. If a migration update times out and readback still shows old content, stop and report the failed update readback; do not create a duplicate migration note unless the user explicitly asks for that separate recovery action.
 
 The rendered note is a reading-thread learning note. It opens with `## 0. 阅读结论` so the first screen shows the 30-second takeaway, reading decision, trust status, main risk, relevance to AI4S / battery / materials research, and recommended sections/figures. The main body then follows `## 1. 论文主张`, `## 2. 方法与设计`, `## 3. 结果可信度`, `## 4. 图表导读`, `## 5. 边界与机会`, `## 6. 我能怎么用`, and `## 7. 术语与检索`. Metadata, evidence chains, review status, and improvement notes remain in JSON artifacts and gate reports instead of being rendered as dedicated Zotero note sections.
