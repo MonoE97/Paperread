@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,10 @@ def build_write_payload(gate_report: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("gate report is not write_ready")
     note_html_path = Path(str(gate_report.get("note_html_path", "")))
     content = note_html_path.read_text(encoding="utf-8")
-    title_prefix = str(gate_report.get("note_title", ""))[:120]
+    note_title = str(gate_report.get("note_title", ""))
+    version_suffix = str(gate_report.get("version_suffix", ""))
+    title_prefix = note_title[:120]
+    content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
     parent_key = str(gate_report.get("parentKey", ""))
     tags = [str(tag) for tag in gate_report.get("tags", []) if str(tag)]
     return {
@@ -18,12 +22,18 @@ def build_write_payload(gate_report: dict[str, Any]) -> dict[str, Any]:
         "parentKey": parent_key,
         "note_html_path": str(note_html_path),
         "contentLength": len(content),
+        "noteTitle": note_title,
+        "versionSuffix": version_suffix,
+        "contentSha256": content_sha256,
         "titlePrefix": title_prefix,
         "contentPreview": content[:240],
         "tags": tags,
         "required_readback_checks": {
             "parentKey": parent_key,
             "tags": tags,
+            "expectedTitle": note_title,
+            "versionSuffix": version_suffix,
+            "contentSha256": content_sha256,
             "titlePrefix": title_prefix,
             "contentLengthAtLeast": max(len(content) - 20, 0),
         },
