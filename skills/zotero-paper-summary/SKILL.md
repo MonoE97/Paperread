@@ -52,7 +52,7 @@ Use `skills/zotero-paper-summary/SKILL.md` in this repository first.
 6. `5. 边界与机会`：作者明示局限、LLM 推断限制、适用机会与边界。
 7. trailing `Tags:` 行保持现有标签策略，至少包含 `codex-summary, paper-summary`。
 
-`key_results_table`、`baseline_or_comparison`、`result_evidence_notes`、`concept_cards`、`follow_up_keywords`、`limitations`、`trust_status` 继续写入 `summary.json`，用于审查、lint、gate 和未来扩展，但不渲染到 note 正文。
+`key_results_table`、`baseline_or_comparison`、`result_evidence_notes`、`concept_cards`、`follow_up_keywords`、`trust_status` 继续写入 `summary.json`，用于审查、lint、gate 和未来扩展，但不渲染到 note 正文。`limitations` 仍写入 `summary.json` 并参与 gate；正文优先使用 `author_stated_limitations` / `inferred_limits` / `applicability_limits`，只有旧 summary 缺少结构化局限字段时，才把 `limitations` 作为 legacy rendering fallback。
 
 ## 输入
 

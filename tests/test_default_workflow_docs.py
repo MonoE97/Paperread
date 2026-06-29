@@ -183,6 +183,8 @@ def test_docs_describe_current_rendered_note_layout_and_readback_gate() -> None:
 
     assert "compact 0-5 reading card" in readme
     assert "当前 Zotero note 正文只渲染 0-5" in skill
+    assert "legacy rendering fallback" in skill
+    assert "只有旧 summary 缺少结构化局限字段时" in skill
 
 
 def test_skill_manual_gate_block_refreshes_live_notes_before_version_suffix() -> None:

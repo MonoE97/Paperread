@@ -4,7 +4,7 @@
 
 **Goal:** Implement the approved 0-5 Zotero note layout while keeping `summary.json`, review, evidence, and write gates intact.
 
-**Architecture:** This is a render-layer, validation-layer, and documentation update. The renderer continues to receive the existing rich summary context, but the final Markdown/HTML note only shows the approved 0-5 sections; gate-facing fields such as `trust_status`, `key_results_table`, `result_evidence_notes`, `concept_cards`, `follow_up_keywords`, and `limitations` stay in JSON artifacts. The conservative path is to keep legacy `limitations` as a required audit field and use structured limitation fields only for rendered organization and newer artifacts.
+**Architecture:** This is a render-layer, validation-layer, and documentation update. The renderer continues to receive the existing rich summary context, but the final Markdown/HTML note only shows the approved 0-5 sections; gate-facing fields such as `trust_status`, `key_results_table`, `result_evidence_notes`, `concept_cards`, and `follow_up_keywords` stay in JSON artifacts. The conservative path is to keep legacy `limitations` as a required audit field and allow it only as a legacy rendering fallback when structured limitation fields are missing.
 
 **Tech Stack:** Python, Jinja2, markdown-it-py, Typer CLI, pytest, uv, Zotero MCP for final live writes.
 
@@ -681,7 +681,7 @@ Replace the old rendered-layout list with:
 6. `5. 边界与机会`：作者明示局限、LLM 推断限制、适用机会与边界。
 7. trailing `Tags:` 行保持现有标签策略，至少包含 `codex-summary, paper-summary`。
 
-`key_results_table`、`baseline_or_comparison`、`result_evidence_notes`、`concept_cards`、`follow_up_keywords`、`limitations`、`trust_status` 继续写入 `summary.json`，用于审查、lint、gate 和未来扩展，但不渲染到 note 正文。
+`key_results_table`、`baseline_or_comparison`、`result_evidence_notes`、`concept_cards`、`follow_up_keywords`、`trust_status` 继续写入 `summary.json`，用于审查、lint、gate 和未来扩展，但不渲染到 note 正文。`limitations` 继续写入 `summary.json` 并参与 gate；正文优先使用结构化局限字段，只有旧 summary 缺少结构化局限字段时，才作为 legacy rendering fallback。
 ```
 
 - [ ] **Step 4: Update skill write verification command**
