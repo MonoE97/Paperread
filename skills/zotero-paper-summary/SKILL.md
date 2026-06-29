@@ -74,7 +74,9 @@ zotero mcp search_library get_item_details get_content write_note annotations
   - 只有显式写入时才调用 `zotero-mcp write_note`
 - `annotations` 相关工具只是可选增强；核心必需工具是 `search_library`、`get_item_details`、`get_content` 和 `write_note`。
 - Known MCP behavior: `get_item_details` is available in `cookjohn/zotero-mcp` 1.4.7. If Codex does not show it initially, run a targeted tool search before assuming the MCP server lacks the tool.
-- 如果 `get_item_details` 初始不可见，不要手工拼 metadata；先用 `tool_search` 重新加载。只有 `tool_search` 后仍不可用，才停止并说明这是 Codex App 工具发现/注入问题。
+- 如果 `get_item_details` 初始不可见，不要手工拼 metadata；先用 `tool_search` 重新加载。只有 `tool_search` 后仍不可用，才说明这是 Codex App 工具发现/注入问题，并改用本机 Zotero MCP endpoint `http://127.0.0.1:23120/mcp` 作为 session-level HTTP JSON-RPC fallback。
+- HTTP JSON-RPC fallback 仍然必须调用 Zotero MCP 方法，例如 `zotero-mcp write_note`；它不是 Zotero local API、SQLite 或其他写入路径。
+- localhost 请求如果被代理拦截，先清空 `ALL_PROXY` / `HTTP_PROXY` / `HTTPS_PROXY`，并设置 `NO_PROXY=127.0.0.1,localhost` 与 `no_proxy=127.0.0.1,localhost`。
 - 用本项目 Python CLI 抽取 PDF 与渲染 note。
 - 不修改 Zotero SQLite。
 - 不调用 Better Notes API。

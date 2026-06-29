@@ -51,7 +51,9 @@ Given a Zotero paper title, Codex can:
 11. create a new Zotero child note only when explicitly requested, using `zotero-mcp write_note(action="create", ...)`;
 12. verify the written note through read-only Zotero local API readback.
 
-The normal Zotero path is native `zotero-mcp` tool access. This repository intentionally does not implement an HTTP JSON-RPC fallback client for Zotero writes; if a Codex session lacks native Zotero MCP tools, treat it as a session/tool-injection issue and start a fresh session or verify the MCP registration.
+The normal Zotero path is native `zotero-mcp` tool access. This repository intentionally does not implement a built-in HTTP JSON-RPC fallback client, but Codex agents may use the local Zotero MCP endpoint `http://127.0.0.1:23120/mcp` as a session-level HTTP JSON-RPC fallback when native MCP tools are not injected. The fallback must still call Zotero MCP methods such as `zotero-mcp write_note`; it must not use Zotero local API, SQLite, or any other write path.
+
+If localhost requests hit a proxy, clear `ALL_PROXY` / `HTTP_PROXY` / `HTTPS_PROXY` and set `NO_PROXY=127.0.0.1,localhost` plus `no_proxy=127.0.0.1,localhost` before retrying.
 
 ## Codex Workflow
 

@@ -41,6 +41,17 @@ def test_single_paper_workflow_avoids_plugin_hash_paths() -> None:
     assert "rg --files -g 'SKILL.md'" in skill
 
 
+def test_docs_describe_zotero_mcp_http_json_rpc_fallback() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    skill = (PROJECT_ROOT / "skills" / "zotero-paper-summary" / "SKILL.md").read_text(encoding="utf-8")
+
+    for text in (readme, skill):
+        assert "HTTP JSON-RPC fallback" in text
+        assert "http://127.0.0.1:23120/mcp" in text
+        assert "NO_PROXY" in text
+        assert "zotero-mcp write_note" in text
+
+
 def test_secondary_context_is_documented_as_non_evidence() -> None:
     skill = (PROJECT_ROOT / "skills" / "zotero-paper-summary" / "SKILL.md").read_text(encoding="utf-8")
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
