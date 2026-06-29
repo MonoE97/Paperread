@@ -20,7 +20,7 @@
 - Modify `src/zotero_paperread/note.py`
   - Update `REQUIRED_SECTIONS` to the new 0-5 section list.
   - Add forbidden rendered headings/snippets for `validate_note`.
-  - Add a helper to synthesize the figure table description from `analysis`, `why_it_matters`, `caption`, `figure_quality_note`, and `image_quality`.
+  - Add a helper to synthesize the figure table description from `analysis`, `why_it_matters` / `why_it_matters_short`, `caption`, `figure_quality_note`, and `image_quality`.
   - Keep `limitations` required for write-ready summaries; do not weaken `validate_trusted_summary`.
 - Modify `tests/test_note.py`
   - Update renderer tests to assert the new section order.
@@ -138,6 +138,9 @@ def test_render_note_hides_gate_and_audit_only_fields() -> None:
     forbidden_snippets = [
         "可信状态",
         "可信 (trusted)",
+        "可用但需注意限制 (usable_with_caveats)",
+        "仅元数据可用 (metadata_only)",
+        "需要人工复核 (needs_manual_review)",
         "trust_status",
         "与我的研究关系",
         "质量评分",
@@ -307,6 +310,10 @@ FORBIDDEN_RENDERED_HEADINGS = [
 FORBIDDEN_RENDERED_SNIPPETS = [
     "可信状态",
     "trust_status",
+    "可信 (trusted)",
+    "可用但需注意限制 (usable_with_caveats)",
+    "仅元数据可用 (metadata_only)",
+    "需要人工复核 (needs_manual_review)",
 ]
 ```
 
@@ -320,7 +327,9 @@ LOW_CONFIDENCE_IMAGE_QUALITIES = {"poor", "image_too_small", "caption_only", "un
 
 def build_figure_description(item: dict[str, Any], image_quality: str) -> str:
     analysis = optional_text(item.get("analysis"))
-    why_it_matters = optional_text(item.get("why_it_matters"))
+    why_it_matters = optional_text(item.get("why_it_matters")) or optional_text(
+        item.get("why_it_matters_short")
+    )
     caption = optional_text(item.get("caption"))
 
     parts: list[str] = []
@@ -367,14 +376,20 @@ In `clean_key_figures`, add `figure_description` to the cleaned item:
 Replace `validate_note` with:
 
 ```python
+def has_markdown_heading(note: str, heading: str, *, min_level: int, max_level: int) -> bool:
+    marker_pattern = rf"#{{{min_level},{max_level}}}"
+    pattern = rf"^{marker_pattern}\s+{re.escape(heading)}\s*$"
+    return re.search(pattern, note, flags=re.MULTILINE) is not None
+
+
 def validate_note(note: str) -> list[str]:
     """Return validation errors for a rendered note."""
     errors: list[str] = []
     for section in REQUIRED_SECTIONS:
-        if f"## {section}" not in note:
+        if not has_markdown_heading(note, section, min_level=2, max_level=2):
             errors.append(f"missing_section: {section}")
     for section in FORBIDDEN_RENDERED_HEADINGS:
-        if f"## {section}" in note:
+        if has_markdown_heading(note, section, min_level=2, max_level=6):
             errors.append(f"forbidden_section: {section}")
     for snippet in FORBIDDEN_RENDERED_SNIPPETS:
         if snippet in note:
@@ -767,7 +782,7 @@ Run:
 
 ```bash
 RUN_DIR="runs/2026-06-23/polyanion-stabilized-amorphous-halide-electrolytes-with-low-lithium-content-for-all-solid-state-lithium-batteries"
-rg -n "## [0-9]\\. |可信状态|结果可信度|我能怎么用|术语与检索|图表索引|展开图表" "$RUN_DIR/note.md"
+rg -n "## [0-9]\\. |可信状态|可信 \\(trusted\\)|可用但需注意限制|仅元数据可用|需要人工复核|trust_status|结果可信度|我能怎么用|术语与检索|图表索引|展开图表" "$RUN_DIR/note.md"
 ```
 
 Expected headings should include only:
@@ -781,7 +796,7 @@ Expected headings should include only:
 ## 5. 边界与机会
 ```
 
-The command must not show `可信状态`, `结果可信度`, `我能怎么用`, `术语与检索`, `图表索引`, or `展开图表`.
+The command must not show `可信状态`, rendered trust-status labels, `trust_status`, `结果可信度`, `我能怎么用`, `术语与检索`, `图表索引`, or `展开图表`.
 
 - [ ] **Step 4: Confirm HTML still contains tables**
 
@@ -805,7 +820,18 @@ from pathlib import Path
 
 run_dir = Path("runs/2026-06-23/polyanion-stabilized-amorphous-halide-electrolytes-with-low-lithium-content-for-all-solid-state-lithium-batteries")
 html = (run_dir / "note.html").read_text(encoding="utf-8")
-forbidden = ["可信状态", "trust_status", "结果可信度", "我能怎么用", "术语与检索", "潜在 gap"]
+forbidden = [
+    "可信状态",
+    "trust_status",
+    "可信 (trusted)",
+    "可用但需注意限制 (usable_with_caveats)",
+    "仅元数据可用 (metadata_only)",
+    "需要人工复核 (needs_manual_review)",
+    "结果可信度",
+    "我能怎么用",
+    "术语与检索",
+    "潜在 gap",
+]
 present = [item for item in forbidden if item in html]
 if present:
     raise SystemExit(f"forbidden rendered content present: {present}")

@@ -187,6 +187,20 @@ def test_docs_describe_current_rendered_note_layout_and_readback_gate() -> None:
     assert "只有旧 summary 缺少结构化局限字段时" in skill
 
 
+def test_current_redesign_plan_lists_forbidden_trust_status_display_labels() -> None:
+    plan = (
+        PROJECT_ROOT / "docs" / "superpowers" / "plans" / "2026-06-29-zotero-note-template-redesign.md"
+    ).read_text(encoding="utf-8")
+
+    for label in [
+        "可信 (trusted)",
+        "可用但需注意限制 (usable_with_caveats)",
+        "仅元数据可用 (metadata_only)",
+        "需要人工复核 (needs_manual_review)",
+    ]:
+        assert label in plan
+
+
 def test_skill_manual_gate_block_refreshes_live_notes_before_version_suffix() -> None:
     skill = (PROJECT_ROOT / "skills" / "zotero-paper-summary" / "SKILL.md").read_text(encoding="utf-8")
     block = skill[

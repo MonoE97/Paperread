@@ -474,6 +474,25 @@ def test_render_note_prefers_specific_visual_quality_warning() -> None:
     assert "图像抽取质量较低，以上判断仅基于正文/图注证据。" in note
 
 
+def test_render_note_uses_why_it_matters_short_in_figure_description() -> None:
+    summary = {
+        **SUMMARY,
+        "key_figures": [
+            {
+                "caption": "Figure 1. Workflow.",
+                "image_quality": "ok",
+                "analysis": "图 1 展示主要 workflow。",
+                "why_it_matters_short": "支撑方法主链路判断",
+            }
+        ],
+    }
+
+    note = render_note(METADATA, summary, generated_date="2026-04-23")
+
+    assert "图 1 展示主要 workflow。" in note
+    assert "支撑的核心主张：支撑方法主链路判断" in note
+
+
 def test_render_note_keeps_audit_evidence_out_of_rendered_note() -> None:
     note = render_note(
         METADATA,
@@ -1032,6 +1051,14 @@ def test_validate_note_requires_figure_overview_section() -> None:
     assert "missing_section: 4. 图表导读" in errors
 
 
+def test_validate_note_requires_level_two_required_sections() -> None:
+    note = render_note(METADATA, SUMMARY_WITH_FIGURES, generated_date="2026-04-23")
+
+    errors = validate_note(note.replace("## 1. 速读信息", "### 1. 速读信息"))
+
+    assert "missing_section: 1. 速读信息" in errors
+
+
 def test_validate_note_reports_missing_new_sections_and_forbidden_old_sections() -> None:
     old_note = """# [Codex Summary] Old - 2026-04-23
 
@@ -1070,6 +1097,21 @@ def test_validate_note_rejects_missing_required_section() -> None:
 
     assert "missing_section: 0. 阅读结论" in errors
     assert "missing_section: 1. 速读信息" in errors
+
+
+def test_validate_note_rejects_rendered_trust_status_display_labels() -> None:
+    note = render_note(METADATA, SUMMARY_WITH_FIGURES, generated_date="2026-04-23")
+
+    trust_status_labels = [
+        "可信 (trusted)",
+        "可用但需注意限制 (usable_with_caveats)",
+        "仅元数据可用 (metadata_only)",
+        "需要人工复核 (needs_manual_review)",
+    ]
+    for label in trust_status_labels:
+        errors = validate_note(note.replace("## 5. 边界与机会", f"{label}\n\n## 5. 边界与机会"))
+
+        assert f"forbidden_content: {label}" in errors
 
 
 def test_validate_trusted_summary_still_requires_audit_only_fields() -> None:

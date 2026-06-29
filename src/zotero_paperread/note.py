@@ -29,6 +29,10 @@ FORBIDDEN_RENDERED_HEADINGS = [
 FORBIDDEN_RENDERED_SNIPPETS = [
     "可信状态",
     "trust_status",
+    "可信 (trusted)",
+    "可用但需注意限制 (usable_with_caveats)",
+    "仅元数据可用 (metadata_only)",
+    "需要人工复核 (needs_manual_review)",
 ]
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "templates"
@@ -430,7 +434,9 @@ def extract_figure_display_label(caption: str, *, fallback_index: int) -> str:
 
 def build_figure_description(item: dict[str, Any], image_quality: str) -> str:
     analysis = optional_text(item.get("analysis"))
-    why_it_matters = optional_text(item.get("why_it_matters"))
+    why_it_matters = optional_text(item.get("why_it_matters")) or optional_text(
+        item.get("why_it_matters_short")
+    )
     caption = optional_text(item.get("caption"))
 
     parts: list[str] = []
@@ -759,14 +765,20 @@ def render_note_html(note: str) -> str:
     return parser.render(note).strip() + "\n"
 
 
+def has_markdown_heading(note: str, heading: str, *, min_level: int, max_level: int) -> bool:
+    marker_pattern = rf"#{{{min_level},{max_level}}}"
+    pattern = rf"^{marker_pattern}\s+{re.escape(heading)}\s*$"
+    return re.search(pattern, note, flags=re.MULTILINE) is not None
+
+
 def validate_note(note: str) -> list[str]:
     """Return validation errors for a rendered note."""
     errors: list[str] = []
     for section in REQUIRED_SECTIONS:
-        if f"## {section}" not in note:
+        if not has_markdown_heading(note, section, min_level=2, max_level=2):
             errors.append(f"missing_section: {section}")
     for section in FORBIDDEN_RENDERED_HEADINGS:
-        if f"## {section}" in note:
+        if has_markdown_heading(note, section, min_level=2, max_level=6):
             errors.append(f"forbidden_section: {section}")
     for snippet in FORBIDDEN_RENDERED_SNIPPETS:
         if snippet in note:
