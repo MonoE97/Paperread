@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from zotero_paperread.figures import extract_figures
+from zotero_paperread.pdf_workflow import build_pdf_metadata
 from zotero_paperread.pdf_extract import extract_pdf
 from zotero_paperread.runs import write_run_manifest
 from zotero_paperread.secondary_sources import build_secondary_sources
@@ -254,25 +255,34 @@ def _build_figure_extraction_error_context(error: Exception) -> tuple[dict[str, 
     )
 
 
-def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int | None = None) -> dict[str, Any]:
-    """Prepare metadata, extraction, and context files from raw Zotero item details."""
+def _empty_secondary_sources(metadata: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "item_key": "",
+        "title": str(metadata.get("title", "")),
+        "usage_boundary": "cross-check only; must not be cited in evidence_summary",
+        "sources": [],
+        "warnings": [],
+    }
+
+
+def _prepare_bundle_from_metadata(
+    metadata: dict[str, Any],
+    workdir: Path,
+    *,
+    max_pages: int | None = None,
+    item_details: dict[str, Any] | None = None,
+    secondary_sources: dict[str, Any] | None = None,
+    missing_pdf_warning: str = "missing_pdf_attachment",
+) -> dict[str, Any]:
+    """Prepare metadata, extraction, and context files from normalized source metadata."""
     bundle_dir = Path(workdir).expanduser().resolve()
     bundle_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = bundle_dir / "run.json"
 
-    metadata = build_metadata(details)
     pdf_path = metadata["pdf_path"]
-    attachments = details.get("attachments", [])
-    if not isinstance(attachments, list):
-        attachments = []
     if pdf_path:
         extract = extract_pdf(Path(pdf_path), max_pages=max_pages)
     else:
-        missing_pdf_warning = (
-            "missing_pdf_path_in_item_details"
-            if has_pdf_attachment([attachment for attachment in attachments if isinstance(attachment, dict)])
-            else "missing_pdf_attachment"
-        )
         extract = {
             "pdf_path": "",
             "page_count": 0,
@@ -291,14 +301,14 @@ def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int |
     figures_payload: dict[str, Any] | None = None
     source_attempts: list[dict[str, Any]] = []
     figure_error_warning: str | None = None
-    secondary_sources = build_secondary_sources(details)
+    resolved_secondary_sources = secondary_sources or _empty_secondary_sources(metadata)
 
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     extract_path.write_text(json.dumps(extract, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     context_path.write_text(build_context_markdown(metadata, extract), encoding="utf-8")
     section_context_path.write_text(build_section_context_markdown(metadata, extract), encoding="utf-8")
     secondary_sources_path.write_text(
-        json.dumps(secondary_sources, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(resolved_secondary_sources, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -308,7 +318,7 @@ def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int |
                 Path(pdf_path),
                 output_dir=bundle_dir / "figures",
                 max_pages=max_pages,
-                item_details=details,
+                item_details=item_details,
             )
         except Exception as error:
             error_attempt, figure_error_warning = _build_figure_extraction_error_context(error)
@@ -341,6 +351,7 @@ def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int |
         "warnings": warnings,
         "source_attempts": source_attempts,
         "has_pdf": bool(pdf_path),
+        "metadata": metadata,
     }
 
     if manifest_path.exists():
@@ -362,3 +373,53 @@ def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int |
         write_run_manifest(bundle_dir, manifest)
 
     return result
+
+
+def prepare_item_bundle(details: dict[str, Any], workdir: Path, max_pages: int | None = None) -> dict[str, Any]:
+    """Prepare metadata, extraction, and context files from raw Zotero item details."""
+    metadata = build_metadata(details)
+    attachments = details.get("attachments", [])
+    if not isinstance(attachments, list):
+        attachments = []
+    missing_pdf_warning = (
+        "missing_pdf_path_in_item_details"
+        if has_pdf_attachment([attachment for attachment in attachments if isinstance(attachment, dict)])
+        else "missing_pdf_attachment"
+    )
+    return _prepare_bundle_from_metadata(
+        metadata,
+        workdir,
+        max_pages=max_pages,
+        item_details=details,
+        secondary_sources=build_secondary_sources(details),
+        missing_pdf_warning=missing_pdf_warning,
+    )
+
+
+def prepare_pdf_bundle(
+    pdf_path: Path,
+    workdir: Path,
+    *,
+    title: str | None = None,
+    authors: str | None = None,
+    date: str | None = None,
+    doi: str | None = None,
+    url: str | None = None,
+    max_pages: int | None = None,
+) -> dict[str, Any]:
+    """Prepare metadata, extraction, and context files from a direct local PDF path."""
+    metadata = build_pdf_metadata(
+        pdf_path,
+        title=title,
+        authors=authors,
+        date=date,
+        doi=doi,
+        url=url,
+    )
+    return _prepare_bundle_from_metadata(
+        metadata,
+        workdir,
+        max_pages=max_pages,
+        item_details=None,
+        secondary_sources=_empty_secondary_sources(metadata),
+    )

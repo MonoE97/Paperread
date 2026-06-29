@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from zotero_paperread.note_hash import note_html_sha256
+from zotero_paperread.note_hash import canonicalize_note_html_for_hash, note_html_sha256
 
 
 def build_write_payload(gate_report: dict[str, Any]) -> dict[str, Any]:
@@ -15,6 +15,7 @@ def build_write_payload(gate_report: dict[str, Any]) -> dict[str, Any]:
     note_title = str(gate_report.get("note_title", ""))
     version_suffix = str(gate_report.get("version_suffix", ""))
     title_prefix = note_title[:120]
+    canonical_content = canonicalize_note_html_for_hash(content)
     content_sha256 = note_html_sha256(content)
     parent_key = str(gate_report.get("parentKey", ""))
     tags = [str(tag) for tag in gate_report.get("tags", []) if str(tag)]
@@ -22,7 +23,7 @@ def build_write_payload(gate_report: dict[str, Any]) -> dict[str, Any]:
         "action": "create",
         "parentKey": parent_key,
         "note_html_path": str(note_html_path),
-        "contentLength": len(content),
+        "contentLength": len(canonical_content),
         "noteTitle": note_title,
         "versionSuffix": version_suffix,
         "contentSha256": content_sha256,
@@ -36,6 +37,6 @@ def build_write_payload(gate_report: dict[str, Any]) -> dict[str, Any]:
             "versionSuffix": version_suffix,
             "contentSha256": content_sha256,
             "titlePrefix": title_prefix,
-            "contentLengthAtLeast": max(len(content) - 20, 0),
+            "contentLengthAtLeast": max(len(canonical_content) - 20, 0),
         },
     }

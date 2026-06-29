@@ -2,7 +2,7 @@
 
 ## 项目目标
 
-本项目实现 Zotero-first 文献总结工作流：输入 Zotero 中的文章标题，Codex 通过 Zotero MCP 定位条目，使用本地 Python 工具默认抽取完整 PDF 内容、章节上下文和表格/数值候选，生成中文结构化论文总结，并在用户明确要求写入时创建 Zotero 子笔记。审计源保留为 `note.md`，真实写入 Zotero 时使用由同一份 Markdown 转换出的 `note.html`。
+本项目实现 Zotero-first 文献总结工作流，同时支持直接输入本地 PDF path。输入 Zotero 中的文章标题时，Codex 通过 Zotero MCP 定位条目，使用本地 Python 工具默认抽取完整 PDF 内容、章节上下文和表格/数值候选，生成中文结构化论文总结，并在用户明确要求写入时创建 Zotero 子笔记。输入本地 PDF path 时，使用同一套抽取、总结、审查和渲染规则，但只在 PDF 同目录写本地分析目录和 Markdown 笔记，不写 Zotero。审计源保留为 `note.md`，真实写入 Zotero 时使用由同一份 Markdown 转换出的 `note.html`。
 
 ## 目录约定
 
@@ -10,6 +10,7 @@
 - `tests/`：pytest 测试，禁止真实写入 Zotero。
 - `templates/`：Jinja2 note 模板。
 - `skills/`：Codex skill 定义。
+- `skills_paperread/`：公开 v1 的 repo-local paperread workflow bundle；不是 `.agents/skills` 或 `.claude/skills` 安装目录，使用时先 clone repo、安装 `uv`、执行 `uv sync`，再从 repo root 运行。
 - `docs/references/`：外部项目参考、设计取舍记录和可复用 runbook。
 - `docs/superpowers/plans/`：实施计划。
 - `docs/superpowers/specs/`：需求规格和设计评审记录；历史 plan/spec 不等于当前操作入口，当前准则以 `README.md`、`AGENTS.md` 和 repo-local `skills/` 为准。
@@ -17,6 +18,7 @@
 ## 运行产物与证据边界
 
 - `prepare-item` 默认生成 `context.md`，并在结构化抽取可用时生成 `section_context.md`；`section_context.md` 只用于帮助 Codex 定位章节、表格候选和值候选。
+- PDF path workflow 使用 `prepare-pdf <pdf_path>`，首次在 PDF 同目录生成 `<pdf_stem>_analysis/` 和 `<pdf_stem>_note.md`，重复运行使用 `<pdf_stem>_analysis_v2/`、`<pdf_stem>_note_v2.md` 等后缀，不覆盖旧输出。
 - `section_context.md` is not a canonical evidence source；它只辅助阅读定位。最终 `evidence_summary` locator 必须引用 `context.md` 或 `figure_context.md`，例如 `context.md page 3 section Methods`、`context.md page 6 section Results table_candidate 1`、`figure_context.md fig_p4_1`。
 - 用户提供微信公众号、新闻稿、博客等网页时，只作为二级材料 capture，用于 cross-check 和补充背景；`evidence_summary` 只能引用 `context.md` 和 `figure_context.md`。
 
@@ -71,6 +73,7 @@ uv run zotero-paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/zot
 ## 写入规则
 
 - 默认先 dry-run。
+- PDF path workflow 是 local-output only；禁止调用 `refresh-live-notes`，禁止生成 `write-payload.json`，禁止写 Zotero。PDF 本地笔记必须通过 `validate-summary-json -> apply-review -> lint-summary -> validate-trusted-summary -> prepare-local-note-candidate`，最终 Markdown 写到 PDF 同目录的 `<pdf_stem>_note.md` 或版本后缀路径。
 - Zotero exact 搜索出现多个 normalized title 相同的条目时，停止分析和写入，要求用户先在 Zotero 去重；不要替用户选择父条目。
 - MCP 原始 `get_item_details` 响应必须先落盘，再用 `save-item-details` 生成规范化的 `item-details.json`，后续本地命令只读规范化文件。
 - 当 MCP 响应缺少 `extra` 时，`save-item-details` 可用只读 Zotero SQLite fallback 补齐 `Extra` / `其他`；成功补齐只记录 `_paperread.enrichment.extra.diagnostics`，不写入 `_paperread.warnings`；缺失、不可读或找不到条目才保留 warning。

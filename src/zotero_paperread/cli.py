@@ -10,6 +10,8 @@ from rich.console import Console
 
 from zotero_paperread.figures import extract_figures
 from zotero_paperread.gate import build_gate_report
+from zotero_paperread.local_candidate import prepare_local_note_candidate
+from zotero_paperread.local_gate import build_local_gate_report
 from zotero_paperread.note import build_note_labels, render_note, render_note_html, validate_note, validate_trusted_summary
 from zotero_paperread.note_table_migration import (
     classify_note_content,
@@ -17,10 +19,11 @@ from zotero_paperread.note_table_migration import (
     has_markdown_table_separator,
 )
 from zotero_paperread.pdf_extract import extract_pdf
+from zotero_paperread.pdf_workflow import allocate_pdf_output_paths
 from zotero_paperread.review import apply_review_to_summary
 from zotero_paperread.runs import allocate_run_dir, write_run_manifest
 from zotero_paperread.summary_lint import lint_summary
-from zotero_paperread.workflow import prepare_item_bundle
+from zotero_paperread.workflow import prepare_item_bundle, prepare_pdf_bundle
 from zotero_paperread.write_candidate import prepare_write_candidate
 from zotero_paperread.write_payload import build_write_payload
 from zotero_paperread.zotero_details import next_version_suffix_from_details
@@ -168,6 +171,55 @@ def extract_figures_command(
         arxiv_id=arxiv_id,
     )
     typer.echo(json.dumps(payload, ensure_ascii=False))
+
+
+@app.command("prepare-pdf")
+def prepare_pdf_command(
+    pdf_path: Path,
+    title: str | None = typer.Option(None, "--title", help="Override paper title."),
+    authors: str | None = typer.Option(None, "--authors", help="Override compact author string."),
+    paper_date: str | None = typer.Option(None, "--date", help="Override paper date."),
+    doi: str | None = typer.Option(None, "--doi", help="Override DOI."),
+    url: str | None = typer.Option(None, "--url", help="Override source URL."),
+    max_pages: int | None = typer.Option(None, "--max-pages", min=1, help="Extract at most this many pages."),
+) -> None:
+    """Prepare a local PDF analysis bundle beside the PDF without writing Zotero."""
+    output_paths = allocate_pdf_output_paths(pdf_path)
+    manifest_path = write_run_manifest(
+        output_paths.analysis_dir,
+        {
+            "title": str(title).strip() if title else Path(pdf_path).expanduser().stem,
+            "slug": output_paths.analysis_dir.name,
+            "item_key": "",
+            "source_type": "pdf_path",
+            "pdf_path": str(Path(pdf_path).expanduser()),
+            "final_note_path": str(output_paths.final_note_path),
+            "version_suffix": output_paths.version_suffix,
+            "status": "initialized",
+        },
+    )
+    try:
+        bundle = prepare_pdf_bundle(
+            pdf_path,
+            output_paths.analysis_dir,
+            title=title,
+            authors=authors,
+            date=paper_date,
+            doi=doi,
+            url=url,
+            max_pages=max_pages,
+        )
+    except Exception as exc:
+        console.print(f"prepare_pdf_failed: {exc}", soft_wrap=True)
+        raise typer.Exit(1)
+    payload = {
+        "analysis_dir": str(output_paths.analysis_dir),
+        "final_note_path": str(output_paths.final_note_path),
+        "version_suffix": output_paths.version_suffix,
+        "manifest_path": str(manifest_path),
+        **{key: value for key, value in bundle.items() if key != "metadata"},
+    }
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 @app.command("create-run")
@@ -365,6 +417,39 @@ def gate_run_command(
         output.write_text(payload + "\n", encoding="utf-8")
     typer.echo(payload)
     if report["status"] != "write_ready":
+        raise typer.Exit(1)
+
+
+@app.command("local-gate-run")
+def local_gate_run_command(
+    analysis_dir: Path,
+    generated_date: str = typer.Option(..., "--generated-date", help="Generated note date in YYYY-MM-DD form."),
+    output: Path | None = typer.Option(None, "--output", "-o", help="Write local gate report JSON."),
+) -> None:
+    """Aggregate local PDF note readiness into one report without Zotero write fields."""
+    report = build_local_gate_report(analysis_dir, generated_date=generated_date)
+    payload = json.dumps(report, ensure_ascii=False, indent=2)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(payload + "\n", encoding="utf-8")
+    typer.echo(payload)
+    if report["status"] != "local_ready":
+        raise typer.Exit(1)
+
+
+@app.command("prepare-local-note-candidate")
+def prepare_local_note_candidate_command(
+    analysis_dir: Path,
+    generated_date: str = typer.Option(..., "--generated-date", help="Generated note date in YYYY-MM-DD form."),
+) -> None:
+    """Prepare a gated local Markdown note from a PDF analysis directory."""
+    try:
+        result = prepare_local_note_candidate(analysis_dir, generated_date=generated_date)
+    except Exception as exc:
+        console.print(f"prepare_local_note_candidate_failed: {exc}", soft_wrap=True)
+        raise typer.Exit(1)
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+    if result.get("status") != "local_ready":
         raise typer.Exit(1)
 
 

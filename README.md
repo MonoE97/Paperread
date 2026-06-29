@@ -1,6 +1,17 @@
 # Zotero Paperread
 
-Zotero-first literature summary workflow for Codex.
+Zotero-first literature summary workflow for Codex, with a local PDF path workflow for papers that are not yet in Zotero.
+
+## Public V1 Setup
+
+For the first public version, clone this repository, install `uv`, then run from the repo root:
+
+```bash
+uv sync
+uv run zotero-paperread --help
+```
+
+The repo-local `skills_paperread/` bundle documents how an agent should choose between a Zotero title and a local PDF path. It is a repo-local v1 workflow bundle, not a claim that the folder alone is a standalone global skill installation.
 
 ## Run Directory
 
@@ -33,6 +44,30 @@ runs/<date>/<paper-slug>/
 - `figures/`
 
 These are intermediate and audit artifacts. Keep them while reviewing a run. Delete old runs manually when they are no longer useful.
+
+## PDF Path Workflow
+
+When the input is a local PDF path rather than a Zotero title, use:
+
+```bash
+uv run zotero-paperread prepare-pdf /path/to/paper.pdf
+```
+
+The PDF path workflow writes local artifacts beside the PDF. The first run creates `<pdf_stem>_analysis/` and targets `<pdf_stem>_note.md`; repeated runs use `<pdf_stem>_analysis_v2/`, `<pdf_stem>_note_v2.md`, and higher suffixes without overwriting older outputs.
+
+The analysis directory contains the same deterministic evidence and rendering artifacts used by the Zotero flow, including `metadata.json`, `extract.json`, `context.md`, `section_context.md`, optional `figures.json`, optional `figure_context.md`, `summary.json`, `review.json`, `note.md`, and `note.html`. The agent still writes `summary.json` and `review.json` after reading the generated evidence files.
+
+Finalize a local note with:
+
+```bash
+uv run zotero-paperread validate-summary-json <analysis_dir>/summary.json
+uv run zotero-paperread apply-review <analysis_dir>/summary.json <analysis_dir>/review.json
+uv run zotero-paperread lint-summary <analysis_dir>/summary.json
+uv run zotero-paperread validate-trusted-summary <analysis_dir>/summary.json
+uv run zotero-paperread prepare-local-note-candidate <analysis_dir> --generated-date YYYY-MM-DD
+```
+
+PDF path workflow is local-output only. It must not call `refresh-live-notes`, must not create `write-payload.json`, and must not write Zotero.
 
 ## What It Does
 

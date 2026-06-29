@@ -222,3 +222,40 @@ def test_skill_manual_gate_block_refreshes_live_notes_before_version_suffix() ->
 
     assert "refresh-live-notes" in block
     assert block.index("refresh-live-notes") < block.index("next-version-suffix")
+
+
+def test_paperread_skill_documents_two_entry_modes_and_repo_local_v1() -> None:
+    skill = (PROJECT_ROOT / "skills_paperread" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "local PDF path" in skill
+    assert "Zotero title" in skill
+    assert "repo-local v1" in skill
+    assert "uv sync" in skill
+    assert "from the repo root" in skill
+    assert "not a standalone global skill installation" in skill
+
+
+def test_paperread_pdf_reference_forbids_zotero_write_path() -> None:
+    pdf_reference = (PROJECT_ROOT / "skills_paperread" / "references" / "pdf-path-workflow.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "prepare-pdf" in pdf_reference
+    assert "prepare-local-note-candidate" in pdf_reference
+    assert "must not call refresh-live-notes" in pdf_reference
+    assert "must not create write-payload.json" in pdf_reference
+    assert "must not write Zotero" in pdf_reference
+    assert "context.md" in pdf_reference
+    assert "figure_context.md" in pdf_reference
+
+
+def test_readme_documents_pdf_path_outputs_and_public_v1_setup() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    agents = (PROJECT_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+
+    for text in (readme, agents):
+        assert "<pdf_stem>_analysis" in text
+        assert "<pdf_stem>_note.md" in text
+        assert "skills_paperread" in text
+        assert "uv sync" in text
+        assert "PDF path workflow" in text

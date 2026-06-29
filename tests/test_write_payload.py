@@ -67,4 +67,6 @@ def test_build_write_payload_content_hash_ignores_trailing_newline(tmp_path: Pat
     )
 
     assert payload["contentSha256"] == hashlib.sha256(html.encode("utf-8")).hexdigest()
+    assert payload["contentLength"] == len(html)
+    assert payload["required_readback_checks"]["contentLengthAtLeast"] == max(len(html) - 20, 0)
     assert payload["required_readback_checks"]["contentSha256"] == payload["contentSha256"]
