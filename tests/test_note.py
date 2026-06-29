@@ -135,18 +135,27 @@ def test_render_note_contains_required_learning_sections() -> None:
 
     expected_sections = [
         "## 0. 阅读结论",
-        "## 1. 论文主张",
-        "## 2. 方法与设计",
-        "## 3. 结果可信度",
+        "## 1. 速读信息",
+        "## 2. 论文主张",
+        "## 3. 方法与设计",
         "## 4. 图表导读",
         "## 5. 边界与机会",
-        "## 6. 我能怎么用",
-        "## 7. 术语与检索",
     ]
     for section in expected_sections:
         assert section in note
     positions = [note.index(section) for section in expected_sections]
     assert positions == sorted(positions)
+
+    forbidden_sections = [
+        "## 3. 结果可信度",
+        "## 6. 我能怎么用",
+        "## 7. 术语与检索",
+        "## 9. 元数据",
+        "## 10. 证据链附录",
+        "## 11. 补充优化记录",
+    ]
+    for section in forbidden_sections:
+        assert section not in note
 
     assert "# [Codex Summary] A Useful Materials Paper - 2026-04-23" in note
     assert "zotero://select/library/items/ABC123" not in note
@@ -157,23 +166,24 @@ def test_render_note_uses_reading_thread_sections_without_audit_appendices() -> 
 
     expected_sections = [
         "## 0. 阅读结论",
-        "## 1. 论文主张",
-        "## 2. 方法与设计",
-        "## 3. 结果可信度",
+        "## 1. 速读信息",
+        "## 2. 论文主张",
+        "## 3. 方法与设计",
         "## 4. 图表导读",
         "## 5. 边界与机会",
-        "## 6. 我能怎么用",
-        "## 7. 术语与检索",
     ]
     for section in expected_sections:
         assert section in note
 
+    assert "## 3. 结果可信度" not in note
+    assert "## 6. 我能怎么用" not in note
+    assert "## 7. 术语与检索" not in note
     assert "## 9. 元数据" not in note
     assert "## 10. 证据链附录" not in note
     assert "## 11. 补充优化记录" not in note
-    assert note.index("## 0. 阅读结论") < note.index("## 1. 论文主张")
-    assert note.index("## 3. 结果可信度") < note.index("## 4. 图表导读")
-    assert note.index("## 7. 术语与检索") < note.index("---\n\nTags: codex-summary, paper-summary")
+    assert note.index("## 0. 阅读结论") < note.index("## 1. 速读信息")
+    assert note.index("## 3. 方法与设计") < note.index("## 4. 图表导读")
+    assert note.index("## 5. 边界与机会") < note.index("---\n\nTags: codex-summary, paper-summary")
 
 
 def test_render_note_separates_dynamic_lists_from_following_headings() -> None:
@@ -202,44 +212,36 @@ def test_render_note_separates_dynamic_lists_from_following_headings() -> None:
 
     note = render_note(METADATA, summary, generated_date="2026-06-18")
 
-    assert "context.md page 2)\n\n### 推荐先看图表" in note
-    assert "context.md page 3)\n\n### 速读信息" in note
-    assert "context.md page 4)\n\n### 结果证据说明" in note
-    assert "confidence: high)\n\n### 证据质量" in note
+    assert "## 3. 结果可信度" not in note
+    assert "## 6. 我能怎么用" not in note
+    assert "## 7. 术语与检索" not in note
+    assert "### 推荐先读章节" not in note
+    assert "### 推荐先看图表" not in note
+    assert "baseline / comparison" not in note
+    assert "结果证据说明" not in note
+    assert "证据质量" not in note
+    assert "Read method details." not in note
+    assert "Comparison result." not in note
 
 
-def test_render_note_renders_learning_fields() -> None:
+def test_render_note_uses_decision_and_quick_info_tables() -> None:
     note = render_note(
         METADATA,
         {**SUMMARY_WITH_FIGURES, **TRUSTED_FIELDS, **LEARNING_FIELDS},
         generated_date="2026-04-23",
     )
 
+    assert "## 0. 阅读结论\n\n| 项目 | 内容 |\n| --- | --- |" in note
+    assert "| 30 秒结论 | 本文把动力学采样模型和电子响应模型拆开训练，用于电化学界面长时间尺度采样。 |" in note
+    assert "| 主要风险 | Figure 2-4 crop 过小，图像细节不能独立复核。 |" in note
+    assert "| 阅读决策 | 强烈建议精读 (strongly_recommended) |" in note
+
+    assert "## 1. 速读信息\n\n| 项目 | 内容 |\n| --- | --- |" in note
     assert "| 论文类型 | 研究论文 (research_article) |" in note
-    assert "- **可信状态**: 可信 (trusted)" in note
-    assert "- **阅读决策**: 强烈建议精读 (strongly_recommended)" in note
-    assert "- **与我的研究关系**: 对 AI4S、电池界面模拟和 learned observable workflow 有直接参考价值。" in note
-    assert "Au(100)/NaCl(aq) electrochemical interface" in note
-    assert "Figure 2-4 crop 过小，图像细节不能独立复核。" in note
-    assert "电化学界面需要同时描述电势、电解液极化、离子吸附和界面水取向。" in note
-    assert "| FIREANN | 原子结构 + 外场 | 外场相关原子力 | MLMD 力场 | 加速界面结构采样 |" in note
-    assert "训练体系为 Au(100)/5.5 M NaCl(aq)。" in note
-    assert "| 加速效果 | 约 4 个数量级 | 支持 ns 级界面采样 |" in note
-    assert "| 图 | 页码 | 作用 | 证据等级 | 图像质量 |" in note
-    assert "| fig_p1_1 | 1 | 定义方法对象和信息流 | medium | ok |" in note
-    assert "- **页码**: 1" in note
-    assert "- **为什么重要**: 这张图定义了整篇论文的方法对象和信息流。" in note
-    assert "- **图像/抽取质量**: 图像质量可用于辅助理解，结论仍以正文为准。" in note
-    assert "Priority Score" not in note
-    assert "Why It Matters" not in note
-    assert "Figure Quality" not in note
-    assert "不能直接推广到复杂电极、多组分电解液、真实 SEI 或反应性界面。" in note
-    assert "把科学问题拆成动力学采样模型和可观测量响应模型。" in note
-    assert "用 field-conditioned ML potential 学习外场下的结构动力学。" in note
-    assert "该 framework 能否迁移到电池 SEI / 电解液分解界面？" in note
-    assert "### Figure 1：Overall pipeline" in note
-    assert "### finite-field molecular dynamics" in note
-    assert "- **相关关键词**: finite field, electric field, electrochemical interface" in note
+    assert "| 研究对象 | Au(100)/NaCl(aq) electrochemical interface |" in note
+    assert "| 核心问题 | 如何加速 finite-field electrochemical interface simulations？ |" in note
+    assert "| 核心方法 | FIREANN 学外场相关原子力，MLEDR 学电子密度响应。 |" in note
+    assert "| 核心结果 | 实现约 4 个数量级加速，并预测电容、极化和界面水取向。 |" in note
 
 
 def test_render_note_renders_recommendations_result_evidence_and_gap_fields() -> None:
@@ -305,28 +307,33 @@ def test_render_note_renders_recommendations_result_evidence_and_gap_fields() ->
     rendered = render_note(METADATA, summary, generated_date="2026-06-18")
 
     assert "## 0. 阅读结论" in rendered
-    assert "### 推荐先读章节" in rendered
-    assert "Methods: Best source for model design. (context.md page 2 section Methods)" in rendered
-    assert "fig_p1_1: Shows the overall workflow. (figure_context.md fig_p1_1)" in rendered
-    assert "## 3. 结果可信度" in rendered
-    assert "DFT baseline" in rendered
-    assert "Conductivity improved." in rendered
-    assert "Full text and figure context are available" in rendered
+    assert "## 1. 速读信息" in rendered
+    assert "## 3. 结果可信度" not in rendered
+    assert "## 6. 我能怎么用" not in rendered
+    assert "## 7. 术语与检索" not in rendered
+    assert "### 推荐先读章节" not in rendered
+    assert "### 推荐先看图表" not in rendered
+    assert "Methods: Best source for model design. (context.md page 2 section Methods)" not in rendered
+    assert "fig_p1_1: Shows the overall workflow. (figure_context.md fig_p1_1)" not in rendered
+    assert "baseline / comparison" not in rendered
+    assert "DFT baseline" not in rendered
+    assert "Conductivity improved." not in rendered
+    assert "结果证据说明" not in rendered
+    assert "Full text and figure context are available" not in rendered
     assert "### 作者明示局限" in rendered
     assert "The authors evaluate one material family. (context.md page 8 section Discussion)" in rendered
-    assert "### Codex 推断限制" in rendered
+    assert "### LLM 推断限制" in rendered
     assert "Transfer to sulfide solid electrolytes is not established." in rendered
     assert "basis: The experiments cover oxide examples only." in rendered
-    assert "### 潜在 gap / 后续问题" in rendered
-    assert "Reactive battery interfaces remain open." in rendered
-    assert "uncertainty: AI inference" in rendered
-    assert "\n- **阅读决策**:" in rendered
-    assert "\n- **与我的研究关系**:" in rendered
+    assert "### 潜在 gap / 后续问题" not in rendered
+    assert "潜在 gap" not in rendered
+    assert "Reactive battery interfaces remain open." not in rendered
+    assert "uncertainty: AI inference" not in rendered
+    assert "\n- **阅读决策**:" not in rendered
+    assert "\n- **与我的研究关系**:" not in rendered
     assert "\n- Transfer to sulfide solid electrolytes is not established." in rendered
-    assert "\n- Reactive battery interfaces remain open." in rendered
     assert ")- **" not in rendered
     assert ")- Transfer to sulfide solid electrolytes is not established." not in rendered
-    assert ")- Reactive battery interfaces remain open." not in rendered
 
 
 def test_render_note_does_not_duplicate_follow_up_questions_as_potential_gaps() -> None:
@@ -339,16 +346,12 @@ def test_render_note_does_not_duplicate_follow_up_questions_as_potential_gaps() 
     }
 
     rendered = render_note(METADATA, summary, generated_date="2026-06-18")
-    gap_section = rendered.split("### 潜在 gap / 后续问题\n\n", maxsplit=1)[1].split(
-        "\n## 6. 我能怎么用", maxsplit=1
-    )[0]
-    transfer_section = rendered.split("## 6. 我能怎么用\n\n", maxsplit=1)[1].split(
-        "\n## 7. 术语与检索", maxsplit=1
-    )[0]
 
-    assert gap_section.strip() == "- none"
-    assert "- Can this workflow transfer to SEI interfaces?" in transfer_section
-    assert rendered.count("Can this workflow transfer to SEI interfaces?") == 1
+    assert "### 潜在 gap / 后续问题" not in rendered
+    assert "## 6. 我能怎么用" not in rendered
+    assert "## 7. 术语与检索" not in rendered
+    assert "Can this workflow transfer to SEI interfaces?" not in rendered
+    assert "Can the response model predict charge density?" not in rendered
 
 
 def test_render_note_escapes_pipe_characters_inside_markdown_table_cells() -> None:
@@ -424,12 +427,14 @@ def test_render_note_old_summary_uses_safe_fallbacks() -> None:
     assert "| 核心问题 | 如何更可靠地预测材料性质？ |" in note
     assert "| 核心方法 | 作者结合图神经网络和物理约束。 |" in note
     assert "| 核心结果 | 这篇论文提出一种用于材料发现的机器学习框架。 |" in note
-    assert "### 摘要翻译" in note
-    assert "本文摘要的中文翻译。" in note
-    assert "### 实验与证据摘要" in note
-    assert "实验覆盖多个材料数据集。" in note
-    assert "## 7. 术语与检索" in note
-    assert "### 核心概念\n\n- none" in note
+    assert "### 背景问题" in note
+    assert "### 本文切入点 + 贡献" in note
+    assert "### 方法总览" in note
+    assert "### 作者明示局限" in note
+    assert "## 7. 术语与检索" not in note
+    assert "### 核心概念" not in note
+    assert "本文摘要的中文翻译。" not in note
+    assert "实验覆盖多个材料数据集。" not in note
 
 
 def test_render_note_accepts_workflow_steps_as_list() -> None:
@@ -462,8 +467,11 @@ def test_render_note_prefers_specific_visual_quality_warning() -> None:
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
 
-    assert "| 图 | 页码 | 作用 | 证据等级 | 图像质量 |" in note
-    assert "| fig_p1_1 | 1 | 测试图作用。 | unknown | image_too_small |" in note
+    assert "| 图 | 图像抽取质量 | 图片描述内容 |" in note
+    assert "| Figure 1 | image_too_small |" in note
+    assert "图像质量不足，只能基于正文和 caption 分析。" in note
+    assert "支撑的核心主张：测试图作用。" in note
+    assert "图像抽取质量较低，以上判断仅基于正文/图注证据。" in note
 
 
 def test_render_note_keeps_audit_evidence_out_of_rendered_note() -> None:
@@ -523,8 +531,44 @@ def test_render_note_contains_figure_sections() -> None:
     note = render_note(METADATA, SUMMARY_WITH_FIGURES, generated_date="2026-04-23")
 
     assert "## 4. 图表导读" in note
-    assert "### Figure 1：Overall pipeline" in note
-    assert "Figure 1. Overall pipeline." in note
+    assert "| 图 | 图像抽取质量 | 图片描述内容 |" in note
+    assert "| Figure 1 | ok |" in note
+    assert "图 1 展示了从输入结构到扩散采样再到性质打分的主链路。" in note
+    assert "这张图定义了整篇论文的方法对象和信息流。" in note
+    assert "### 图表总览" not in note
+    assert "### 图表索引" not in note
+    assert "### 展开图表" not in note
+    assert "### Figure 1：Overall pipeline" not in note
+
+
+def test_render_note_uses_single_figure_table() -> None:
+    note = render_note(
+        METADATA,
+        {**SUMMARY_WITH_FIGURES, **TRUSTED_FIELDS, **LEARNING_FIELDS},
+        generated_date="2026-04-23",
+    )
+
+    assert "## 4. 图表导读\n\n| 图 | 图像抽取质量 | 图片描述内容 |\n| --- | --- | --- |" in note
+    assert "| Figure 1 | ok |" in note
+    assert "图 1 展示了从输入结构到扩散采样再到性质打分的主链路。" in note
+    assert "这张图定义了整篇论文的方法对象和信息流。" in note
+    assert "### 图表总览" not in note
+    assert "### 图表索引" not in note
+    assert "### 展开图表" not in note
+    assert "证据等级" not in note
+
+
+def test_render_note_figure_section_stays_table_when_no_figures() -> None:
+    note = render_note(
+        METADATA,
+        {**SUMMARY, **TRUSTED_FIELDS, **LEARNING_FIELDS, "key_figures": []},
+        generated_date="2026-04-23",
+    )
+
+    assert "## 4. 图表导读\n\n| 图 | 图像抽取质量 | 图片描述内容 |\n| --- | --- | --- |" in note
+    assert "| none | unknown | 未抽取到可用图表；图表导读不可用，请以正文与证据摘要为准。 |" in note
+    figure_section = note.split("## 4. 图表导读", maxsplit=1)[1].split("## 5. 边界与机会", maxsplit=1)[0]
+    assert "- none" not in figure_section
 
 
 def test_render_note_falls_back_to_ordered_figure_labels_without_caption_number() -> None:
@@ -553,10 +597,14 @@ def test_render_note_falls_back_to_ordered_figure_labels_without_caption_number(
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
 
-    assert "### Figure 1：Pipeline" in note
-    assert "### Figure 2：Results" in note
-    assert "### p1-f1：Pipeline" not in note
-    assert "### source-2-image-panel：Results" not in note
+    assert "| Figure 1 | unknown |" in note
+    assert "| Figure 2 | unknown |" in note
+    assert "第一张图分析。" in note
+    assert "第二张图分析。" in note
+    assert "| p1-f1 |" not in note
+    assert "| source-2-image-panel |" not in note
+    assert "### Figure 1：Pipeline" not in note
+    assert "### Figure 2：Results" not in note
 
 
 def test_render_note_fallback_figure_labels_ignore_skipped_items() -> None:
@@ -578,8 +626,9 @@ def test_render_note_fallback_figure_labels_ignore_skipped_items() -> None:
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
 
-    assert "### Figure 1：Pipeline" in note
-    assert "### Figure 2：Pipeline" not in note
+    assert "| Figure 1 | unknown |" in note
+    assert "| Figure 2 | unknown |" not in note
+    assert "### Figure 1：Pipeline" not in note
 
 
 def test_render_note_normalizes_common_figure_label_forms() -> None:
@@ -616,26 +665,61 @@ def test_render_note_normalizes_common_figure_label_forms() -> None:
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
 
-    assert "### Figure 2a：Conductivity" in note
-    assert "### Scheme 1：Workflow" in note
-    assert "### Figure 3-4：Stability" in note
+    assert "| Figure 2a |" in note
+    assert "| Scheme 1 |" in note
+    assert "| Figure 3-4 |" in note
+    assert "图 2a 分析。" in note
+    assert "Scheme 1 分析。" in note
+    assert "图 3-4 分析。" in note
+    assert "### Figure 2a：Conductivity" not in note
+    assert "### Scheme 1：Workflow" not in note
+    assert "### Figure 3-4：Stability" not in note
 
 
-def test_render_note_contains_trust_status_but_hides_audit_appendices() -> None:
-    note = render_note(METADATA, {**SUMMARY_WITH_FIGURES, **TRUSTED_FIELDS}, generated_date="2026-04-23")
+def test_render_note_hides_gate_and_audit_only_fields() -> None:
+    note = render_note(
+        METADATA,
+        {
+            **SUMMARY_WITH_FIGURES,
+            **TRUSTED_FIELDS,
+            **LEARNING_FIELDS,
+            "potential_gaps": [
+                {
+                    "text": "需要真实高面容量软包验证。",
+                    "basis": "当前实验仍是扣式或实验室尺度。",
+                    "uncertainty": "medium",
+                    "locator": "context.md page 7",
+                }
+            ],
+        },
+        generated_date="2026-04-23",
+    )
+    html = render_note_html(note)
 
-    assert "## 0. 阅读结论" in note
-    assert "| 论文类型 | 研究论文 (research_article) |" in note
-    assert "- **可信状态**: 可信 (trusted)" in note
-    assert "## 10. 自动抽取质量报告" not in note
-    assert "### 审查状态\n\npassed_with_caveats" not in note
-    assert "## 9. 元数据" not in note
-    assert "## 10. 证据链附录" not in note
-    assert "## 11. 补充优化记录" not in note
-    assert "- **改进状态**: completed" not in note
-    assert "The method uses a learned inverse-design model." not in note
-    assert "page 3 method section" not in note
-    assert "Method section was too generic." not in note
+    forbidden_snippets = [
+        "可信状态",
+        "可信 (trusted)",
+        "trust_status",
+        "与我的研究关系",
+        "质量评分",
+        "关键结果表",
+        "baseline / comparison",
+        "结果证据说明",
+        "证据质量",
+        "可迁移启发",
+        "工作流经验",
+        "后续问题",
+        "核心概念",
+        "后续检索关键词",
+        "潜在 gap",
+        "需要真实高面容量软包验证。",
+        "The method uses a learned inverse-design model.",
+        "page 3 method section",
+        "Method section was too generic.",
+    ]
+    for snippet in forbidden_snippets:
+        assert snippet not in note
+        assert snippet not in html
 
 
 def test_render_note_places_trailing_tags_after_reading_sections() -> None:
@@ -646,7 +730,10 @@ def test_render_note_places_trailing_tags_after_reading_sections() -> None:
     assert "## 10. 自动抽取质量报告" not in note
     assert "## 10. 证据链附录" not in note
     assert "## 11. 补充优化记录" not in note
-    assert note.index("## 7. 术语与检索") < note.index("---\n\nTags: codex-summary, paper-summary")
+    assert "## 3. 结果可信度" not in note
+    assert "## 6. 我能怎么用" not in note
+    assert "## 7. 术语与检索" not in note
+    assert note.index("## 5. 边界与机会") < note.index("---\n\nTags: codex-summary, paper-summary")
 
 
 def test_clean_evidence_summary_keeps_evidence_bullets_contiguous() -> None:
@@ -871,10 +958,11 @@ def test_render_note_ignores_string_values_for_list_sections() -> None:
         "## 5. 边界与机会", maxsplit=1
     )[0]
 
-    assert (
-        figure_section.strip()
-        == "### 图表总览\n\n图像概览。\n\n### 图表索引\n\n- none\n\n### 展开图表\n\n- none"
-    )
+    assert "| 图 | 图像抽取质量 | 图片描述内容 |" in figure_section
+    assert "| none | unknown | 未抽取到可用图表；图表导读不可用，请以正文与证据摘要为准。 |" in figure_section
+    assert "### 图表总览" not in figure_section
+    assert "### 图表索引" not in figure_section
+    assert "### 展开图表" not in figure_section
 
 
 def test_render_note_keeps_audit_sections_hidden_without_review_or_improvement_blocks() -> None:
@@ -892,6 +980,10 @@ def test_render_note_keeps_audit_sections_hidden_without_review_or_improvement_b
     assert "### 审查问题\n\n- none" not in note
     assert "## 11. 补充优化记录\n\n- none" not in note
     assert "- **改进状态**: completed\n\n- none" not in note
+    assert "可信状态" not in note
+    assert "## 3. 结果可信度" not in note
+    assert "## 6. 我能怎么用" not in note
+    assert "## 7. 术语与检索" not in note
 
 
 def test_render_note_moves_normalized_note_labels_to_trailing_tags() -> None:
@@ -940,8 +1032,52 @@ def test_validate_note_requires_figure_overview_section() -> None:
     assert "missing_section: 4. 图表导读" in errors
 
 
+def test_validate_note_reports_missing_new_sections_and_forbidden_old_sections() -> None:
+    old_note = """# [Codex Summary] Old - 2026-04-23
+
+## 0. 阅读结论
+
+## 1. 论文主张
+
+## 2. 方法与设计
+
+## 3. 结果可信度
+
+## 4. 图表导读
+
+## 5. 边界与机会
+
+## 6. 我能怎么用
+
+## 7. 术语与检索
+
+---
+
+Tags: codex-summary, paper-summary
+"""
+
+    errors = validate_note(old_note)
+
+    assert "missing_section: 1. 速读信息" in errors
+    assert "missing_section: 3. 方法与设计" in errors
+    assert "forbidden_section: 3. 结果可信度" in errors
+    assert "forbidden_section: 6. 我能怎么用" in errors
+    assert "forbidden_section: 7. 术语与检索" in errors
+
+
 def test_validate_note_rejects_missing_required_section() -> None:
     errors = validate_note("# title\n\n## 旧结构\ncontent")
 
     assert "missing_section: 0. 阅读结论" in errors
-    assert "missing_section: 7. 术语与检索" in errors
+    assert "missing_section: 1. 速读信息" in errors
+
+
+def test_validate_trusted_summary_still_requires_audit_only_fields() -> None:
+    summary = {**SUMMARY_WITH_FIGURES, **TRUSTED_FIELDS, **LEARNING_FIELDS}
+    summary["limitations"] = []
+    summary["follow_up_keywords"] = []
+
+    errors = note_module.validate_trusted_summary(summary)
+
+    assert "limitations must contain at least one item" in errors
+    assert "follow_up_keywords must contain at least one item" in errors

@@ -45,7 +45,7 @@ Given a Zotero paper title, Codex can:
 5. extract PDF text, page records, section records, and conservative table/value candidates with a local `uv`-managed Python CLI;
 6. extract figures, backfill nearby captions for embedded images, and analyze key images when available;
 7. capture Extra/web links as secondary context for cross-checking only;
-8. generate a Chinese structured paper summary with figure-aware analysis and the 0-7 reading-thread layout;
+8. generate a Chinese structured paper summary with figure-aware analysis and the compact 0-5 reading-card layout;
 9. validate summary JSON, apply review, lint and trusted-summary gates, then render auditable Markdown plus Zotero-ready HTML;
 10. prepare a versioned write candidate that refreshes live child-note titles, computes the same-day suffix, previews both `note.md` and `note.html`, and writes `gate-report.json` plus `write-payload.json`;
 11. create a new Zotero child note only when explicitly requested, using `zotero-mcp write_note(action="create", ...)`;
@@ -247,13 +247,14 @@ uv run zotero-paperread verify-zotero-note <note_key> \
   --expected-parent <payload parentKey> \
   --expected-title "<payload noteTitle>" \
   --required-heading "0. 阅读结论" \
-  --required-heading "1. 论文主张" \
-  --required-heading "2. 方法与设计" \
-  --required-heading "3. 结果可信度" \
+  --required-heading "1. 速读信息" \
+  --required-heading "2. 论文主张" \
+  --required-heading "3. 方法与设计" \
   --required-heading "4. 图表导读" \
   --required-heading "5. 边界与机会" \
-  --required-heading "6. 我能怎么用" \
-  --required-heading "7. 术语与检索" \
+  --forbidden-heading "3. 结果可信度" \
+  --forbidden-heading "6. 我能怎么用" \
+  --forbidden-heading "7. 术语与检索" \
   --forbidden-heading "9. 元数据" \
   --forbidden-heading "10. 证据链附录" \
   --forbidden-heading "11. 补充优化记录" \
@@ -265,9 +266,9 @@ uv run zotero-paperread verify-zotero-note <note_key> \
 
 For historical note migration, `write_note(action="update", ...)` is still allowed after explicit confirmation because the task is a content-format migration, not a new paper summary. If a migration update times out and readback still shows old content, stop and report the failed update readback; do not create a duplicate migration note unless the user explicitly asks for that separate recovery action.
 
-The rendered note is a reading-thread learning note. It opens with `## 0. 阅读结论` so the first screen shows the 30-second takeaway, reading decision, trust status, main risk, relevance to AI4S / battery / materials research, and recommended sections/figures. The main body then follows `## 1. 论文主张`, `## 2. 方法与设计`, `## 3. 结果可信度`, `## 4. 图表导读`, `## 5. 边界与机会`, `## 6. 我能怎么用`, and `## 7. 术语与检索`. Metadata, evidence chains, review status, and improvement notes remain in JSON artifacts and gate reports instead of being rendered as dedicated Zotero note sections.
+The rendered note is a compact 0-5 reading card. It opens with `## 0. 阅读结论`, a table containing the 30-second conclusion, main risk, and reading decision. `## 1. 速读信息` is a second table containing paper type, research object, core problem, core method, and core result. The body then follows `## 2. 论文主张`, `## 3. 方法与设计`, `## 4. 图表导读`, and `## 5. 边界与机会`. Trust status, quality score, key result tables, baseline/comparison notes, result evidence notes, concept cards, follow-up keywords, metadata, evidence chains, review status, and improvement notes remain in JSON artifacts and gate reports instead of being rendered as Zotero note sections.
 
-New learning-note fields such as `method_modules`, `key_results_table`, `concept_cards`, `workflow_lessons`, `reading_decision`, `recommended_sections`, `recommended_figures`, `baseline_or_comparison`, `result_evidence_notes`, `author_stated_limitations`, `inferred_limits`, `potential_gaps`, and `evidence_quality_summary` are optional. Old `summary.json` files still render through safe fallbacks: `method_overview` falls back to `method`, `core_result_short` falls back to `one_sentence_summary`, and `transferable_insight` falls back to `ai4s_relevance`. Author-stated limitations, Codex-inferred limits, and potential gaps should be kept separate so inferred reading judgments are not presented as paper-authored claims.
+New learning-note fields such as `method_modules`, `key_results_table`, `concept_cards`, `workflow_lessons`, `reading_decision`, `recommended_sections`, `recommended_figures`, `baseline_or_comparison`, `result_evidence_notes`, `author_stated_limitations`, `inferred_limits`, `potential_gaps`, and `evidence_quality_summary` are optional. Old `summary.json` files still render through safe fallbacks: `method_overview` falls back to `method`, `core_result_short` falls back to `one_sentence_summary`, and `applicability_limits` can carry reusable opportunity/boundary statements. Author-stated limitations, LLM-inferred limits, and potential gaps should be kept separate in JSON so inferred reading judgments are not presented as paper-authored claims.
 
 ## Historical Note Table Migration
 

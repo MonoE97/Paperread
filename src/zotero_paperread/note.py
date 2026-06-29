@@ -10,13 +10,25 @@ from markdown_it import MarkdownIt
 
 REQUIRED_SECTIONS = [
     "0. 阅读结论",
-    "1. 论文主张",
-    "2. 方法与设计",
-    "3. 结果可信度",
+    "1. 速读信息",
+    "2. 论文主张",
+    "3. 方法与设计",
     "4. 图表导读",
     "5. 边界与机会",
+]
+
+FORBIDDEN_RENDERED_HEADINGS = [
+    "3. 结果可信度",
     "6. 我能怎么用",
     "7. 术语与检索",
+    "9. 元数据",
+    "10. 证据链附录",
+    "11. 补充优化记录",
+]
+
+FORBIDDEN_RENDERED_SNIPPETS = [
+    "可信状态",
+    "trust_status",
 ]
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "templates"
@@ -38,6 +50,7 @@ VALID_IMPROVEMENT_STATUSES = {"not_needed", "needed", "completed", "blocked"}
 VALID_READING_DECISIONS = {"strongly_recommended", "recommended", "skim_only", "not_priority", "unknown"}
 VALID_EVIDENCE_LEVELS = {"high", "medium", "low", "text_only", "caption_only", "image_unverified", "unknown"}
 VALID_IMAGE_QUALITIES = {"good", "ok", "poor", "image_too_small", "caption_only", "unknown"}
+LOW_CONFIDENCE_IMAGE_QUALITIES = {"poor", "image_too_small", "caption_only", "unknown"}
 WRITE_READY_REVIEW_STATUSES = {"passed", "passed_with_caveats"}
 PAPER_TYPE_DISPLAY_LABELS = {
     "research_article": "研究论文",
@@ -415,6 +428,26 @@ def extract_figure_display_label(caption: str, *, fallback_index: int) -> str:
     return f"{label_prefix} {number}"
 
 
+def build_figure_description(item: dict[str, Any], image_quality: str) -> str:
+    analysis = optional_text(item.get("analysis"))
+    why_it_matters = optional_text(item.get("why_it_matters"))
+    caption = optional_text(item.get("caption"))
+
+    parts: list[str] = []
+    if analysis:
+        parts.append(analysis)
+    elif caption:
+        parts.append(f"这张图展示：{caption}")
+
+    if why_it_matters:
+        parts.append(f"支撑的核心主张：{why_it_matters}")
+
+    if image_quality in LOW_CONFIDENCE_IMAGE_QUALITIES:
+        parts.append("图像抽取质量较低，以上判断仅基于正文/图注证据。")
+
+    return " ".join(parts) if parts else "未提供图表描述。"
+
+
 def clean_key_figures(summary: dict[str, Any]) -> list[dict[str, Any]]:
     items = safe_list(summary.get("key_figures", []))
     cleaned: list[dict[str, Any]] = []
@@ -437,6 +470,7 @@ def clean_key_figures(summary: dict[str, Any]) -> list[dict[str, Any]]:
                 "evidence_level": safe_choice(item.get("evidence_level"), VALID_EVIDENCE_LEVELS, "unknown"),
                 "image_quality": image_quality,
                 "figure_quality_note": fallback_text(item.get("figure_quality_note"), image_quality),
+                "figure_description": build_figure_description(item, image_quality),
                 "analysis": str(item.get("analysis", "")).strip(),
             }
         )
@@ -731,6 +765,12 @@ def validate_note(note: str) -> list[str]:
     for section in REQUIRED_SECTIONS:
         if f"## {section}" not in note:
             errors.append(f"missing_section: {section}")
+    for section in FORBIDDEN_RENDERED_HEADINGS:
+        if f"## {section}" in note:
+            errors.append(f"forbidden_section: {section}")
+    for snippet in FORBIDDEN_RENDERED_SNIPPETS:
+        if snippet in note:
+            errors.append(f"forbidden_content: {snippet}")
     if "[Codex Summary]" not in note:
         errors.append("missing_codex_summary_title")
     if "Tags: codex-summary, paper-summary" not in note:

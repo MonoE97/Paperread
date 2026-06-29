@@ -168,6 +168,23 @@ def test_write_gate_documents_prepare_candidate_and_readback_order() -> None:
     assert "prepare-write-payload" in batch_skill
 
 
+def test_docs_describe_current_rendered_note_layout_and_readback_gate() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    skill = (PROJECT_ROOT / "skills" / "zotero-paper-summary" / "SKILL.md").read_text(encoding="utf-8")
+
+    for text in (readme, skill):
+        assert "0. 阅读结论" in text
+        assert "1. 速读信息" in text
+        assert "5. 边界与机会" in text
+        assert '--required-heading "1. 速读信息"' in text
+        assert '--forbidden-heading "3. 结果可信度"' in text
+        assert '--forbidden-heading "6. 我能怎么用"' in text
+        assert '--forbidden-heading "7. 术语与检索"' in text
+
+    assert "compact 0-5 reading card" in readme
+    assert "当前 Zotero note 正文只渲染 0-5" in skill
+
+
 def test_skill_manual_gate_block_refreshes_live_notes_before_version_suffix() -> None:
     skill = (PROJECT_ROOT / "skills" / "zotero-paper-summary" / "SKILL.md").read_text(encoding="utf-8")
     block = skill[

@@ -1,36 +1,14 @@
 # {{ note_title }}
 
-> {{ one_sentence_summary }}
-
 ## 0. 阅读结论
 
-- **30 秒结论**: {% if tldr %}{{ tldr }}{% else %}{{ one_sentence_summary }}{% endif %}
-- **阅读决策**: {{ reading_decision }}
-- **与我的研究关系**: {{ relevance_to_user }}
-- **可信状态**: {{ trust_status }}
-- **主要风险**: {{ main_risk_short }}
+| 项目 | 内容 |
+| --- | --- |
+| 30 秒结论 | {% if tldr %}{{ tldr | table_cell }}{% else %}{{ one_sentence_summary | table_cell }}{% endif %} |
+| 主要风险 | {{ main_risk_short | table_cell }} |
+| 阅读决策 | {{ reading_decision | table_cell }} |
 
-### 推荐先读章节
-
-{% if recommended_sections %}
-{% for item in recommended_sections %}
-- {{ item.label }}: {{ item.reason }}{% if item.locator %} ({{ item.locator }}){% endif %}
-{% endfor %}
-{% else %}
-- none
-{% endif %}
-
-### 推荐先看图表
-
-{% if recommended_figures %}
-{% for item in recommended_figures %}
-- {{ item.label }}: {{ item.reason }}{% if item.locator %} ({{ item.locator }}){% endif %}
-{% endfor %}
-{% else %}
-- none
-{% endif %}
-
-### 速读信息
+## 1. 速读信息
 
 | 项目 | 内容 |
 | --- | --- |
@@ -39,9 +17,8 @@
 | 核心问题 | {{ research_question_short | table_cell }} |
 | 核心方法 | {{ core_method_short | table_cell }} |
 | 核心结果 | {{ core_result_short | table_cell }} |
-| 质量评分 | {{ quality_score | table_cell }} |
 
-## 1. 论文主张
+## 2. 论文主张
 
 ### 背景问题
 
@@ -51,21 +28,19 @@
 
 {{ existing_gap }}
 
-### 本文切入点
+### 本文切入点 + 贡献
 
 {{ paper_entry_point }}
 
-### 一句话贡献
-
-{{ one_sentence_summary }}
-
-{% if abstract_translation %}
-### 摘要翻译
-
-{{ abstract_translation }}
+{% if contributions %}
+{% for item in contributions %}
+- {{ item }}
+{% endfor %}
+{% else %}
+- {{ one_sentence_summary }}
 {% endif %}
 
-## 2. 方法与设计
+## 3. 方法与设计
 
 ### 方法总览
 
@@ -99,100 +74,16 @@
 - none
 {% endif %}
 
-## 3. 结果可信度
-
-### 关键结果表
-
-{% if key_results_table %}
-| 结果 | 数值 | 含义 |
-| --- | --- | --- |
-{% for item in key_results_table %}
-| {{ item.result | table_cell }} | {{ item.value | table_cell }} | {{ item.meaning | table_cell }} |
-{% endfor %}
-{% else %}
-- none
-{% endif %}
-
-### 关键要点
-
-{% if key_points %}
-{% for item in key_points %}
-- {{ item }}
-{% endfor %}
-{% else %}
-- none
-{% endif %}
-
-{% if experiments %}
-### 实验与证据摘要
-
-{{ experiments }}
-{% endif %}
-
-### baseline / comparison
-
-{% if baseline_or_comparison %}
-{% for item in baseline_or_comparison %}
-- {{ item.label }}: {{ item.reason }}{% if item.locator %} ({{ item.locator }}){% endif %}
-{% endfor %}
-{% else %}
-- none
-{% endif %}
-
-### 结果证据说明
-
-{% if result_evidence_notes %}
-{% for item in result_evidence_notes %}
-- {{ item.result }}: {{ item.evidence }}{% if item.locator %} ({{ item.locator }}{% if item.confidence %}; confidence: {{ item.confidence }}{% endif %}){% endif %}
-{% endfor %}
-{% else %}
-- none
-{% endif %}
-
-### 证据质量
-
-{% if evidence_quality_summary %}
-{{ evidence_quality_summary }}
-{% else %}
-- none
-{% endif %}
-
 ## 4. 图表导读
 
-{% if figure_overview %}
-### 图表总览
-
-{{ figure_overview }}
-{% endif %}
-
-### 图表索引
-
-{% if key_figures %}
-| 图 | 页码 | 作用 | 证据等级 | 图像质量 |
-| --- | --- | --- | --- | --- |
-{% for item in key_figures %}
-| {{ item.figure_id | table_cell }} | {{ item.page | table_cell }} | {{ item.why_it_matters_short | table_cell }} | {{ item.evidence_level | table_cell }} | {{ item.image_quality | table_cell }} |
-{% endfor %}
-{% else %}
-- none
-{% endif %}
-
-### 展开图表
-
+| 图 | 图像抽取质量 | 图片描述内容 |
+| --- | --- | --- |
 {% if key_figures %}
 {% for item in key_figures %}
-### {{ item.display_label }}{% if item.title_short %}：{{ item.title_short }}{% endif %}
-
-- **图注**: {{ item.caption }}
-- **页码**: {{ item.page }}
-- **为什么重要**: {{ item.why_it_matters }}
-- **图像/抽取质量**: {{ item.figure_quality_note }}
-
-{{ item.analysis }}
-
+| {{ item.display_label | table_cell }} | {{ item.image_quality | table_cell }} | {{ item.figure_description | table_cell }} |
 {% endfor %}
 {% else %}
-- none
+| none | unknown | 未抽取到可用图表；图表导读不可用，请以正文与证据摘要为准。 |
 {% endif %}
 
 ## 5. 边界与机会
@@ -211,7 +102,7 @@
 - none
 {% endif %}
 
-### Codex 推断限制
+### LLM 推断限制
 
 {% if inferred_limits %}
 {% for item in inferred_limits %}
@@ -221,73 +112,10 @@
 - none
 {% endif %}
 
-### 适用边界
+### 适用机会与边界
 
 {% if applicability_limits %}
 {% for item in applicability_limits %}
-- {{ item }}
-{% endfor %}
-{% else %}
-- none
-{% endif %}
-
-### 潜在 gap / 后续问题
-
-{% if potential_gaps %}
-{% for item in potential_gaps %}
-- {{ item.text }}{% if item.basis %} (basis: {{ item.basis }}){% endif %}{% if item.uncertainty %} (uncertainty: {{ item.uncertainty }}){% endif %}{% if item.locator %} ({{ item.locator }}){% endif %}
-{% endfor %}
-{% else %}
-- none
-{% endif %}
-
-## 6. 我能怎么用
-
-### 可迁移启发
-
-{{ transferable_insight }}
-
-### 工作流经验
-
-{% if workflow_lessons %}
-{% for item in workflow_lessons %}
-- {{ item }}
-{% endfor %}
-{% else %}
-- none
-{% endif %}
-
-### 后续问题
-
-{% if follow_up_questions %}
-{% for item in follow_up_questions %}
-- {{ item }}
-{% endfor %}
-{% else %}
-- none
-{% endif %}
-
-## 7. 术语与检索
-
-### 核心概念
-
-{% if concept_cards %}
-{% for item in concept_cards %}
-### {{ item.term }}
-
-- **定义**: {{ item.short_definition }}
-- **在本文中的作用**: {{ item.role_in_paper }}
-- **相关关键词**: {{ item.related_keywords | join(', ') }}
-
-{% endfor %}
-{% else %}
-- none
-{% endif %}
-
-### 后续检索关键词
-
-{% if follow_up_keywords %}
-{% for item in follow_up_keywords %}
 - {{ item }}
 {% endfor %}
 {% else %}

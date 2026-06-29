@@ -41,7 +41,10 @@ def test_render_note_command_writes_markdown(tmp_path: Path) -> None:
     assert output_path.exists()
     note = output_path.read_text(encoding="utf-8")
     assert "## 0. 阅读结论" in note
-    assert "## 7. 术语与检索" in note
+    assert "## 1. 速读信息" in note
+    assert "## 5. 边界与机会" in note
+    assert "## 7. 术语与检索" not in note
+    assert "可信状态" not in note
     assert "## 10. 证据链附录" not in note
 
 
@@ -337,6 +340,7 @@ def test_validate_note_command_fails_for_incomplete_note(tmp_path: Path) -> None
 
     assert result.exit_code == 1
     assert "missing_section" in result.stdout
+    assert "missing_section: 1. 速读信息" in result.stdout
 
 
 def test_validate_note_command_reports_missing_note_file(tmp_path: Path) -> None:
@@ -791,6 +795,8 @@ def test_validate_trusted_summary_fails_empty_core_content(tmp_path: Path) -> No
     assert "one_sentence_summary is required" in result.stdout
     assert "method is required" in result.stdout
     assert "key_points must contain at least one item" in result.stdout
+    assert "limitations must contain at least one item" in result.stdout
+    assert "follow_up_keywords must contain at least one item" in result.stdout
 
 
 def test_validate_trusted_summary_rejects_null_required_text_fields(tmp_path: Path) -> None:

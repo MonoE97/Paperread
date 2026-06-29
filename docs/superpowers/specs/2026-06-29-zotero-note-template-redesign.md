@@ -33,7 +33,7 @@ Use the following final rendered structure:
 4. 图表导读
 5. 边界与机会
 ---
-Tags: ...
+Tags: codex-summary, paper-summary, inferred-labels
 ```
 
 Remove these rendered sections from future notes:
@@ -172,6 +172,7 @@ Rules:
 - Remove the old `图表总览`, `图表索引`, and per-figure expanded subsections.
 - Do not render `priority_score`, `evidence_level`, or page number unless they are already naturally included in the description.
 - If `figure_context.md` has low confidence or image quality warnings, the row must be conservative.
+- If no usable figures are extracted, still render the same table with one `none` row and state that figure guidance is unavailable; do not fall back to a bullet list.
 
 ### `5. 边界与机会`
 
@@ -190,7 +191,7 @@ Field mapping:
 - `author_stated_limitations`
 - `inferred_limits`
 - `applicability_limits`
-- optional support from `potential_gaps` only when it improves boundary clarity
+- optional support from `limitations` as a legacy compatibility fallback
 
 Rules:
 
@@ -198,6 +199,8 @@ Rules:
 - Do not present inferred limits as author-stated claims.
 - `适用机会与边界` should answer where the paper's claims/design lessons apply and where they should not be extrapolated.
 - Do not absorb the old `我能怎么用` section into this section.
+- Do not render `potential_gaps` directly. If a future generator uses it to improve `适用机会与边界`, it must first synthesize the relevant boundary into `applicability_limits`; the renderer should treat `potential_gaps` as audit-only.
+- Keep legacy `limitations` available for backwards-compatible validation and rendering fallback. It should not replace the structured split between author-stated and LLM-inferred limits.
 
 ### `Tags`
 
@@ -208,7 +211,7 @@ Render:
 ```text
 ---
 
-Tags: codex-summary, paper-summary, ...
+Tags: codex-summary, paper-summary, inferred-labels
 ```
 
 Field mapping:
@@ -231,7 +234,9 @@ Continue generating these fields in `summary.json`, but do not render them into 
 - `follow_up_keywords`
 - `follow_up_questions`
 - `key_results_table`
+- `limitations`
 - `quality_score`
+- `potential_gaps`
 - `result_evidence_notes`
 - `review_issues`
 - `review_status`
@@ -275,6 +280,7 @@ Important nuance:
 - The old `3. 结果可信度` heading is forbidden as a rendered section name.
 - The data that powered it is still generated and validated.
 - New `3. 方法与设计` is the only allowed section 3 heading.
+- `trust_status` remains valid gate metadata, but note body validation should treat rendered trust-status labels as forbidden content.
 
 ## Gate Requirements
 
@@ -286,10 +292,16 @@ Keep these behaviors:
 2. `lint-summary` still validates canonical locators in trusted evidence fields.
 3. `review.json` still records review status, issues, and whether improvement is needed.
 4. `prepare-write-candidate` still runs live note refresh, version suffix calculation, note finalization, preview generation, `gate-run`, and `prepare-write-payload`.
-5. Real Zotero writes still use only `zotero-mcp write_note(action="create", ...)` with `note.html` content.
+5. Real Zotero writes still use only `zotero-mcp write_note` with `action="create"`, explicit `parentKey`, `content`, and `tags`, and `note.html` content.
 6. `verify-zotero-note` still checks parent, title, required headings, forbidden headings, tags, minimum content length, and canonical `contentSha256`.
 
 Core principle: the note body gets shorter; the audit trail does not get weaker.
+
+`limitations` migration rule:
+
+- `limitations` remains generated in `summary.json` as a legacy audit field while the structured limitation fields roll out.
+- `validate-trusted-summary` must keep limitation coverage. It may require legacy `limitations`, or accept the structured combination of `author_stated_limitations` plus `inferred_limits`, but it must not allow a write-ready summary with no limitation/risk coverage.
+- The renderer should prefer `author_stated_limitations`, `inferred_limits`, and `applicability_limits`. It may use `limitations` only as a compatibility fallback for older artifacts.
 
 ## Compatibility Requirements
 
@@ -314,6 +326,8 @@ In scope for the later implementation plan:
 - Update required and forbidden heading checks.
 - Update tests to expect the 0-5 rendered layout.
 - Update README / repo skill docs that describe the current note layout.
+- Specifically replace old `verify-zotero-note` examples in `README.md` and `skills/zotero-paper-summary/SKILL.md` so operators do not keep passing removed headings as required headings.
+- Update any repo-local skill instructions that still describe `结果可信度`, `我能怎么用`, or `术语与检索` as rendered sections.
 - Regenerate a dry-run note from an existing run artifact to verify the new layout.
 
 Out of scope:
@@ -343,6 +357,8 @@ Additional targeted checks:
 4. Confirm `gate-run` and `prepare-write-candidate` do not depend on old required headings.
 5. Confirm `verify-zotero-note` can be called with the new required headings and old forbidden headings.
 6. Confirm `summary.json` still retains audit-only fields such as `key_results_table`, `evidence_summary`, `concept_cards`, and `follow_up_keywords`.
+7. Confirm `note.md` and `note.html` do not render `trust_status`, `可信状态`, or equivalent trust-gate status labels in the note body.
+8. Confirm `potential_gaps` remains audit-only and is not rendered directly.
 
 ## User-Approved Decisions
 

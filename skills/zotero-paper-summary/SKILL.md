@@ -42,18 +42,17 @@ Use `skills/zotero-paper-summary/SKILL.md` in this repository first.
 
 ## 当前 Zotero note 渲染结构
 
-最终写入 Zotero 的阅读笔记采用 0-7 reading-thread layout：
+当前 Zotero note 正文只渲染 0-5：
 
-1. `0. 阅读结论`：30 秒结论、阅读决策、研究相关性、可信状态、主要风险、推荐先读章节和图表。
-2. `1. 论文主张`：背景问题、已有缺口、本文切入点、一句话贡献和摘要翻译。
-3. `2. 方法与设计`：方法总览、模块拆解、workflow 和必要技术细节。
-4. `3. 结果可信度`：关键结果表、baseline/comparison、结果证据说明和证据质量。核心数值和 locator 只在这里完整展开。
-5. `4. 图表导读`：说明关键图回答什么问题、如何支撑主线、图像/抽取质量如何；不要把图表段写成第二份结果总结。
-6. `5. 边界与机会`：作者明示局限、Codex 推断限制、适用边界和 potential gaps。
-7. `6. 我能怎么用`：可迁移启发、workflow lessons 和后续问题。
-8. `7. 术语与检索`：核心概念卡片、后续检索关键词和 trailing tags。
+1. `0. 阅读结论`：表格展示 `30 秒结论`、`主要风险`、`阅读决策`。不要渲染 `trust_status`。
+2. `1. 速读信息`：表格展示 `论文类型`、`研究对象`、`核心问题`、`核心方法`、`核心结果`。
+3. `2. 论文主张`：`背景问题`、`已有缺口`、`本文切入点 + 贡献`。
+4. `3. 方法与设计`：方法总览、模块拆解、Workflow、技术细节。
+5. `4. 图表导读`：只保留一张表，列为 `图`、`图像抽取质量`、`图片描述内容`。
+6. `5. 边界与机会`：作者明示局限、LLM 推断限制、适用机会与边界。
+7. trailing `Tags:` 行保持现有标签策略，至少包含 `codex-summary, paper-summary`。
 
-`metadata`、`evidence_summary`、`review_status`、`improvement_status`、`improvement_notes` 是 audit-only for rendered note。它们必须保留在 JSON artifacts 和 gate inputs 中，但不要作为 `元数据`、`证据链附录` 或 `补充优化记录` 专门渲染进 Zotero note。
+`key_results_table`、`baseline_or_comparison`、`result_evidence_notes`、`concept_cards`、`follow_up_keywords`、`limitations`、`trust_status` 继续写入 `summary.json`，用于审查、lint、gate 和未来扩展，但不渲染到 note 正文。
 
 ## 输入
 
@@ -331,14 +330,14 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
    - `main_risk_short` 只写一个最重要的风险；完整告警保留在 `extraction_warnings` 和 `review_issues`。
    - `workflow_steps` 可以是 Markdown string，也可以是 string list。
    - `recommended_sections` 和 `recommended_figures` 只列最值得先看的 1-5 项，locator 使用 canonical form。
-   - `baseline_or_comparison` 和 `result_evidence_notes` 用于支撑 `## 3. 结果可信度`，低置信 table/value candidate 必须写 caveat。
+   - `baseline_or_comparison` 和 `result_evidence_notes` 用于支撑 JSON 审查和 gate，不渲染到 note 正文；低置信 table/value candidate 必须写 caveat。
    - `author_stated_limitations` 只放作者明示的局限，object form 使用 `source_type: "author_stated"`。
-   - `inferred_limits` 只放 Codex/读者基于范围、数据或缺失实验推断出的限制，object form 使用 `source_type: "inferred"`，不得写成作者声称。
-   - `potential_gaps` 是后续研究 gap，必须包含 evidence locator 或显式 uncertainty。
+   - `inferred_limits` 只放 LLM/读者基于范围、数据或缺失实验推断出的限制，object form 使用 `source_type: "inferred"`，不得写成作者声称。
+   - `potential_gaps` 是 JSON 审计/未来扩展字段，不直接渲染到 note 正文；必须包含 evidence locator 或显式 uncertainty。
    - `method_modules` 优先用于 AI4S、computational materials、battery、simulation 和 method papers，拆出方法模块的输入、目标、输出和作用。
-   - `key_results_table` 汇总 RMSE、MAE、speedup、capacitance、energy density、cycle life、rate performance、diffusion barrier、conductivity、OOD performance 等关键结果。
-   - `concept_cards` 写 3-8 个核心概念。
-   - `workflow_lessons` 提炼可复用研究 workflow，不重复本文结论。
+   - `key_results_table` 汇总 RMSE、MAE、speedup、capacitance、energy density、cycle life、rate performance、diffusion barrier、conductivity、OOD performance 等关键结果，用于审查和 gate，不渲染到 note 正文。
+   - `concept_cards` 写 3-8 个核心概念，用于 JSON 审计和未来扩展，不渲染到 note 正文。
+   - `workflow_lessons` 提炼可复用研究 workflow，保留在 JSON 中，不渲染到 note 正文。
    - `paper_type` 必须从 `research_article`、`review`、`perspective`、`benchmark`、`method_paper`、`dataset_paper`、`theory_paper`、`unknown` 中选择。
    - `trust_status` 必须从 `trusted`、`usable_with_caveats`、`metadata_only`、`needs_manual_review` 中选择；默认用 `usable_with_caveats`，不要过度自信；不要输出 `needs_review`、`low_confidence` 或 `failed`。
    - `evidence_summary` 最多 5 条，每条结论最多列 3 个证据 locator；证据必须来自 `context.md` 或 `figure_context.md`。
@@ -460,7 +459,31 @@ target Zotero item title has been shown
    - `prepare-write-candidate` 会先删除 stale `write-payload.json`；只有 `gate-report.json` 为 `write_ready` 才重新生成 payload。不要复用上一次 run 留下的 payload。
    - `prepare-write-payload` 的 `--output` 必须是当前 run 目录的 `write-payload.json`。如果输出路径是 `gate-report.json`、`note.html`、非 `write-payload.json` 文件名，或不在 gate report 的 run 目录内，必须视为错误并停止。
    - 真实写入仍必须来自用户明确写入意图，且只能调用 `zotero-mcp write_note`。调用前读取 `<run_dir>/write-payload.json` 和 `<run_dir>/note.html`，传给 `write_note(action="create", parentKey=<payload parentKey>, content=<contents of note.html>, tags=<payload tags>)`。
-   - `write_note(action="create", ...)` 返回新 note key 后，立刻运行 `verify-zotero-note <note_key> --expected-parent <payload parentKey> --expected-title "<payload noteTitle>" --required-heading "0. 阅读结论" --required-heading "1. 论文主张" --required-heading "2. 方法与设计" --required-heading "3. 结果可信度" --required-heading "4. 图表导读" --required-heading "5. 边界与机会" --required-heading "6. 我能怎么用" --required-heading "7. 术语与检索" --forbidden-heading "9. 元数据" --forbidden-heading "10. 证据链附录" --forbidden-heading "11. 补充优化记录" --expected-tag codex-summary --expected-tag paper-summary --expected-content-sha256 <payload required_readback_checks.contentSha256> --min-content-length <payload required_readback_checks.contentLengthAtLeast>`。`contentSha256` 必须来自 payload 中的 canonical note HTML hash，不要用临时 shell hash 替代。
+   - `write_note(action="create", ...)` 返回新 note key 后，立刻运行：
+
+```bash
+uv run zotero-paperread verify-zotero-note <note_key> \
+  --expected-parent <payload parentKey> \
+  --expected-title "<payload noteTitle>" \
+  --required-heading "0. 阅读结论" \
+  --required-heading "1. 速读信息" \
+  --required-heading "2. 论文主张" \
+  --required-heading "3. 方法与设计" \
+  --required-heading "4. 图表导读" \
+  --required-heading "5. 边界与机会" \
+  --forbidden-heading "3. 结果可信度" \
+  --forbidden-heading "6. 我能怎么用" \
+  --forbidden-heading "7. 术语与检索" \
+  --forbidden-heading "9. 元数据" \
+  --forbidden-heading "10. 证据链附录" \
+  --forbidden-heading "11. 补充优化记录" \
+  --expected-tag codex-summary \
+  --expected-tag paper-summary \
+  --expected-content-sha256 <payload required_readback_checks.contentSha256> \
+  --min-content-length <payload required_readback_checks.contentLengthAtLeast>
+```
+
+     `contentSha256` 必须来自 payload 中的 canonical note HTML hash，不要用临时 shell hash 替代。
    - 如果历史迁移中尝试更新既有 note 时 `write_note(action="update", ...)` 超时，必须先读回确认是否生效；若读回仍是旧内容，stop and report the failed update readback，不要改用 Zotero HTTP API、SQLite 或其他写入路径，也不要自动创建重复迁移 note。
    - 成功后回读一次 `get_item_details`，确认子笔记已经挂载到目标条目下。
 
