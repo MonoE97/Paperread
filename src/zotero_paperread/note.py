@@ -64,7 +64,7 @@ PAPER_TYPE_DISPLAY_LABELS = {
     "method_paper": "方法论文",
     "dataset_paper": "数据集论文",
     "theory_paper": "理论论文",
-    "unknown": "unknown",
+    "unknown": "未知",
 }
 TRUST_STATUS_DISPLAY_LABELS = {
     "trusted": "可信",
@@ -77,7 +77,15 @@ READING_DECISION_DISPLAY_LABELS = {
     "recommended": "建议阅读",
     "skim_only": "只需略读",
     "not_priority": "暂非优先",
-    "unknown": "unknown",
+    "unknown": "未知",
+}
+IMAGE_QUALITY_DISPLAY_LABELS = {
+    "good": "清晰",
+    "ok": "可读",
+    "poor": "较差",
+    "image_too_small": "图像过小",
+    "caption_only": "仅图注",
+    "unknown": "未知",
 }
 REQUIRED_WRITE_READY_TEXT_FIELDS = {
     "one_sentence_summary": "one_sentence_summary is required",
@@ -101,9 +109,7 @@ def safe_choice(value: Any, allowed: set[str], default: str) -> str:
 
 def display_choice(value: str, display_labels: dict[str, str]) -> str:
     label = display_labels.get(value, "unknown")
-    if value == "unknown" or label == "unknown":
-        return "unknown"
-    return f"{label} ({value})"
+    return label if label != "unknown" else "未知"
 
 
 def safe_list(value: Any) -> list[Any]:
@@ -129,7 +135,7 @@ def clean_method_modules(value: Any) -> list[dict[str, str]]:
         if not isinstance(item, dict):
             continue
         name = safe_text(item.get("name"))
-        if name == "unknown":
+        if name in {"unknown", "未知"}:
             continue
         cleaned.append(
             {
@@ -150,7 +156,7 @@ def clean_key_results_table(value: Any) -> list[dict[str, str]]:
         if not isinstance(item, dict):
             continue
         result = safe_text(item.get("result"))
-        if result == "unknown":
+        if result in {"unknown", "未知"}:
             continue
         cleaned.append(
             {
@@ -206,7 +212,7 @@ def clean_limitation_objects(value: Any, *, expected_source_type: str | None = N
     for item in items[:8]:
         if isinstance(item, str):
             text = safe_text(item)
-            if text != "unknown":
+            if text not in {"unknown", "未知"}:
                 cleaned.append(
                     {
                         "text": text,
@@ -241,7 +247,7 @@ def clean_concept_cards(value: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         term = safe_text(item.get("term"))
-        if term == "unknown":
+        if term in {"unknown", "未知"}:
             continue
         cleaned.append(
             {
@@ -267,7 +273,7 @@ def clean_required_text(value: Any) -> str:
     return flatten_inline_markdown_text(value) if isinstance(value, str) else ""
 
 
-def safe_text(value: Any, default: str = "unknown") -> str:
+def safe_text(value: Any, default: str = "未知") -> str:
     if not isinstance(value, str):
         return default
     text = flatten_inline_markdown_text(value)
@@ -291,7 +297,7 @@ def optional_text(value: Any) -> str:
     return flatten_inline_markdown_text(value) if isinstance(value, str) else ""
 
 
-def fallback_text(primary: Any, fallback: Any, default: str = "unknown") -> str:
+def fallback_text(primary: Any, fallback: Any, default: str = "未知") -> str:
     primary_text = flatten_inline_markdown_text(primary) if isinstance(primary, str) else ""
     if primary_text:
         return primary_text
@@ -454,6 +460,10 @@ def build_figure_description(item: dict[str, Any], image_quality: str) -> str:
     return " ".join(parts) if parts else "未提供图表描述。"
 
 
+def display_image_quality(value: str) -> str:
+    return IMAGE_QUALITY_DISPLAY_LABELS.get(value, IMAGE_QUALITY_DISPLAY_LABELS["unknown"])
+
+
 def clean_key_figures(summary: dict[str, Any]) -> list[dict[str, Any]]:
     items = safe_list(summary.get("key_figures", []))
     cleaned: list[dict[str, Any]] = []
@@ -462,6 +472,7 @@ def clean_key_figures(summary: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         fallback_index = len(cleaned) + 1
         image_quality = normalize_figure_image_quality(item)
+        image_quality_display = display_image_quality(image_quality)
         caption = str(item.get("caption", "")).strip()
         cleaned.append(
             {
@@ -474,8 +485,8 @@ def clean_key_figures(summary: dict[str, Any]) -> list[dict[str, Any]]:
                 "title_short": optional_text(item.get("title_short")),
                 "why_it_matters_short": fallback_text(item.get("why_it_matters_short"), item.get("why_it_matters")),
                 "evidence_level": safe_choice(item.get("evidence_level"), VALID_EVIDENCE_LEVELS, "unknown"),
-                "image_quality": image_quality,
-                "figure_quality_note": fallback_text(item.get("figure_quality_note"), image_quality),
+                "image_quality": image_quality_display,
+                "figure_quality_note": fallback_text(item.get("figure_quality_note"), image_quality_display),
                 "figure_description": build_figure_description(item, image_quality),
                 "analysis": str(item.get("analysis", "")).strip(),
             }
@@ -519,9 +530,9 @@ def infer_main_risk_short(summary: dict[str, Any], review_issues: list[dict[str,
             review_issues,
             key=lambda item: severity_rank.get(item.get("severity", "medium"), severity_rank["medium"]),
         )
-        return highest_issue.get("issue") or "none"
+        return highest_issue.get("issue") or "无"
 
-    return "none"
+    return "无"
 
 
 def clean_improvement_notes(summary: dict[str, Any]) -> list[dict[str, str]]:

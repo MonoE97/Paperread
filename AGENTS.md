@@ -20,6 +20,13 @@
 - `section_context.md` is not a canonical evidence source；它只辅助阅读定位。最终 `evidence_summary` locator 必须引用 `context.md` 或 `figure_context.md`，例如 `context.md page 3 section Methods`、`context.md page 6 section Results table_candidate 1`、`figure_context.md fig_p4_1`。
 - 用户提供微信公众号、新闻稿、博客等网页时，只作为二级材料 capture，用于 cross-check 和补充背景；`evidence_summary` 只能引用 `context.md` 和 `figure_context.md`。
 
+## 阅读笔记语言规则
+
+- Zotero 阅读笔记正文默认使用中文描述；除论文题名、作者名、机构名、化学式、材料/模型/方法专名、缩写、单位、引用 locator、代码式 key 和 Zotero tags 外，不要用整句英文解释。
+- 会渲染到 `note.md` / `note.html` 的自由文本字段必须优先中文化，包括 `research_object`、`main_risk_short`、`method_modules`、`workflow_steps`、`technical_details`、`key_figures.analysis`、`key_figures.why_it_matters`、缺少 `analysis` 时会作为 fallback 渲染的 `key_figures.caption`、`author_stated_limitations`、`inferred_limits` 和 `applicability_limits`。
+- `note_labels` 和 Zotero metadata tags 保持英文规范 key；它们是机器标签，不是正文描述。
+- `lint-summary` 会把渲染字段中的整段英文 prose 视为写入阻断项；真实写入前必须修正到 `gate-report.json` 为 `write_ready`。
+
 ## 环境与依赖
 
 - Python 环境必须用 `uv` 管理。

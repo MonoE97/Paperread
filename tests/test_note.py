@@ -234,14 +234,29 @@ def test_render_note_uses_decision_and_quick_info_tables() -> None:
     assert "## 0. 阅读结论\n\n| 项目 | 内容 |\n| --- | --- |" in note
     assert "| 30 秒结论 | 本文把动力学采样模型和电子响应模型拆开训练，用于电化学界面长时间尺度采样。 |" in note
     assert "| 主要风险 | Figure 2-4 crop 过小，图像细节不能独立复核。 |" in note
-    assert "| 阅读决策 | 强烈建议精读 (strongly_recommended) |" in note
+    assert "| 阅读决策 | 强烈建议精读 |" in note
 
     assert "## 1. 速读信息\n\n| 项目 | 内容 |\n| --- | --- |" in note
-    assert "| 论文类型 | 研究论文 (research_article) |" in note
+    assert "| 论文类型 | 研究论文 |" in note
     assert "| 研究对象 | Au(100)/NaCl(aq) electrochemical interface |" in note
     assert "| 核心问题 | 如何加速 finite-field electrochemical interface simulations？ |" in note
     assert "| 核心方法 | FIREANN 学外场相关原子力，MLEDR 学电子密度响应。 |" in note
     assert "| 核心结果 | 实现约 4 个数量级加速，并预测电容、极化和界面水取向。 |" in note
+
+
+def test_render_note_localizes_internal_enum_values() -> None:
+    note = render_note(
+        METADATA,
+        {**SUMMARY_WITH_FIGURES, **TRUSTED_FIELDS, **LEARNING_FIELDS},
+        generated_date="2026-04-23",
+    )
+
+    assert "| 论文类型 | 研究论文 |" in note
+    assert "| 阅读决策 | 强烈建议精读 |" in note
+    assert "| Figure 1 | 可读 |" in note
+    assert "research_article" not in note
+    assert "strongly_recommended" not in note
+    assert "| Figure 1 | ok |" not in note
 
 
 def test_render_note_renders_recommendations_result_evidence_and_gap_fields() -> None:
@@ -324,7 +339,7 @@ def test_render_note_renders_recommendations_result_evidence_and_gap_fields() ->
     assert "The authors evaluate one material family. (context.md page 8 section Discussion)" in rendered
     assert "### LLM 推断限制" in rendered
     assert "Transfer to sulfide solid electrolytes is not established." in rendered
-    assert "basis: The experiments cover oxide examples only." in rendered
+    assert "依据: The experiments cover oxide examples only." in rendered
     assert "### 潜在 gap / 后续问题" not in rendered
     assert "潜在 gap" not in rendered
     assert "Reactive battery interfaces remain open." not in rendered
@@ -423,7 +438,7 @@ def test_render_note_html_escapes_raw_html_from_note_source() -> None:
 def test_render_note_old_summary_uses_safe_fallbacks() -> None:
     note = render_note(METADATA, SUMMARY, generated_date="2026-04-23")
 
-    assert "| 研究对象 | unknown |" in note
+    assert "| 研究对象 | 未知 |" in note
     assert "| 核心问题 | 如何更可靠地预测材料性质？ |" in note
     assert "| 核心方法 | 作者结合图神经网络和物理约束。 |" in note
     assert "| 核心结果 | 这篇论文提出一种用于材料发现的机器学习框架。 |" in note
@@ -444,7 +459,7 @@ def test_render_note_accepts_workflow_steps_as_list() -> None:
         generated_date="2026-04-23",
     )
 
-    assert "### Workflow" in note
+    assert "### 工作流" in note
     assert "1. 生成 AIMD 数据\n2. 训练 FIREANN\n3. 训练 MLEDR" in note
 
 
@@ -468,7 +483,7 @@ def test_render_note_prefers_specific_visual_quality_warning() -> None:
     note = render_note(METADATA, summary, generated_date="2026-04-23")
 
     assert "| 图 | 图像抽取质量 | 图片描述内容 |" in note
-    assert "| Figure 1 | image_too_small |" in note
+    assert "| Figure 1 | 图像过小 |" in note
     assert "图像质量不足，只能基于正文和 caption 分析。" in note
     assert "支撑的核心主张：测试图作用。" in note
     assert "图像抽取质量较低，以上判断仅基于正文/图注证据。" in note
@@ -551,7 +566,7 @@ def test_render_note_contains_figure_sections() -> None:
 
     assert "## 4. 图表导读" in note
     assert "| 图 | 图像抽取质量 | 图片描述内容 |" in note
-    assert "| Figure 1 | ok |" in note
+    assert "| Figure 1 | 可读 |" in note
     assert "图 1 展示了从输入结构到扩散采样再到性质打分的主链路。" in note
     assert "这张图定义了整篇论文的方法对象和信息流。" in note
     assert "### 图表总览" not in note
@@ -568,7 +583,7 @@ def test_render_note_uses_single_figure_table() -> None:
     )
 
     assert "## 4. 图表导读\n\n| 图 | 图像抽取质量 | 图片描述内容 |\n| --- | --- | --- |" in note
-    assert "| Figure 1 | ok |" in note
+    assert "| Figure 1 | 可读 |" in note
     assert "图 1 展示了从输入结构到扩散采样再到性质打分的主链路。" in note
     assert "这张图定义了整篇论文的方法对象和信息流。" in note
     assert "### 图表总览" not in note
@@ -585,7 +600,7 @@ def test_render_note_figure_section_stays_table_when_no_figures() -> None:
     )
 
     assert "## 4. 图表导读\n\n| 图 | 图像抽取质量 | 图片描述内容 |\n| --- | --- | --- |" in note
-    assert "| none | unknown | 未抽取到可用图表；图表导读不可用，请以正文与证据摘要为准。 |" in note
+    assert "| 无 | 未知 | 未抽取到可用图表；图表导读不可用，请以正文与证据摘要为准。 |" in note
     figure_section = note.split("## 4. 图表导读", maxsplit=1)[1].split("## 5. 边界与机会", maxsplit=1)[0]
     assert "- none" not in figure_section
 
@@ -616,8 +631,8 @@ def test_render_note_falls_back_to_ordered_figure_labels_without_caption_number(
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
 
-    assert "| Figure 1 | unknown |" in note
-    assert "| Figure 2 | unknown |" in note
+    assert "| Figure 1 | 未知 |" in note
+    assert "| Figure 2 | 未知 |" in note
     assert "第一张图分析。" in note
     assert "第二张图分析。" in note
     assert "| p1-f1 |" not in note
@@ -645,8 +660,8 @@ def test_render_note_fallback_figure_labels_ignore_skipped_items() -> None:
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
 
-    assert "| Figure 1 | unknown |" in note
-    assert "| Figure 2 | unknown |" not in note
+    assert "| Figure 1 | 未知 |" in note
+    assert "| Figure 2 | 未知 |" not in note
     assert "### Figure 1：Pipeline" not in note
 
 
@@ -978,7 +993,7 @@ def test_render_note_ignores_string_values_for_list_sections() -> None:
     )[0]
 
     assert "| 图 | 图像抽取质量 | 图片描述内容 |" in figure_section
-    assert "| none | unknown | 未抽取到可用图表；图表导读不可用，请以正文与证据摘要为准。 |" in figure_section
+    assert "| 无 | 未知 | 未抽取到可用图表；图表导读不可用，请以正文与证据摘要为准。 |" in figure_section
     assert "### 图表总览" not in figure_section
     assert "### 图表索引" not in figure_section
     assert "### 展开图表" not in figure_section

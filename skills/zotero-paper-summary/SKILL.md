@@ -47,12 +47,21 @@ Use `skills/zotero-paper-summary/SKILL.md` in this repository first.
 1. `0. 阅读结论`：表格展示 `30 秒结论`、`主要风险`、`阅读决策`。不要渲染 `trust_status`。
 2. `1. 速读信息`：表格展示 `论文类型`、`研究对象`、`核心问题`、`核心方法`、`核心结果`。
 3. `2. 论文主张`：`背景问题`、`已有缺口`、`本文切入点 + 贡献`。
-4. `3. 方法与设计`：方法总览、模块拆解、Workflow、技术细节。
+4. `3. 方法与设计`：方法总览、模块拆解、工作流、技术细节。
 5. `4. 图表导读`：只保留一张表，列为 `图`、`图像抽取质量`、`图片描述内容`。
 6. `5. 边界与机会`：作者明示局限、LLM 推断限制、适用机会与边界。
 7. trailing `Tags:` 行保持现有标签策略，至少包含 `codex-summary, paper-summary`。
 
 `key_results_table`、`baseline_or_comparison`、`result_evidence_notes`、`concept_cards`、`follow_up_keywords`、`trust_status` 继续写入 `summary.json`，用于审查、lint、gate 和未来扩展，但不渲染到 note 正文。`limitations` 仍写入 `summary.json` 并参与 gate；正文优先使用 `author_stated_limitations` / `inferred_limits` / `applicability_limits`，只有旧 summary 缺少结构化局限字段时，才把 `limitations` 作为 legacy rendering fallback。
+
+## 阅读笔记语言要求
+
+- Zotero note 正文必须中文优先。除论文题名、作者名、机构名、化学式、材料/模型/方法专名、缩写、单位、evidence locator、代码式 key 和 Zotero tags 外，不要写整句英文解释。
+- 会渲染到 `note.md` / `note.html` 的自由文本字段必须主动中文化，包括 `research_object`、`main_risk_short`、`method_modules.name/input/target/output/role`、`workflow_steps`、`technical_details`、`key_figures.analysis/why_it_matters`、缺少 `analysis` 时会作为 fallback 渲染的 `key_figures.caption`、`author_stated_limitations.text`、`inferred_limits.text/basis` 和 `applicability_limits`。
+- 可以保留 `DFT`、`MLFF`、`NMC811`、`Li3PO4-TaCl5`、`FIREANN`、`VASP`、`solid-state electrolyte` 这类术语；但它们周围的解释句应使用中文，例如写“DFT/MLFF 机理分析用于区分 Cl 子晶格和 PO4 单元贡献”，不要写“DFT/MLFF mechanism analysis identifies which substructure governs transport”。
+- `note_labels` 只写英文规范 key，Zotero metadata tags 也保持英文 key；这些是机器标签，不是正文描述。
+- `paper_type`、`reading_decision`、`image_quality` 等内部枚举仍按 schema 写入 `summary.json`，但渲染到 note 时显示中文标签；不要在正文中手写 `research_article`、`strongly_recommended`、`ok` 这类内部 key。
+- `lint-summary` 会报告 `rendered_note_field_english_prose`，`gate-run` 会据此阻断写入。出现该 lint 时，先改 `summary.json` 中对应字段，再重新执行 `apply-review -> lint-summary -> validate-trusted-summary -> prepare-write-candidate`。
 
 ## 输入
 
@@ -326,6 +335,7 @@ uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_
      - 这张图展示什么
      - 为什么它重要
      - 它支撑了哪条核心结论或方法理解
+   - 渲染到 note 正文的解释性字段必须尽量使用中文；只保留必要专有名词、缩写、化学式、单位和 key。
    - `note_labels` 只写本文自动推断出的英文规范 key，不要包含固定系统标签 `codex-summary` 或 `paper-summary`。
    - `note_labels` 最多 4 个；使用 lowercase snake_case，例如 `metasurface`、`inverse_design`、`deep_learning`、`power_allocation`。
    - `reading_decision` 必须从 `strongly_recommended`、`recommended`、`skim_only`、`not_priority`、`unknown` 中选择。

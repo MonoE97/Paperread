@@ -135,3 +135,160 @@ def test_lint_summary_flags_structured_limitation_source_type_mismatch() -> None
     codes = [issue["code"] for issue in issues]
     assert "author_stated_limitation_source_type_invalid" in codes
     assert "inferred_limit_source_type_invalid" in codes
+
+
+def test_lint_summary_flags_english_prose_in_rendered_note_fields() -> None:
+    summary = {
+        "research_object": "NMC811 ASSLB",
+        "method_modules": [
+            {
+                "name": "DFT/MLFF mechanism analysis",
+                "input": "Li3PO4 and TaCl5 at x = 1/3",
+                "target": "Identify which substructure governs lithium transport",
+                "output": "Freeze Cl suppresses conductivity",
+                "role": "Provides causal evidence",
+            },
+            {
+                "name": "FIREANN",
+                "input": "含外场的原子结构",
+                "target": "预测外场相关原子力",
+                "output": "MLMD 力场",
+                "role": "加速界面采样",
+            },
+        ],
+        "technical_details": ["NMC811 ASSLB", "MLFF 使用 VASP on-the-fly 训练。"],
+        "evidence_summary": [],
+        "key_figures": [],
+    }
+
+    issues = lint_summary(summary)
+
+    messages = [issue["message"] for issue in issues if issue["code"] == "rendered_note_field_english_prose"]
+    assert any("method_modules[0].name" in message for message in messages)
+    assert any("method_modules[0].input" in message for message in messages)
+    assert any("method_modules[0].target" in message for message in messages)
+    assert any("method_modules[0].output" in message for message in messages)
+    assert any("method_modules[0].role" in message for message in messages)
+    assert not any("research_object" in message for message in messages)
+    assert not any("technical_details[0]" in message for message in messages)
+    assert not any("method_modules[1]" in message for message in messages)
+
+
+def test_lint_summary_flags_mostly_english_prose_even_with_cjk() -> None:
+    summary = {
+        "method_modules": [
+            {
+                "name": "DFT mechanism analysis 中文",
+                "input": "含外场的原子结构",
+                "target": "Identify which substructure governs transport。中文补充。",
+                "output": "MLFF 使用 VASP on-the-fly 训练。",
+                "role": "加速界面采样",
+            }
+        ],
+        "technical_details": ["Use EIS to test conductivity。这里是中文。"],
+        "evidence_summary": [],
+        "key_figures": [],
+    }
+
+    issues = lint_summary(summary)
+
+    messages = [issue["message"] for issue in issues if issue["code"] == "rendered_note_field_english_prose"]
+    assert any("method_modules[0].name" in message for message in messages)
+    assert any("method_modules[0].target" in message for message in messages)
+    assert any("technical_details[0]" in message for message in messages)
+    assert not any("method_modules[0].output" in message for message in messages)
+
+
+def test_lint_summary_allows_scattered_technical_terms_units_and_formulas() -> None:
+    summary = {
+        "one_sentence_summary": (
+            "本文提出低成本 Li3PO4-TaCl5 非晶氧氯磷酸盐固态电解质，1/3-LPTC 以 "
+            "1.3 mS cm^-1 室温电导率、0.310 eV 活化能和 NMC811 ASSLB 长循环结果支撑设计路线。"
+        ),
+        "core_method_short": "低能球磨 + EIS/XRD 优化 + Raman/FTIR/PDF/7Li NMR + DFT/MLFF constrained MD。",
+        "method_modules": [
+            {
+                "name": "DFT/MLFF 约束动力学",
+                "input": "DFT 松弛的 1/3-LPTC 局域模型和 VASP on-the-fly MLFF",
+                "target": "识别哪个子结构主导 Li 传输",
+                "output": "all-mobile 为 2.21 mS cm^-1，freeze PO4 为 1.74 mS cm^-1，freeze Cl 为 0.14 mS cm^-1",
+                "role": "提供 Cl 子晶格畸变控制传导的因果证据",
+            }
+        ],
+        "evidence_summary": [],
+        "key_figures": [],
+    }
+
+    issues = lint_summary(summary)
+
+    assert not any(issue["code"] == "rendered_note_field_english_prose" for issue in issues)
+
+
+def test_lint_summary_does_not_let_locator_prefix_hide_english_prose() -> None:
+    summary = {
+        "technical_details": ["context.md page 3 section Results and discussion supports the claim."],
+        "evidence_summary": [],
+        "key_figures": [],
+    }
+
+    issues = lint_summary(summary)
+
+    messages = [issue["message"] for issue in issues if issue["code"] == "rendered_note_field_english_prose"]
+    assert any("technical_details[0]" in message for message in messages)
+
+
+def test_lint_summary_allows_context_locators_with_section_names() -> None:
+    summary = {
+        "technical_details": ["证据位置：context.md page 3 section Results and discussion。"],
+        "evidence_summary": [],
+        "key_figures": [],
+    }
+
+    issues = lint_summary(summary)
+
+    assert not any(issue["code"] == "rendered_note_field_english_prose" for issue in issues)
+
+
+def test_lint_summary_flags_english_caption_when_it_would_render_as_fallback() -> None:
+    summary = {
+        "key_figures": [{"caption": "Figure 1. Overview of the model pipeline.", "analysis": ""}],
+        "evidence_summary": [],
+    }
+
+    issues = lint_summary(summary)
+
+    messages = [issue["message"] for issue in issues if issue["code"] == "rendered_note_field_english_prose"]
+    assert any("key_figures[0].caption" in message for message in messages)
+
+
+def test_lint_summary_allows_english_caption_when_chinese_analysis_will_render() -> None:
+    summary = {
+        "key_figures": [
+            {
+                "caption": "Figure 1. Overview of the model pipeline.",
+                "analysis": "图 1 展示模型主流程。",
+            }
+        ],
+        "evidence_summary": [],
+    }
+
+    issues = lint_summary(summary)
+
+    assert not any(issue["code"] == "rendered_note_field_english_prose" for issue in issues)
+
+
+def test_lint_summary_does_not_block_non_rendered_figure_quality_note_prose() -> None:
+    summary = {
+        "key_figures": [
+            {
+                "caption": "Figure 1. Overview of the model pipeline.",
+                "analysis": "图 1 展示模型主流程。",
+                "figure_quality_note": "embedded-image caption confidence is low.",
+            }
+        ],
+        "evidence_summary": [],
+    }
+
+    issues = lint_summary(summary)
+
+    assert not any(issue["code"] == "rendered_note_field_english_prose" for issue in issues)

@@ -55,11 +55,11 @@
 | {{ item.name | table_cell }} | {{ item.input | table_cell }} | {{ item.target | table_cell }} | {{ item.output | table_cell }} | {{ item.role | table_cell }} |
 {% endfor %}
 {% else %}
-- none
+- 无
 {% endif %}
 
 {% if workflow_steps %}
-### Workflow
+### 工作流
 
 {{ workflow_steps }}
 {% endif %}
@@ -71,7 +71,7 @@
 - {{ item }}
 {% endfor %}
 {% else %}
-- none
+- 无
 {% endif %}
 
 ## 4. 图表导读
@@ -83,7 +83,7 @@
 | {{ item.display_label | table_cell }} | {{ item.image_quality | table_cell }} | {{ item.figure_description | table_cell }} |
 {% endfor %}
 {% else %}
-| none | unknown | 未抽取到可用图表；图表导读不可用，请以正文与证据摘要为准。 |
+| 无 | 未知 | 未抽取到可用图表；图表导读不可用，请以正文与证据摘要为准。 |
 {% endif %}
 
 ## 5. 边界与机会
@@ -99,17 +99,17 @@
 - {{ item }}
 {% endfor %}
 {% else %}
-- none
+- 无
 {% endif %}
 
 ### LLM 推断限制
 
 {% if inferred_limits %}
 {% for item in inferred_limits %}
-- {{ item.text }}{% if item.basis %} (basis: {{ item.basis }}){% endif %}{% if item.locator %} ({{ item.locator }}){% endif %}
+- {{ item.text }}{% if item.basis %} (依据: {{ item.basis }}){% endif %}{% if item.locator %} ({{ item.locator }}){% endif %}
 {% endfor %}
 {% else %}
-- none
+- 无
 {% endif %}
 
 ### 适用机会与边界
@@ -119,7 +119,7 @@
 - {{ item }}
 {% endfor %}
 {% else %}
-- none
+- 无
 {% endif %}
 
 ---
