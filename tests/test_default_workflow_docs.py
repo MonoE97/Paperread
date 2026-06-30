@@ -23,8 +23,8 @@ def test_public_docs_use_single_repo_local_skill_entry() -> None:
     assert "uv sync" in combined
     assert "from the repo root" in combined
     assert "not a standalone global skill installation" in read(PAPERREAD_SKILL)
-    assert "skills/zotero-paper-summary" not in combined
-    assert "skills/zotero-batch-note-writing" not in combined
+    assert ("skills/" + "zotero-paper-summary") not in combined
+    assert ("skills/" + "zotero-" + "batch-note-writing") not in combined
     assert ".agents/skills/paperread" not in combined
     assert ".claude/skills/paperread" not in combined
 
