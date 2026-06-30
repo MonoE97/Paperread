@@ -1,3 +1,4 @@
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -16,6 +17,17 @@ CAPTURE_SCRIPT = PAPERREAD_SKILL_DIR / "scripts" / "capture-secondary-url.mjs"
 
 def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def tracked_project_files() -> list[Path]:
+    result = subprocess.run(
+        ["git", "ls-files"],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [PROJECT_ROOT / line for line in result.stdout.splitlines() if line]
 
 
 def test_public_docs_use_single_repo_local_skill_entry() -> None:
@@ -46,7 +58,7 @@ def test_public_package_and_primary_cli_are_named_paperread() -> None:
     assert "name: paperread" in read(PAPERREAD_SKILL)
 
 
-def test_legacy_project_identity_is_absent_from_tracked_text() -> None:
+def assert_legacy_project_identity_absent_from_tracked_text() -> None:
     legacy_cli = "zotero" + "-paperread"
     legacy_module = "zotero" + "_paperread"
     legacy_skill_dir = "skills" + "_paperread"
@@ -56,11 +68,7 @@ def test_legacy_project_identity_is_absent_from_tracked_text() -> None:
     assert not (PROJECT_ROOT / "src" / legacy_module).exists()
     assert not (PROJECT_ROOT / legacy_skill_dir).exists()
 
-    for path in PROJECT_ROOT.rglob("*"):
-        if not path.is_file():
-            continue
-        if any(part in {".git", ".venv", ".pytest_cache", "__pycache__", "runs"} for part in path.parts):
-            continue
+    for path in tracked_project_files():
         if path.suffix in {".pyc", ".pdf", ".png", ".jpg", ".jpeg"}:
             continue
         try:
@@ -70,6 +78,21 @@ def test_legacy_project_identity_is_absent_from_tracked_text() -> None:
         assert legacy_cli not in text, path
         assert legacy_module not in text, path
         assert legacy_skill_dir not in text, path
+
+
+def test_legacy_project_identity_is_absent_from_tracked_text() -> None:
+    assert_legacy_project_identity_absent_from_tracked_text()
+
+
+def test_legacy_project_identity_scan_ignores_local_artifacts() -> None:
+    legacy_cli = "zotero" + "-paperread"
+    ignored_artifact = PROJECT_ROOT / "tmp" / "legacy-local-output.txt"
+    ignored_artifact.parent.mkdir(exist_ok=True)
+    ignored_artifact.write_text(f"local artifact mentioning {legacy_cli}\n", encoding="utf-8")
+    try:
+        assert_legacy_project_identity_absent_from_tracked_text()
+    finally:
+        ignored_artifact.unlink(missing_ok=True)
 
 
 def test_public_docs_describe_supported_workflows_and_outputs() -> None:
