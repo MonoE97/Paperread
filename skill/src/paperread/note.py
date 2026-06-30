@@ -8,6 +8,8 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from markdown_it import MarkdownIt
 
+from paperread.evidence import is_canonical_trusted_locator
+
 REQUIRED_SECTIONS = [
     "0. 阅读结论",
     "1. 速读信息",
@@ -320,7 +322,7 @@ def _has_text(value: Any) -> bool:
 
 def _is_write_ready_evidence_locator(value: Any) -> bool:
     locator = clean_required_text(value)
-    return bool(re.match(r"^(?:context\.md|figure_context\.md)(?:$|[\s:#])", locator))
+    return is_canonical_trusted_locator(locator)
 
 
 def format_evidence_line(locator: str, summary: str) -> str:
@@ -389,12 +391,20 @@ def validate_write_ready_evidence(summary: dict[str, Any]) -> list[str]:
         evidence_items = item.get("evidence", [])
         has_locator = False
         if isinstance(evidence_items, list):
-            for evidence in evidence_items[:3]:
-                if isinstance(evidence, dict) and _is_write_ready_evidence_locator(evidence.get("locator")):
+            for evidence_index, evidence in enumerate(evidence_items[:3], start=1):
+                if not isinstance(evidence, dict):
+                    continue
+                locator = clean_required_text(evidence.get("locator"))
+                if not locator:
+                    continue
+                if _is_write_ready_evidence_locator(locator):
                     has_locator = True
-                    break
+                else:
+                    errors.append(
+                        f"evidence_summary[{index}].evidence[{evidence_index}] has noncanonical evidence locator"
+                    )
         if not has_locator:
-            errors.append(f"evidence_summary[{index}] must include at least one evidence locator")
+            errors.append(f"evidence_summary[{index}] must include at least one canonical evidence locator")
 
     if valid_claim_count == 0:
         errors.insert(0, "evidence_summary must contain at least one claim")

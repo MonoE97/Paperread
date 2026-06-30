@@ -3,19 +3,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from paperread.evidence import SECONDARY_EVIDENCE_PREFIXES, is_canonical_trusted_locator
 
 LOW_QUALITY_IMAGE_VALUES = {"poor", "image_too_small", "caption_only"}
-SECONDARY_EVIDENCE_PREFIXES = (
-    "secondary_context",
-    "secondary_context.md",
-    "secondary_contexts/",
-    "secondary_sources.json",
-    "wechat-context",
-)
-CANONICAL_CONTEXT_LOCATOR = re.compile(
-    r"^context\.md page \d+(?: section [A-Za-z0-9][A-Za-z0-9 /&().,+:_-]*)?(?: table_candidate \d+)?$"
-)
-CANONICAL_FIGURE_LOCATOR = re.compile(r"^figure_context\.md [A-Za-z0-9_.:-]+$")
 CJK_RE = re.compile(r"[\u3400-\u9fff]")
 ENGLISH_TOKEN_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]*(?:[-/][A-Za-z0-9]+)*\b")
 LATIN_LETTER_RE = re.compile(r"[A-Za-z]")
@@ -115,12 +105,6 @@ RENDERED_TEXT_FIELDS = (
 RENDERED_TEXT_LIST_FIELDS = ("contributions", "technical_details", "limitations", "applicability_limits")
 RENDERED_METHOD_MODULE_FIELDS = ("name", "input", "target", "output", "role")
 RENDERED_FIGURE_FIELDS = ("analysis", "why_it_matters", "why_it_matters_short")
-
-
-def is_canonical_trusted_locator(locator: str) -> bool:
-    """Return whether a locator cites an allowed primary paper artifact."""
-    return bool(CANONICAL_CONTEXT_LOCATOR.match(locator) or CANONICAL_FIGURE_LOCATOR.match(locator))
-
 
 def _strip_allowed_mixed_english_phrases(value: str) -> str:
     text = LOCATOR_FRAGMENT_RE.sub(" ", value)

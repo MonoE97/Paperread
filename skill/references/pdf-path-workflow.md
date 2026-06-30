@@ -30,7 +30,7 @@ The first run writes `<pdf_stem>_analysis/` and targets `<pdf_stem>_note.md`. Re
 
 2. Read the generated `context.md`, `section_context.md`, and `figure_context.md` if available.
 
-3. Write `summary.json` and `review.json` in the analysis directory. Use `section_context.md` only as navigation. It is not a canonical evidence source. Evidence locators must cite `context.md` or `figure_context.md`.
+3. Write `summary.json` and `review.json` in the analysis directory. Use `section_context.md` only as navigation. It is not a canonical evidence source. Evidence locators must use canonical forms: `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, and secondary context paths are invalid.
 
 4. Run the deterministic review chain:
 

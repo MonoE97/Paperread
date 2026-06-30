@@ -27,7 +27,7 @@ Do not add `README.md`, `INSTALLATION_GUIDE.md`, `QUICK_REFERENCE.md`, or `CHANG
 - Zotero title workflow 使用 `create-run`，默认把本地产物写到安装后的 skill root 下：`runs/YYYY-MM-DD/<title-slug>/`；准备写入候选后，同目录包含 `note.md`、`note.html`、`gate-report.json` 和 `write-payload.json`。
 - `prepare-item` 默认生成 `context.md`，并在结构化抽取可用时生成 `section_context.md`；`section_context.md` 只用于帮助 Codex 定位章节、表格候选和值候选。
 - PDF path workflow 使用 `prepare-pdf <pdf_path>`，首次在 PDF 同目录生成 `<pdf_stem>_analysis/` 和 `<pdf_stem>_note.md`，重复运行使用 `<pdf_stem>_analysis_v2/`、`<pdf_stem>_note_v2.md` 等后缀，不覆盖旧输出。
-- `section_context.md` is not a canonical evidence source；最终 `evidence_summary` locator 必须引用 `context.md` 或 `figure_context.md`，例如 `context.md page 3 section Methods`、`context.md page 6 section Results table_candidate 1`、`figure_context.md fig_p4_1`。
+- `section_context.md` is not a canonical evidence source；最终 `evidence_summary` locator 必须使用 canonical 格式：`context.md page <N>`、`context.md page <N> section <Section Name>`、`context.md page <N> section <Section Name> table_candidate <N>` 或 `figure_context.md <figure_id>`。裸 `context.md` / `figure_context.md`、`page 3 method section` 这类散文式 locator、`section_context.md` 和 secondary context 路径都不是 write-ready evidence locator。
 - 用户提供微信公众号、新闻稿、博客等网页时，只作为 secondary context capture，用于 cross-check 和补充背景；`evidence_summary` 只能引用 `context.md` 和 `figure_context.md`。Secondary context must not cite secondary context in `evidence_summary`.
 
 ## 阅读笔记语言规则

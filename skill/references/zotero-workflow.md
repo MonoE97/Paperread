@@ -50,7 +50,7 @@ node scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_cont
 
 Captured files use `source_status: secondary_context` when usable. Unavailable captures use `source_status: secondary_context_unavailable`, including warnings such as `navigation_timeout`. Secondary context must not cite secondary context in `evidence_summary`; it is only for cross-checking and background.
 
-7. Read `context.md`, `section_context.md`, and `figure_context.md` if available. `section_context.md` is not a canonical evidence source. Final locators must cite `context.md page 3 section Methods`, `context.md page 6 section Results table_candidate 1`, or `figure_context.md fig_p4_1`.
+7. Read `context.md`, `section_context.md`, and `figure_context.md` if available. `section_context.md` is not a canonical evidence source. Final locators must use canonical forms such as `context.md page 3 section Methods`, `context.md page 6 section Results table_candidate 1`, or `figure_context.md fig_p4_1`. Bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, and secondary context paths are invalid.
 8. Write `summary.json` and `review.json`.
 9. Run the deterministic review chain:
 

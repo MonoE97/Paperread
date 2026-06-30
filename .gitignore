@@ -24,6 +24,7 @@ tmp/
 .tmp/
 
 # Paper, Zotero, and generated note outputs
+docs/
 runs/
 papers/
 *_analysis/

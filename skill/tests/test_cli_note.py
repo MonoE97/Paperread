@@ -279,7 +279,9 @@ def test_finalize_note_command_accepts_trusted_note_fields(tmp_path: Path) -> No
             "evidence_summary": [
                 {
                     "claim": "The method is supported by the method section.",
-                    "evidence": [{"type": "text", "locator": "page 3", "summary": "method evidence"}],
+                    "evidence": [
+                        {"type": "text", "locator": "context.md page 3 section Methods", "summary": "method evidence"}
+                    ],
                     "confidence": "high",
                 }
             ],
@@ -902,7 +904,7 @@ def test_validate_trusted_summary_rejects_null_evidence_locator_and_summary(tmp_
     result = runner.invoke(app, ["validate-trusted-summary", str(summary_path)])
 
     assert result.exit_code == 1
-    assert "evidence_summary[1] must include at least one evidence locator" in result.stdout
+    assert "evidence_summary[1] must include at least one canonical evidence locator" in result.stdout
 
 
 def test_validate_trusted_summary_rejects_summary_only_evidence_without_locator(tmp_path: Path) -> None:
@@ -922,7 +924,7 @@ def test_validate_trusted_summary_rejects_summary_only_evidence_without_locator(
     result = runner.invoke(app, ["validate-trusted-summary", str(summary_path)])
 
     assert result.exit_code == 1
-    assert "evidence_summary[1] must include at least one evidence locator" in result.stdout
+    assert "evidence_summary[1] must include at least one canonical evidence locator" in result.stdout
 
 
 def test_validate_trusted_summary_rejects_na_evidence_locator(tmp_path: Path) -> None:
@@ -942,7 +944,51 @@ def test_validate_trusted_summary_rejects_na_evidence_locator(tmp_path: Path) ->
     result = runner.invoke(app, ["validate-trusted-summary", str(summary_path)])
 
     assert result.exit_code == 1
-    assert "evidence_summary[1] must include at least one evidence locator" in result.stdout
+    assert "evidence_summary[1] must include at least one canonical evidence locator" in result.stdout
+
+
+def test_validate_trusted_summary_rejects_noncanonical_evidence_locators(tmp_path: Path) -> None:
+    for locator in ("context.md", "figure_context.md", "page 3 method section", "fig_p1_1"):
+        summary_path = tmp_path / f"{locator.replace(' ', '_').replace('/', '_')}.json"
+        write_ready_trusted_summary_with_evidence(
+            summary_path,
+            [
+                {
+                    "claim": "The method is supported.",
+                    "evidence": [{"type": "text", "locator": locator, "summary": "method evidence"}],
+                    "confidence": "high",
+                }
+            ],
+        )
+        runner = CliRunner()
+
+        result = runner.invoke(app, ["validate-trusted-summary", str(summary_path)])
+
+        assert result.exit_code == 1
+        assert "evidence_summary[1] must include at least one canonical evidence locator" in result.stdout
+
+
+def test_validate_trusted_summary_rejects_mixed_noncanonical_evidence_locator(tmp_path: Path) -> None:
+    summary_path = tmp_path / "summary.json"
+    write_ready_trusted_summary_with_evidence(
+        summary_path,
+        [
+            {
+                "claim": "The method is supported.",
+                "evidence": [
+                    {"type": "text", "locator": "context.md page 2 section Methods", "summary": "method evidence"},
+                    {"type": "text", "locator": "section_context.md section Methods", "summary": "navigation only"},
+                ],
+                "confidence": "high",
+            }
+        ],
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["validate-trusted-summary", str(summary_path)])
+
+    assert result.exit_code == 1
+    assert "evidence_summary[1].evidence[2] has noncanonical evidence locator" in result.stdout
 
 
 def test_validate_trusted_summary_passes_ready_summary(tmp_path: Path) -> None:

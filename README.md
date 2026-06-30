@@ -63,7 +63,7 @@ Paperread supports two inputs:
 - **Zotero title or title fragment**: use Zotero MCP to locate the paper, prepare deterministic evidence artifacts, render `note.md` and `note.html`, and create a new Zotero child note only after explicit write intent.
 - **Local PDF path**: run the same extraction, summary, review, lint, and render gates on a local PDF, then write local outputs beside the PDF without writing Zotero.
 
-Both workflows use full-PDF extraction by default. Final `evidence_summary` locators must cite `context.md` or `figure_context.md`; `section_context.md` is only a navigation aid. Secondary web context captured through `scripts/capture-secondary-url.mjs` is cross-check material only and must not cite secondary context in `evidence_summary`.
+Both workflows use full-PDF extraction by default. Final `evidence_summary` locators must use one of these canonical forms: `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, and secondary context paths are invalid. `section_context.md` is only a navigation aid. Secondary web context captured through `scripts/capture-secondary-url.mjs` is cross-check material only and must not cite secondary context in `evidence_summary`.
 
 ## Output Locations
 

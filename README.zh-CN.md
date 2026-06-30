@@ -63,7 +63,7 @@ Paperread 支持两类输入：
 - **Zotero 标题或标题片段**：通过 Zotero MCP 定位论文，准备确定性的证据产物，渲染 `note.md` 和 `note.html`，并且只在用户明确要求写入后创建新的 Zotero 子笔记。
 - **本地 PDF path**：对本地 PDF 运行同一套抽取、总结、审查、lint 和渲染门禁，然后在 PDF 同目录写本地输出，不写入 Zotero。
 
-两个工作流默认都会抽取完整 PDF。最终 `evidence_summary` locator 必须引用 `context.md` 或 `figure_context.md`；`section_context.md` 只作为导航辅助。通过 `scripts/capture-secondary-url.mjs` 抓取的 secondary web context 只用于 cross-check，不能在 `evidence_summary` 中作为证据引用。
+两个工作流默认都会抽取完整 PDF。最终 `evidence_summary` locator 必须使用以下 canonical 格式之一：`context.md page <N>`、`context.md page <N> section <Section Name>`、`context.md page <N> section <Section Name> table_candidate <N>` 或 `figure_context.md <figure_id>`。裸 `context.md` / `figure_context.md`、`page 3 method section` 这类散文式 locator、`section_context.md` 和 secondary context 路径都无效。`section_context.md` 只作为导航辅助。通过 `scripts/capture-secondary-url.mjs` 抓取的 secondary web context 只用于 cross-check，不能在 `evidence_summary` 中作为证据引用。
 
 ## 产物位置
 

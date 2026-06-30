@@ -100,12 +100,12 @@ TRUSTED_FIELDS = {
             "evidence": [
                 {
                     "type": "text",
-                    "locator": "page 3 method section",
+                    "locator": "context.md page 3 section Methods",
                     "summary": "The method section describes the learned mapping from target response to structure parameters.",
                 },
                 {
                     "type": "figure",
-                    "locator": "fig_p1_1",
+                    "locator": "figure_context.md fig_p1_1",
                     "summary": "The framework figure shows the optimization loop.",
                 },
             ],
@@ -523,7 +523,7 @@ def test_render_note_keeps_audit_evidence_out_of_rendered_note() -> None:
     warning = "figure_visual_quality:fig_p1_1:image_too_small"
     quality_report_marker = "## 10. 自动抽取质量报告"
     claim_text = "The method uses a learned inverse-design model."
-    page_evidence_line = "- page 3 method section: The method section describes the learned mapping"
+    page_evidence_line = "- context.md page 3 section Methods: The method section describes the learned mapping"
 
     assert quality_report_marker not in note
     assert warning not in note
@@ -748,7 +748,7 @@ def test_render_note_hides_gate_and_audit_only_fields() -> None:
         "潜在 gap",
         "需要真实高面容量软包验证。",
         "The method uses a learned inverse-design model.",
-        "page 3 method section",
+        "context.md page 3 section Methods",
         "Method section was too generic.",
     ]
     for snippet in forbidden_snippets:
@@ -780,12 +780,12 @@ def test_clean_evidence_summary_keeps_evidence_bullets_contiguous() -> None:
                 "evidence": [
                     {
                         "type": "text",
-                        "locator": "page 3 method section",
+                        "locator": "context.md page 3 section Methods",
                         "summary": "The method section describes the learned mapping from target response to structure parameters.",
                     },
                     {
                         "type": "figure",
-                        "locator": "fig_p1_1",
+                        "locator": "figure_context.md fig_p1_1",
                         "summary": "The framework figure shows the optimization loop.",
                     },
                 ],
@@ -796,7 +796,7 @@ def test_clean_evidence_summary_keeps_evidence_bullets_contiguous() -> None:
                 "evidence": [
                     {
                         "type": "text",
-                        "locator": "page 5 results section",
+                        "locator": "context.md page 5 section Results",
                         "summary": "Table 2 compares the proposed model with three baselines.",
                     }
                 ],
@@ -823,13 +823,13 @@ def test_clean_evidence_summary_keeps_evidence_bullets_contiguous() -> None:
         == "### Claim 1\n\n"
         "**结论**: The method uses a learned inverse-design model.\n\n"
         "**证据**:\n"
-        "- page 3 method section: "
+        "- context.md page 3 section Methods: "
         "The method section describes the learned mapping from target response to structure parameters.\n"
-        "- fig_p1_1: The framework figure shows the optimization loop.\n\n"
+        "- figure_context.md fig_p1_1: The framework figure shows the optimization loop.\n\n"
         "### Claim 2\n\n"
         "**结论**: The experiments compare against multiple baselines.\n\n"
         "**证据**:\n"
-        "- page 5 results section: Table 2 compares the proposed model with three baselines."
+        "- context.md page 5 section Results: Table 2 compares the proposed model with three baselines."
     )
     assert "\n\n  - 证据:" not in evidence_section
     assert "\n-   - 证据:" not in evidence_section
@@ -850,7 +850,7 @@ def test_clean_evidence_summary_formats_evidence_lines_when_locator_or_summary_i
                     },
                     {
                         "type": "figure",
-                        "locator": "fig_p1_2",
+                        "locator": "figure_context.md fig_p1_2",
                         "summary": "",
                     },
                 ],
@@ -866,7 +866,7 @@ def test_clean_evidence_summary_formats_evidence_lines_when_locator_or_summary_i
     )
 
     assert "- Only summary is available." in evidence_section
-    assert "- fig_p1_2" in evidence_section
+    assert "- figure_context.md fig_p1_2" in evidence_section
     assert "- :" not in evidence_section
 
 
@@ -880,7 +880,7 @@ def test_clean_evidence_summary_flattens_multiline_evidence_into_single_bullet()
                 "evidence": [
                     {
                         "type": "text",
-                        "locator": "page 4 results\n- nested locator bullet",
+                        "locator": "context.md page 4 section Results\n- nested locator bullet",
                         "summary": "line 1 summary\n- nested summary bullet",
                     }
                 ],
@@ -904,7 +904,7 @@ def test_clean_evidence_summary_flattens_multiline_evidence_into_single_bullet()
         == "### Claim 1\n\n"
         "**结论**: Evidence text should not break Markdown list structure.\n\n"
         "**证据**:\n"
-        "- page 4 results - nested locator bullet: line 1 summary - nested summary bullet"
+        "- context.md page 4 section Results - nested locator bullet: line 1 summary - nested summary bullet"
     )
     assert "\n- nested locator bullet" not in evidence_section
     assert "\n- nested summary bullet" not in evidence_section
@@ -944,7 +944,7 @@ def test_clean_evidence_summary_flattens_multiline_claim_into_single_bullet() ->
                 "evidence": [
                     {
                         "type": "text",
-                        "locator": "page 6 discussion",
+                        "locator": "context.md page 6 section Discussion",
                         "summary": "Supporting text stays on one evidence bullet.",
                     }
                 ],
@@ -968,7 +968,7 @@ def test_clean_evidence_summary_flattens_multiline_claim_into_single_bullet() ->
         == "### Claim 1\n\n"
         "**结论**: Primary conclusion line - looks like a nested claim bullet\n\n"
         "**证据**:\n"
-        "- page 6 discussion: Supporting text stays on one evidence bullet."
+        "- context.md page 6 section Discussion: Supporting text stays on one evidence bullet."
     )
     assert "\n- looks like a nested claim bullet" not in evidence_section
 
@@ -1009,7 +1009,7 @@ def test_render_note_keeps_audit_sections_hidden_without_review_or_improvement_b
 
     note = render_note(METADATA, summary, generated_date="2026-04-23")
 
-    assert "fig_p1_1: The framework figure shows the optimization loop." not in note
+    assert "figure_context.md fig_p1_1: The framework figure shows the optimization loop." not in note
     assert "\n\n  - 证据:" not in note
     assert "### 审查问题\n\n- none" not in note
     assert "## 11. 补充优化记录\n\n- none" not in note

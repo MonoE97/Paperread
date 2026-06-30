@@ -28,7 +28,7 @@ If `uv sync --locked` reports that Python `>=3.13` is unavailable, run `uv pytho
 
 ## Shared Rules
 
-- Final evidence locators in `summary.json` must cite `context.md` or `figure_context.md`, not `section_context.md`.
+- Final evidence locators in `summary.json` must use canonical forms: `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Do not use bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, or secondary context paths.
 - Secondary context is cross-check material only and must not be cited in `evidence_summary`.
 - Rendered note prose should be Chinese-first while preserving titles, names, formulas, method names, units, evidence locators, and tag keys.
 - Always run the review and gate sequence before treating a note as ready.
