@@ -7,7 +7,7 @@ description: Use when the user asks to analyze a paper either by Zotero title/ti
 
 This is the repo-local v1 paper reading skill bundle for this repository. It is not a standalone global skill installation. Use it after cloning this repo, installing `uv`, running `uv sync`, and executing commands from the repo root.
 
-Do not copy this directory by itself and expect the workflow to run. The skill depends on the repository's Python package, templates, lockfile, and `zotero-paperread` CLI.
+Do not copy this directory by itself and expect the workflow to run. The skill depends on the repository's Python package, templates, lockfile, and `paperread` CLI.
 
 ## Entry Routing
 
@@ -18,7 +18,7 @@ Do not copy this directory by itself and expect the workflow to run. The skill d
 
 ## Shared Rules
 
-- Run commands from the repo root with `uv run zotero-paperread ...`.
+- Run commands from the repo root with `uv run paperread ...`.
 - Final evidence locators in `summary.json` must cite `context.md` or `figure_context.md`, not `section_context.md`.
 - Rendered note prose should be Chinese-first while preserving titles, names, formulas, method names, units, evidence locators, and tag keys.
 - Always run the review and gate sequence before treating a note as ready.

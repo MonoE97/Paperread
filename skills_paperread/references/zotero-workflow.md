@@ -11,18 +11,18 @@ If native MCP tools are not injected, use the local Zotero MCP endpoint `http://
 ## Steps
 
 1. Search exact title first. If duplicate entries have the same normalized title, stop before create-run and ask the user to de-duplicate in Zotero.
-2. Create the run directory with `uv run zotero-paperread create-run --title "<title>" --item-key "<item_key>"`.
+2. Create the run directory with `uv run paperread create-run --title "<title>" --item-key "<item_key>"`.
 3. Save the raw `get_item_details(mode="complete")` response as `<run_dir>/mcp-response.json`.
 4. Normalize item details:
 
 ```bash
-uv run zotero-paperread save-item-details <run_dir>/mcp-response.json --output <run_dir>/item-details.json --raw-output <run_dir>/item-details.raw.json
+uv run paperread save-item-details <run_dir>/mcp-response.json --output <run_dir>/item-details.json --raw-output <run_dir>/item-details.raw.json
 ```
 
 5. Prepare the bundle:
 
 ```bash
-uv run zotero-paperread prepare-item <run_dir>/item-details.json --workdir <run_dir>
+uv run paperread prepare-item <run_dir>/item-details.json --workdir <run_dir>
 ```
 
 6. If `secondary_sources.json` lists Extra/web URLs, capture each source for cross-check only:
@@ -39,16 +39,16 @@ Captured files use `source_status: secondary_context` when usable. Unavailable c
 9. Run the deterministic review chain:
 
 ```bash
-uv run zotero-paperread validate-summary-json <run_dir>/summary.json
-uv run zotero-paperread apply-review <run_dir>/summary.json <run_dir>/review.json
-uv run zotero-paperread lint-summary <run_dir>/summary.json
-uv run zotero-paperread validate-trusted-summary <run_dir>/summary.json
+uv run paperread validate-summary-json <run_dir>/summary.json
+uv run paperread apply-review <run_dir>/summary.json <run_dir>/review.json
+uv run paperread lint-summary <run_dir>/summary.json
+uv run paperread validate-trusted-summary <run_dir>/summary.json
 ```
 
 10. Prepare a Zotero write candidate only when Zotero output is explicitly requested:
 
 ```bash
-uv run zotero-paperread prepare-write-candidate <run_dir> --paper-title "<paper title>" --generated-date YYYY-MM-DD
+uv run paperread prepare-write-candidate <run_dir> --paper-title "<paper title>" --generated-date YYYY-MM-DD
 ```
 
 11. Preview the target Zotero title, `note.md`, and `note.html`.

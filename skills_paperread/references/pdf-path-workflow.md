@@ -15,7 +15,7 @@ uv sync
 1. Prepare local artifacts beside the PDF:
 
 ```bash
-uv run zotero-paperread prepare-pdf "/path/to/paper.pdf"
+uv run paperread prepare-pdf "/path/to/paper.pdf"
 ```
 
 The first run writes `<pdf_stem>_analysis/` and targets `<pdf_stem>_note.md`. Repeated runs use `_v2`, `_v3`, and so on without overwriting old notes or analysis directories.
@@ -27,16 +27,16 @@ The first run writes `<pdf_stem>_analysis/` and targets `<pdf_stem>_note.md`. Re
 4. Run the deterministic review chain:
 
 ```bash
-uv run zotero-paperread validate-summary-json <analysis_dir>/summary.json
-uv run zotero-paperread apply-review <analysis_dir>/summary.json <analysis_dir>/review.json
-uv run zotero-paperread lint-summary <analysis_dir>/summary.json
-uv run zotero-paperread validate-trusted-summary <analysis_dir>/summary.json
+uv run paperread validate-summary-json <analysis_dir>/summary.json
+uv run paperread apply-review <analysis_dir>/summary.json <analysis_dir>/review.json
+uv run paperread lint-summary <analysis_dir>/summary.json
+uv run paperread validate-trusted-summary <analysis_dir>/summary.json
 ```
 
 5. Prepare the local note:
 
 ```bash
-uv run zotero-paperread prepare-local-note-candidate <analysis_dir> --generated-date YYYY-MM-DD
+uv run paperread prepare-local-note-candidate <analysis_dir> --generated-date YYYY-MM-DD
 ```
 
 This writes `note.md`, `note.html`, previews, `note-tags.json`, `local-gate-report.json`, and the final Markdown note beside the PDF.

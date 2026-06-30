@@ -60,13 +60,13 @@ Better Notes 是可选阅读增强层。V1 生成 Zotero 子笔记，保证 Bett
 
 ```bash
 uv run pytest
-uv run zotero-paperread --help
+uv run paperread --help
 ```
 
 涉及 PDF 抽取时额外运行：
 
 ```bash
-uv run zotero-paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/zotero-paperread-extract.json
+uv run paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/paperread-extract.json
 ```
 
 ## 写入规则

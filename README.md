@@ -1,6 +1,6 @@
-# Zotero Paperread
+# Paperread
 
-Paperread is a clone-and-run literature reading workflow for Codex or Claude. It uses the local `zotero-paperread` CLI to extract evidence from a paper PDF, then guides an agent to write a Chinese-first structured reading note.
+Paperread is a clone-and-run literature reading workflow for Codex or Claude. It uses the local `paperread` CLI to extract evidence from a paper PDF, then guides an agent to write a Chinese-first structured reading note.
 
 ## What It Does
 
@@ -17,14 +17,16 @@ Clone this repository, install `uv`, then run from the repo root:
 
 ```bash
 uv sync
-uv run zotero-paperread --help
+uv run paperread --help
 ```
+
+The legacy `zotero-paperread` command remains available as a compatibility alias, but new documentation should use `paperread`.
 
 Zotero title workflows also require Zotero Desktop plus a working Zotero MCP server. Local PDF path workflows do not require Zotero.
 
 ## Use As A Repo-Local Skill
 
-The only public workflow bundle is `skills_paperread/`. Public v1 is repo-local: clone this repository, run `uv sync`, and execute commands from the repo root. Do not copy `skills_paperread/` by itself and expect the workflow to run, because it depends on this repository's Python package, templates, lockfile, and CLI.
+The only public workflow bundle is `skills_paperread/`, and its skill name is `paperread`. Public v1 is repo-local: clone this repository, run `uv sync`, and execute commands from the repo root. Do not copy `skills_paperread/` by itself and expect the workflow to run, because it depends on this repository's Python package, templates, lockfile, and CLI.
 
 Point your agent at `skills_paperread/SKILL.md`. The skill routes a local PDF path to `skills_paperread/references/pdf-path-workflow.md`; otherwise it treats the input as a Zotero title or title fragment and uses `skills_paperread/references/zotero-workflow.md`.
 
@@ -51,16 +53,16 @@ Captured secondary files use `source_status: secondary_context` when usable. Una
 7. Run the deterministic review chain:
 
 ```bash
-uv run zotero-paperread validate-summary-json <run_dir>/summary.json
-uv run zotero-paperread apply-review <run_dir>/summary.json <run_dir>/review.json
-uv run zotero-paperread lint-summary <run_dir>/summary.json
-uv run zotero-paperread validate-trusted-summary <run_dir>/summary.json
+uv run paperread validate-summary-json <run_dir>/summary.json
+uv run paperread apply-review <run_dir>/summary.json <run_dir>/review.json
+uv run paperread lint-summary <run_dir>/summary.json
+uv run paperread validate-trusted-summary <run_dir>/summary.json
 ```
 
 8. Prepare a write candidate only when Zotero output is requested:
 
 ```bash
-uv run zotero-paperread prepare-write-candidate <run_dir> --paper-title "<paper title>" --generated-date YYYY-MM-DD
+uv run paperread prepare-write-candidate <run_dir> --paper-title "<paper title>" --generated-date YYYY-MM-DD
 ```
 
 9. Preview the target Zotero item, `note.md`, and `note.html`.
@@ -72,7 +74,7 @@ uv run zotero-paperread prepare-write-candidate <run_dir> --paper-title "<paper 
 Use this path when the input is an existing local PDF path.
 
 ```bash
-uv run zotero-paperread prepare-pdf "/path/to/paper.pdf"
+uv run paperread prepare-pdf "/path/to/paper.pdf"
 ```
 
 The first run creates `<pdf_stem>_analysis/` beside the PDF and targets `<pdf_stem>_note.md`. Repeated runs create `<pdf_stem>_analysis_v2/`, `<pdf_stem>_note_v2.md`, and higher suffixes without overwriting previous outputs.
@@ -80,11 +82,11 @@ The first run creates `<pdf_stem>_analysis/` beside the PDF and targets `<pdf_st
 The agent writes `summary.json` and `review.json` inside the analysis directory, then runs:
 
 ```bash
-uv run zotero-paperread validate-summary-json <analysis_dir>/summary.json
-uv run zotero-paperread apply-review <analysis_dir>/summary.json <analysis_dir>/review.json
-uv run zotero-paperread lint-summary <analysis_dir>/summary.json
-uv run zotero-paperread validate-trusted-summary <analysis_dir>/summary.json
-uv run zotero-paperread prepare-local-note-candidate <analysis_dir> --generated-date YYYY-MM-DD
+uv run paperread validate-summary-json <analysis_dir>/summary.json
+uv run paperread apply-review <analysis_dir>/summary.json <analysis_dir>/review.json
+uv run paperread lint-summary <analysis_dir>/summary.json
+uv run paperread validate-trusted-summary <analysis_dir>/summary.json
+uv run paperread prepare-local-note-candidate <analysis_dir> --generated-date YYYY-MM-DD
 ```
 
 `prepare-local-note-candidate` writes `note.md`, `note.html`, preview files, `note-tags.json`, `local-gate-report.json`, and the final Markdown note beside the PDF. This workflow is local-output only.
@@ -108,8 +110,8 @@ Run these before considering a change complete:
 
 ```bash
 uv run pytest
-uv run zotero-paperread --help
-uv run zotero-paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/zotero-paperread-extract.json
+uv run paperread --help
+uv run paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/paperread-extract.json
 ```
 
 Codex users who have the bundled `skill-creator` validator available can optionally run its local `quick_validate.py` script against `skills_paperread/`. That validator is not required to use this repository.
