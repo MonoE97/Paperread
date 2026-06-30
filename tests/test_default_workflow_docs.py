@@ -27,6 +27,7 @@ def test_public_docs_use_single_repo_local_skill_entry() -> None:
     assert ("skills/" + "zotero-" + "batch-note-writing") not in combined
     assert (".agents/" + "skills/" + "paperread") not in combined
     assert (".claude/" + "skills/" + "paperread") not in combined
+    assert ("/Users/" + "jwxi") not in combined
 
 
 def test_public_docs_describe_supported_workflows_and_outputs() -> None:

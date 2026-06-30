@@ -112,11 +112,7 @@ uv run zotero-paperread --help
 uv run zotero-paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/zotero-paperread-extract.json
 ```
 
-The public skill bundle can also be checked with:
-
-```bash
-uv run --with pyyaml python /Users/jwxi/.codex/skills/.system/skill-creator/scripts/quick_validate.py /Users/jwxi/Desktop/AIflow/Zotero_paperread/skills_paperread
-```
+Codex users who have the bundled `skill-creator` validator available can optionally run its local `quick_validate.py` script against `skills_paperread/`. That validator is not required to use this repository.
 
 ## Safety Boundaries
 
