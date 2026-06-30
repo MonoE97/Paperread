@@ -1,6 +1,6 @@
 # Zotero Workflow
 
-Use this when the user provides a Zotero title or title fragment.
+Use this when the user provides a Zotero title or title fragment. Run commands from the skill root.
 
 ## Tool Discovery
 
@@ -29,7 +29,7 @@ uv run paperread prepare-item <run_dir>/item-details.json --workdir <run_dir>
 
 ```bash
 mkdir -p <run_dir>/secondary_contexts
-node skill/scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_contexts/secondary-001.md --request-retries 2 --request-retry-ms 500
+node scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_contexts/secondary-001.md --request-retries 2 --request-retry-ms 500
 ```
 
 Captured files use `source_status: secondary_context` when usable. Unavailable captures use `source_status: secondary_context_unavailable`, including warnings such as `navigation_timeout`. Secondary context must not cite secondary context in `evidence_summary`; it is only for cross-checking and background.

@@ -1,0 +1,688 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Paperread V2 自包含 Skill Repo 行动方案</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f7f4;
+      --paper: #ffffff;
+      --ink: #1f2933;
+      --muted: #697586;
+      --line: #d9dee7;
+      --accent: #22577a;
+      --accent-2: #2f7d57;
+      --warn: #9a5b13;
+      --danger: #9f2d2d;
+      --code-bg: #eef2f6;
+      --soft-blue: #e8f1f7;
+      --soft-green: #e9f4ee;
+      --soft-warn: #fbf1df;
+      --shadow: 0 18px 50px rgba(31, 41, 51, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      line-height: 1.68;
+    }
+
+    main {
+      width: min(1120px, calc(100% - 40px));
+      margin: 32px auto 56px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    header {
+      padding: 44px 48px 28px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, #ffffff 0%, #f8fbfd 100%);
+    }
+
+    header p {
+      max-width: 840px;
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 34px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 0 0 16px;
+      font-size: 23px;
+      line-height: 1.35;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 22px 0 10px;
+      font-size: 17px;
+      letter-spacing: 0;
+    }
+
+    section {
+      padding: 34px 48px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    section:last-child {
+      border-bottom: none;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 20px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--muted);
+      font-size: 13px;
+      border-radius: 6px;
+      white-space: nowrap;
+    }
+
+    .callout {
+      border-left: 4px solid var(--accent);
+      background: var(--soft-blue);
+      padding: 16px 18px;
+      margin: 18px 0;
+    }
+
+    .callout strong {
+      color: var(--accent);
+    }
+
+    .warning {
+      border-left-color: var(--warn);
+      background: var(--soft-warn);
+    }
+
+    .warning strong {
+      color: var(--warn);
+    }
+
+    .success {
+      border-left-color: var(--accent-2);
+      background: var(--soft-green);
+    }
+
+    .success strong {
+      color: var(--accent-2);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      background: #fff;
+    }
+
+    .card h3 {
+      margin-top: 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0 8px;
+      font-size: 14px;
+    }
+
+    th,
+    td {
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+
+    th {
+      background: #f2f5f8;
+      font-weight: 700;
+    }
+
+    code {
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: var(--code-bg);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 0.92em;
+    }
+
+    pre {
+      margin: 14px 0;
+      padding: 16px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #111827;
+      color: #e5e7eb;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    pre code {
+      padding: 0;
+      background: transparent;
+      color: inherit;
+    }
+
+    ul,
+    ol {
+      padding-left: 22px;
+    }
+
+    li + li {
+      margin-top: 6px;
+    }
+
+    .phase {
+      display: grid;
+      grid-template-columns: 92px 1fr;
+      gap: 16px;
+      padding: 18px 0;
+      border-top: 1px solid var(--line);
+    }
+
+    .phase:first-of-type {
+      border-top: none;
+    }
+
+    .phase-label {
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    .mono-list li {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 13px;
+    }
+
+    .footer {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 760px) {
+      main {
+        width: 100%;
+        margin: 0;
+        border-left: none;
+        border-right: none;
+      }
+
+      header,
+      section {
+        padding: 28px 22px;
+      }
+
+      h1 {
+        font-size: 28px;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .phase {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Paperread V2 自包含 Skill Repo 行动方案</h1>
+      <p>目标是把当前仓库从“repo-local Python 项目 + 薄 skill wrapper”迁移为真正的 skill repo：复制仓库中的 <code>skill/</code> 目录到 Codex 或 Claude 的 skill 位置后，即可独立安装、运行、测试和使用。这里的“自包含”指文件 artifact 自包含；不同工作流仍需要 <code>uv</code>、Python、Zotero MCP、Node/CDP 等外部运行前提。</p>
+      <div class="meta">
+        <span class="pill">日期：2026-06-30</span>
+        <span class="pill">状态：可执行前 review 版</span>
+        <span class="pill">范围：计划与迁移方案，不包含实际迁移执行</span>
+        <span class="pill">安装名：paperread</span>
+      </div>
+    </header>
+
+    <section>
+      <h2>1. 结论</h2>
+      <div class="callout success">
+        <strong>建议执行方案：</strong>采用“Skill-as-package”结构。仓库内仍保留源目录名 <code>skill/</code>，但用户安装时复制到目标目录 <code>paperread/</code>，使安装目录名与 <code>SKILL.md</code> 中的 skill name 一致。
+      </div>
+      <p>这个方案最直接地满足三个约束：所有必备项目文件都在 <code>skill/</code> 内；继续使用当前稳定的 <code>uv</code> + Python CLI；同时兼容 Codex 和 Claude 的 skill folder 使用习惯。</p>
+      <p>不建议把 CLI 发布到 PyPI 或只保留轻量 skill wrapper。那会引入外部分发、版本漂移和离线不可用问题，和“即插即用复制一个目录”的目标冲突。</p>
+    </section>
+
+    <section>
+      <h2>2. 已确认决策</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>问题</th>
+            <th>决策</th>
+            <th>理由</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>分发模型</td>
+            <td>完全自包含</td>
+            <td>复制 <code>skill/</code> 后不依赖 repo root 文件；外部 runtime 作为前提单独声明。</td>
+          </tr>
+          <tr>
+            <td>环境管理</td>
+            <td>只支持 <code>uv</code></td>
+            <td>符合项目既有纪律，也避免 pip/conda/global install 的不确定性。</td>
+          </tr>
+          <tr>
+            <td>功能范围</td>
+            <td>Zotero title workflow 和 local PDF path workflow 都保留</td>
+            <td>两条链路已经被当前 CLI 和测试覆盖，删掉任一条都会让 V2 功能缩水。</td>
+          </tr>
+          <tr>
+            <td>根目录角色</td>
+            <td>发布壳和维护文档</td>
+            <td>根目录不再是运行项目；运行、测试、模板、脚本和 lockfile 都进入 <code>skill/</code>。</td>
+          </tr>
+          <tr>
+            <td>目录命名</td>
+            <td>repo 内叫 <code>skill/</code>；安装后叫 <code>paperread/</code></td>
+            <td>同时满足你的仓库约束和 skill folder name 应匹配 skill name 的规范。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>3. 规范依据</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>来自 superpowers:brainstorming</h3>
+          <ul>
+            <li>先完成设计与计划，不在批准前执行迁移。</li>
+            <li>现有代码库必须先读现状，再设计结构。</li>
+            <li>设计文档要自查未决标记、矛盾、范围和歧义。</li>
+            <li>用户 review 通过后，再进入实施计划或执行阶段。</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>来自 skill-creator</h3>
+          <ul>
+            <li><code>SKILL.md</code> 必须有 <code>name</code> 和 <code>description</code> frontmatter。</li>
+            <li><code>SKILL.md</code> 要精简，细节放到直接链接的 <code>references/</code>。</li>
+            <li>确定性、易出错、重复执行的逻辑应放进脚本或 CLI。</li>
+            <li>skill 内不放 README、安装指南、changelog 这类辅助文档。</li>
+            <li>skill 内置自包含验证脚本；系统 <code>quick_validate.py</code> 只作为维护者交叉检查。</li>
+          </ul>
+        </div>
+      </div>
+      <p>Claude 侧的兼容假设已经按官方文档校准：Claude Code 个人 skill 通常位于 <code>~/.claude/skills/&lt;skill-name&gt;/SKILL.md</code>，因此安装后的目录应命名为 <code>paperread</code>。</p>
+    </section>
+
+    <section>
+      <h2>4. 目标目录结构</h2>
+      <h3>迁移后的仓库根目录</h3>
+      <pre><code>Paperread/
+  AGENTS.md
+  README.md
+  README.zh-CN.md
+  .gitignore
+  docs/superpowers/specs/
+  docs/superpowers/scripts/
+  skill/</code></pre>
+      <p>根目录不再保留运行时 <code>pyproject.toml</code>、<code>uv.lock</code>、<code>src/</code>、<code>templates/</code> 或 <code>tests/</code>。这些文件都进入 <code>skill/</code>。</p>
+
+      <h3>自包含 skill 源目录</h3>
+      <pre><code>skill/
+  SKILL.md
+  agents/openai.yaml
+  pyproject.toml
+  uv.lock
+  src/paperread/
+  templates/zotero_note.md.j2
+  references/
+    zotero-workflow.md
+    pdf-path-workflow.md
+    summary-schema.md
+  scripts/
+    capture-secondary-url.mjs
+    validate-skill.py
+  tests/
+    fixtures/minimal.pdf
+    test_*.py</code></pre>
+      <div class="callout warning">
+        <strong>注意：</strong><code>skill/</code> 内不放 <code>README.md</code>。人类阅读的安装说明留在仓库根目录 README；agent 执行说明放在 <code>SKILL.md</code> 和 <code>references/</code>。
+      </div>
+    </section>
+
+    <section>
+      <h2>5. 安装与使用模型</h2>
+      <h3>Codex 安装</h3>
+      <pre><code>install_dir="${CODEX_HOME:-$HOME/.codex}/skills/paperread"
+test ! -e "$install_dir" || { echo "target exists: $install_dir"; exit 1; }
+mkdir -p "$(dirname "$install_dir")"
+cp -R /path/to/Paperread/skill "$install_dir"
+cd "$install_dir"
+uv sync --locked
+uv run paperread --help</code></pre>
+
+      <h3>Claude Code 安装</h3>
+      <pre><code>install_dir="$HOME/.claude/skills/paperread"
+test ! -e "$install_dir" || { echo "target exists: $install_dir"; exit 1; }
+mkdir -p "$(dirname "$install_dir")"
+cp -R /path/to/Paperread/skill "$install_dir"
+cd "$install_dir"
+uv sync --locked
+uv run paperread --help</code></pre>
+
+      <p>所有工作流命令都从安装后的 skill root 执行。V2 文档中不再出现“从 repo root 运行 <code>uv run paperread ...</code>”这种 V1 假设。</p>
+      <div class="callout warning">
+        <strong>安装边界：</strong>目标 <code>paperread/</code> 必须不存在或为空。若目标已存在，停止并让用户确认替换策略，避免复制出 <code>paperread/skill/SKILL.md</code> 这种无法被 Codex/Claude 正确发现的嵌套结构。
+      </div>
+
+      <h3>外部运行前提矩阵</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>能力</th>
+            <th>外部前提</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>CLI 安装与运行</td>
+            <td><code>uv</code> 和 Python <code>&gt;=3.13</code></td>
+            <td>依赖从 <code>skill/uv.lock</code> 安装到本地 skill 环境。</td>
+          </tr>
+          <tr>
+            <td>本地 PDF workflow</td>
+            <td>不需要 Zotero</td>
+            <td>只使用 bundled Python package 和依赖。</td>
+          </tr>
+          <tr>
+            <td>Zotero title workflow</td>
+            <td>Zotero Desktop 与 Zotero MCP</td>
+            <td>写入仍然只能通过 MCP <code>write_note</code>，且必须有用户明确写入意图。</td>
+          </tr>
+          <tr>
+            <td>Secondary web capture</td>
+            <td>Node.js 与 CDP helper</td>
+            <td>这是可选 cross-check 路径；不可用时应降级为 <code>secondary_context_unavailable</code>。</td>
+          </tr>
+          <tr>
+            <td>Skill 验证</td>
+            <td><code>skill/scripts/validate-skill.py</code></td>
+            <td>便携验证不依赖维护者机器上的个人系统 validator 路径。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>6. Skill 设计边界</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>模块</th>
+            <th>职责</th>
+            <th>关键约束</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>SKILL.md</code></td>
+            <td>触发、路由、核心安全边界</td>
+            <td>保持精简；只保留 agent 必须立即知道的规则。</td>
+          </tr>
+          <tr>
+            <td><code>references/zotero-workflow.md</code></td>
+            <td>Zotero title/title-fragment 工作流</td>
+            <td>写入只能通过 Zotero MCP <code>write_note</code>，且需要用户明确写入意图。</td>
+          </tr>
+          <tr>
+            <td><code>references/pdf-path-workflow.md</code></td>
+            <td>本地 PDF path 工作流</td>
+            <td>只写本地输出；禁止写 Zotero、禁止生成 <code>write-payload.json</code>。</td>
+          </tr>
+          <tr>
+            <td><code>references/summary-schema.md</code></td>
+            <td>summary/review JSON 最小字段约束</td>
+            <td>正文中文优先，证据 locator 必须引用 canonical evidence。</td>
+          </tr>
+          <tr>
+            <td><code>src/paperread/</code></td>
+            <td>PDF 抽取、note 渲染、gate、payload、验证等确定性逻辑</td>
+            <td>复杂可靠性逻辑不写进 prompt，由 CLI 执行。</td>
+          </tr>
+          <tr>
+            <td><code>tests/</code></td>
+            <td>行为验证和文档契约验证</td>
+            <td>测试必须能在复制后的 <code>paperread/</code> 目录内独立运行。</td>
+          </tr>
+          <tr>
+            <td><code>scripts/validate-skill.py</code></td>
+            <td>自包含 skill 结构验证</td>
+            <td>验证 <code>SKILL.md</code> frontmatter、必备目录文件、无 in-skill README/安装指南/changelog。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>7. 迁移执行顺序</h2>
+      <div class="phase">
+        <div class="phase-label">阶段 0</div>
+        <div>
+          <strong>开工前检查。</strong>
+          <ul>
+            <li>确认当前分支、ahead/behind、工作区是否干净。</li>
+            <li>创建本地工作分支，例如 <code>codex/paperread-v2-skill-repo</code>。</li>
+            <li>不 push、不发布、不改全局环境。</li>
+          </ul>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="phase-label">阶段 1</div>
+        <div>
+          <strong>结构迁移。</strong>
+          <ul>
+            <li>移动 <code>src/</code>、<code>templates/</code>、<code>tests/</code>、<code>pyproject.toml</code>、<code>uv.lock</code> 到 <code>skill/</code>。</li>
+            <li>更新 <code>skill/pyproject.toml</code>，删除 <code>readme = "README.md"</code>，不在 <code>skill/</code> 内新增 README。</li>
+            <li>从 <code>skill/</code> 运行 <code>uv lock</code>，再用 <code>uv sync --locked</code> 验证 lockfile。</li>
+            <li>检查 <code>note.py</code> 的 template path 和 <code>cli.py</code> 的 run dir resolver 是否仍指向 skill root。</li>
+          </ul>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="phase-label">阶段 2</div>
+        <div>
+          <strong>Skill 元数据与 progressive disclosure。</strong>
+          <ul>
+            <li>更新 <code>skill/SKILL.md</code>：描述 V2 自包含模型、skill-root 命令、两个工作流路由。</li>
+            <li>新增或生成 <code>skill/agents/openai.yaml</code>。</li>
+            <li>新增 <code>skill/scripts/validate-skill.py</code>，作为复制出去后仍可运行的结构验证脚本。</li>
+            <li>更新 <code>references/</code>，移除 repo-root 假设。</li>
+          </ul>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="phase-label">阶段 3</div>
+        <div>
+          <strong>测试与文档重写。</strong>
+          <ul>
+            <li>让 <code>skill/tests/</code> 不依赖根目录 README。</li>
+            <li>更新 root <code>README.md</code>、<code>README.zh-CN.md</code>、<code>AGENTS.md</code>。</li>
+            <li>增加维护者 root-doc review gate：<code>python docs/superpowers/scripts/validate-root-docs.py</code> 检查中英文 README、AGENTS 与 <code>skill/SKILL.md</code> 对安装路径、<code>uv sync --locked</code>、skill-root 命令、Zotero 写入红线、本地 PDF local-only 边界表述一致。</li>
+            <li>调整 <code>.gitignore</code>，继续忽略本地运行产物、PDF、分析目录、缓存。</li>
+          </ul>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="phase-label">阶段 4</div>
+        <div>
+          <strong>验证和复盘。</strong>
+          <ul>
+            <li>从 <code>skill/</code> 运行完整验证命令。</li>
+            <li>复制 <code>skill/</code> 到 repo 外临时 <code>paperread/</code> 目录做强制安装形态验证；这不是可选 forward-test。</li>
+            <li>运行维护者 root-doc review gate：<code>python docs/superpowers/scripts/validate-root-docs.py</code>。</li>
+            <li>复查 diff，确认没有丢失 Zotero 写入红线、证据 locator 边界和 PDF local-only 边界。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>8. 必跑验证门禁</h2>
+      <p>迁移完成后，以下命令必须从 <code>skill/</code> 内运行：</p>
+      <pre><code>cd skill
+uv sync --locked
+uv run pytest
+uv run paperread --help
+uv run paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/paperread-extract.json
+uv run python scripts/validate-skill.py .</code></pre>
+
+      <p>以下复制目录门禁是证明 <code>skill/</code> 自包含的核心证据，必须在 repo 外临时目录执行：</p>
+      <pre><code>tmp_dir="$(mktemp -d)"
+cp -R skill "$tmp_dir/paperread"
+cd "$tmp_dir/paperread"
+uv sync --locked
+uv run pytest
+uv run paperread --help
+uv run paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/paperread-extract.json
+uv run python scripts/validate-skill.py .</code></pre>
+      <p>额外的结构验证：</p>
+      <ul class="mono-list">
+        <li>git status --short --branch --untracked-files=all</li>
+        <li>git diff --check</li>
+        <li>find skill -maxdepth 3 -type f | sort</li>
+        <li>确认根目录不再有 runtime src/templates/tests/pyproject.toml/uv.lock</li>
+        <li>确认 root README、README.zh-CN、AGENTS 与 skill 文档的安装和安全边界一致</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>9. Forward Testing 计划</h2>
+      <p>确定性测试和强制复制目录门禁都通过后，再做 agent 使用形态验证。Forward testing 用来检验提示与工作流可用性，不替代复制目录硬门禁。</p>
+      <table>
+        <thead>
+          <tr>
+            <th>测试</th>
+            <th>做法</th>
+            <th>禁止事项</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Codex local PDF</td>
+            <td>在已通过复制目录门禁的临时 <code>paperread/</code> 中，用 <code>tests/fixtures/minimal.pdf</code> 跑 dry-run local output。</td>
+            <td>不能写 Zotero。</td>
+          </tr>
+          <tr>
+            <td>Zotero dry-run</td>
+            <td>用 Zotero title 触发准备链路，不写入，只检查 tool discovery、run dir 和 gate 路径。</td>
+            <td>没有用户明确批准时不能调用真实写入。</td>
+          </tr>
+          <tr>
+            <td>Claude filesystem shape</td>
+            <td>复制到临时 <code>~/.claude/skills/paperread</code> 形态，运行 <code>uv sync --locked</code>、<code>paperread --help</code> 和 <code>scripts/validate-skill.py</code>。</td>
+            <td>不能依赖 repo root 文件。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>10. 风险与处理</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>风险</th>
+            <th>处理方式</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>测试仍依赖根目录文档，复制后失效。</td>
+            <td>把 skill runtime 测试改成只检查 <code>skill/</code> 内文件；root README 同步进入维护者 root-doc review gate。</td>
+          </tr>
+          <tr>
+            <td><code>SKILL.md</code> 变成长 README。</td>
+            <td>只保留路由、命令入口和红线；详细步骤进入 <code>references/</code>。</td>
+          </tr>
+          <tr>
+            <td><code>pyproject.toml</code> 引用不存在的 README。</td>
+            <td>删除 <code>readme = "README.md"</code> 字段；不通过在 <code>skill/</code> 内新增 README 来绕过。</td>
+          </tr>
+          <tr>
+            <td>验证依赖维护者机器上的个人系统 validator 路径。</td>
+            <td>把便携验证做成 <code>skill/scripts/validate-skill.py</code>；系统 <code>quick_validate.py</code> 只作为可选维护者交叉检查。</td>
+          </tr>
+          <tr>
+            <td>目标安装目录已存在，复制后生成嵌套结构。</td>
+            <td>安装命令必须先断言目标不存在；替换已有安装需要用户确认。</td>
+          </tr>
+          <tr>
+            <td>“自包含”被误解为不需要任何外部 runtime。</td>
+            <td>在计划和 README 中保留外部前提矩阵：<code>uv</code>、Python、Zotero MCP、Node/CDP 按工作流分别要求。</td>
+          </tr>
+          <tr>
+            <td>Zotero 写入边界在文档重写中丢失。</td>
+            <td>在 <code>SKILL.md</code>、Zotero reference、AGENTS、测试里重复保留 MCP-only <code>write_note</code> 红线。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>11. 非目标</h2>
+      <ul>
+        <li>不发布 PyPI、npm、marketplace 或 hosted service。</li>
+        <li>不安装全局依赖，不修改系统 Python、conda base 或 shell 全局配置。</li>
+        <li>不改变 note schema 或渲染布局，除非路径迁移迫使必要调整。</li>
+        <li>不改变 Zotero 写入语义：仍然只能在用户明确要求后通过 MCP <code>write_note</code> 创建新子笔记。</li>
+        <li>不移除 local PDF workflow。</li>
+        <li>不在 <code>skill/</code> 内创建 README、安装指南或 changelog。</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>12. 最终审核结论</h2>
+      <div class="callout success">
+        <strong>当前判断：</strong>方案可以执行。剩余门禁不是设计问题，而是执行前确认：你确认后，再创建实施分支并开始迁移；在确认前不搬目录、不重写代码结构。
+      </div>
+      <p>本 HTML 是对现有设计文档的中文阅读版和执行版。它保持同一个核心设计：<code>skill/</code> 是唯一可复制的运行单元，root 只保留发布说明和维护规范。</p>
+      <p class="footer">对应 Markdown 设计文档：<code>docs/superpowers/specs/2026-06-30-paperread-v2-self-contained-skill-design.md</code></p>
+    </section>
+  </main>
+</body>
+</html>

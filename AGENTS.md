@@ -2,17 +2,25 @@
 
 ## 项目目标
 
-本项目实现 Zotero-first 文献总结工作流，同时支持直接输入本地 PDF path。输入 Zotero 中的文章标题时，Codex 通过 Zotero MCP 定位条目，使用本地 Python 工具默认抽取完整 PDF 内容、章节上下文和表格/数值候选，生成中文结构化论文总结，并在用户明确要求写入时创建 Zotero 子笔记。输入本地 PDF path 时，使用同一套抽取、总结、审查和渲染规则，但只在 PDF 同目录写本地分析目录和 Markdown 笔记，不写 Zotero。
+本项目维护一个自包含的 Paperread skill repo。唯一可安装运行产物是 `skill/`：复制到 Codex 或 Claude 的 skills 目录并命名为 `paperread` 后，用户应能在安装后的 skill root 内运行 `uv sync --locked`、`uv run paperread ...`，使用 Zotero 标题工作流和本地 PDF path 工作流。仓库根目录只承担维护文档、发布说明和规划记录职责，不是运行时 Python project。
 
 ## 目录约定
 
-- `src/paperread/`: Python package code for deterministic CLI/tooling logic.
-- `tests/`: pytest tests; never perform real Zotero writes.
-- `templates/`: Jinja2 note template.
-- `skill/`: the only public repo-local paperread workflow bundle.
-- `README.md`: public user entry point.
+- `skill/SKILL.md`: skill 入口，只保留触发、路由和核心安全边界。
+- `skill/agents/openai.yaml`: Codex UI metadata；更新 `SKILL.md` 后检查是否同步。
+- `skill/src/paperread/`: Python package code for deterministic CLI/tooling logic.
+- `skill/tests/`: pytest tests; never perform real Zotero writes.
+- `skill/templates/`: Jinja2 note template.
+- `skill/references/`: workflow and schema references loaded by the skill when needed.
+- `skill/scripts/`: bundled helper scripts, including portable skill validation.
+- `skill/pyproject.toml` and `skill/uv.lock`: dependency and lock metadata for the installed skill root.
+- `README.md`: English public entry point; explain install from `skill/`, not root runtime usage.
 - `README.zh-CN.md`: Chinese README paired with `README.md`; keep workflow commands, safety boundaries, and public claims synchronized when either README changes.
+- `docs/superpowers/specs/`: planning and review artifacts.
+- `docs/superpowers/scripts/`: maintainer-only validation scripts.
 - `AGENTS.md`: agent behavior and safety rules.
+
+Do not add `README.md`, `INSTALLATION_GUIDE.md`, `QUICK_REFERENCE.md`, or `CHANGELOG.md` inside `skill/`.
 
 ## 运行产物与证据边界
 
@@ -31,8 +39,8 @@
 ## 环境与依赖
 
 - Python 环境必须用 `uv` 管理。
-- 默认执行命令使用 `uv run`。
-- 缺少项目依赖时使用 `uv add` 或 `uv add --dev`，不使用 `pip install`、`conda install` 或全局安装。
+- 默认在 `skill/` 内执行命令，使用 `uv run`。
+- 缺少项目依赖时在 `skill/` 内使用 `uv add` 或 `uv add --dev`，不使用 `pip install`、`conda install` 或全局安装。
 - 不修改系统 Python、conda base 环境或 shell 全局配置。
 
 ## Git 与发布
@@ -53,22 +61,27 @@
 
 ## Better Notes 策略
 
-Better Notes 是可选阅读增强层。V1 生成 Zotero 子笔记，保证 Better Notes 能正常显示；不调用 `Zotero.BetterNotes.api`，不依赖 Better Notes 存在。
+Better Notes 是可选阅读增强层。Paperread 生成 Zotero 子笔记，保证 Better Notes 能正常显示；不调用 `Zotero.BetterNotes.api`，不依赖 Better Notes 存在。
 
 ## 验证命令
 
-改完代码后运行：
+改完运行时代码、测试、模板、reference、dependency 或 `SKILL.md` 后，从 `skill/` 运行：
 
 ```bash
+uv sync --locked
 uv run pytest
 uv run paperread --help
+uv run paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/paperread-extract.json
+uv run python scripts/validate-skill.py .
 ```
 
-涉及 PDF 抽取时额外运行：
+涉及根 README、中文 README、AGENTS 或安装说明时，还必须在仓库根目录运行：
 
 ```bash
-uv run paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/paperread-extract.json
+python docs/superpowers/scripts/validate-root-docs.py
 ```
+
+V2 发布前必须把 `skill/` 复制到仓库外临时目录并在复制后的目录中运行同一组 skill-root 验证，证明 `skill/` 自包含。
 
 ## 写入规则
 

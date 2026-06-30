@@ -4,10 +4,10 @@ Use this when the user provides a local PDF path.
 
 ## Setup
 
-Run from the repo root:
+Run from the skill root:
 
 ```bash
-uv sync
+uv sync --locked
 ```
 
 ## Steps

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Paperread"
+  short_description: "Evidence-grounded paper reading notes"
+  default_prompt: "Use $paperread to analyze this paper and prepare a Chinese structured reading note."
+policy:
+  allow_implicit_invocation: true
