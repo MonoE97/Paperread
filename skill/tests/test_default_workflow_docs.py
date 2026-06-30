@@ -170,6 +170,10 @@ def test_zotero_reference_keeps_single_paper_write_safety_contract() -> None:
         "search_library",
         "get_item_details",
         "write_note",
+        "runs/YYYY-MM-DD/<title-slug>/",
+        "note.md",
+        "note.html",
+        "write-payload.json",
         "same normalized title",
         "stop before create-run",
         "save-item-details",
@@ -194,6 +198,9 @@ def test_pdf_path_reference_forbids_zotero_write_path() -> None:
 
     for phrase in [
         "prepare-pdf",
+        "<pdf_stem>_analysis/",
+        "<pdf_stem>_note.md",
+        "_v2",
         "prepare-local-note-candidate",
         "must not write Zotero",
         "must not call refresh-live-notes",

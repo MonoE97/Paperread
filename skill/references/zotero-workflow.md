@@ -14,6 +14,10 @@ uv run paperread --help
 
 If `uv sync --locked` cannot find Python `>=3.13`, run `uv python install 3.13` from the skill root and retry. If `uv` is not installed, stop and ask the user to install `uv` first; do not use `pip`, `conda`, or system Python as a replacement.
 
+## Output Location
+
+By default, `create-run` writes local artifacts under `<skill_root>/runs/YYYY-MM-DD/<title-slug>/`. Keep `mcp-response.json`, `item-details.json`, `metadata.json`, `context.md`, `section_context.md`, optional figure artifacts, `summary.json`, and `review.json` in that run directory. `prepare-write-candidate` adds `note.md`, `note.html`, previews, `note-tags.json`, `gate-report.json`, and `write-payload.json` in the same directory.
+
 ## Tool Discovery
 
 Load Zotero MCP tools before the workflow: `search_library`, `get_item_details`, `get_content`, `write_note`, and optional `annotations`.

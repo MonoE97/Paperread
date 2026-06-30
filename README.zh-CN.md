@@ -65,6 +65,11 @@ Paperread 支持两类输入：
 
 两个工作流默认都会抽取完整 PDF。最终 `evidence_summary` locator 必须引用 `context.md` 或 `figure_context.md`；`section_context.md` 只作为导航辅助。通过 `scripts/capture-secondary-url.mjs` 抓取的 secondary web context 只用于 cross-check，不能在 `evidence_summary` 中作为证据引用。
 
+## 产物位置
+
+- Zotero 标题工作流的本地产物默认写到 `<skill_root>/runs/YYYY-MM-DD/<title-slug>/`。准备写入候选时，会在同一目录生成 `note.md`、`note.html`、`gate-report.json` 和 `write-payload.json`，然后才可能写入 Zotero。
+- 本地 PDF path 工作流的产物默认写在 PDF 同目录：`<pdf_stem>_analysis/` 保存分析产物，`<pdf_stem>_note.md` 是最终 Markdown 笔记。已有输出不会覆盖，会自动使用 `_v2`、`_v3` 等后缀。
+
 ## 运行要求
 
 - 安装和运行 CLI：`uv`，以及可由 `uv` 使用的 Python `>=3.13`；如果没有兼容解释器，用 `uv python install 3.13` 补齐。

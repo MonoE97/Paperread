@@ -14,6 +14,10 @@ uv run paperread --help
 
 If `uv sync --locked` cannot find Python `>=3.13`, run `uv python install 3.13` from the skill root and retry. If `uv` is not installed, stop and ask the user to install `uv` first; do not use `pip`, `conda`, or system Python as a replacement.
 
+## Output Location
+
+`prepare-pdf` writes beside the PDF. The first run creates `<pdf_stem>_analysis/` for analysis artifacts and targets `<pdf_stem>_note.md` as the final Markdown note. Repeated runs preserve existing outputs with `_v2`, `_v3`, and later suffixes.
+
 ## Steps
 
 1. Prepare local artifacts beside the PDF:
