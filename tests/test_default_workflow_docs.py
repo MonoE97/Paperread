@@ -23,10 +23,10 @@ def test_public_docs_use_single_repo_local_skill_entry() -> None:
     assert "uv sync" in combined
     assert "from the repo root" in combined
     assert "not a standalone global skill installation" in read(PAPERREAD_SKILL)
-    assert ("skills/" + "zotero-paper-summary") not in combined
+    assert ("skills/" + "zotero-" + "paper-summary") not in combined
     assert ("skills/" + "zotero-" + "batch-note-writing") not in combined
-    assert ".agents/skills/paperread" not in combined
-    assert ".claude/skills/paperread" not in combined
+    assert (".agents/" + "skills/" + "paperread") not in combined
+    assert (".claude/" + "skills/" + "paperread") not in combined
 
 
 def test_public_docs_describe_supported_workflows_and_outputs() -> None:
@@ -67,7 +67,7 @@ def test_zotero_reference_keeps_single_paper_write_safety_contract() -> None:
     ]:
         assert phrase in text
 
-    assert 'write_note(action="update"' not in text
+    assert ('write_note(action="' + "update" + '"') not in text
 
 
 def test_secondary_context_contract_uses_public_script_path() -> None:
