@@ -134,6 +134,16 @@ def test_build_local_gate_report_requires_pdf_source_and_final_note_path(tmp_pat
     assert "run.json final_note_path is required" in report["blockers"]
 
 
+def test_build_local_gate_report_blocks_empty_run_manifest(tmp_path: Path) -> None:
+    analysis_dir = prepare_ready_analysis_dir(tmp_path)
+    write_json(analysis_dir / "run.json", {})
+
+    report = build_local_gate_report(analysis_dir, generated_date="2026-06-29")
+
+    assert report["status"] == "blocked"
+    assert "run.json final_note_path is required" in report["blockers"]
+
+
 def test_prepare_local_note_candidate_writes_previews_tags_and_final_markdown(tmp_path: Path) -> None:
     analysis_dir = prepare_ready_analysis_dir(tmp_path)
     final_note_path = tmp_path / "paper_note.md"

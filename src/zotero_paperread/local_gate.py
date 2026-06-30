@@ -124,7 +124,7 @@ def build_local_gate_report(analysis_dir: Path, *, generated_date: str) -> dict[
             blockers.append(f"note.html h1 mismatch: expected {note_title}, got {html_title}")
 
     final_note_path = str(run_manifest.get("final_note_path", "")).strip()
-    if run_manifest and not final_note_path:
+    if run_manifest_path.exists() and not final_note_path:
         blockers.append("run.json final_note_path is required")
     return {
         "status": "blocked" if blockers else "local_ready",

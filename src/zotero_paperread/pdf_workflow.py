@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import fitz
+
 
 @dataclass(frozen=True)
 class PDFOutputPaths:
@@ -33,6 +35,19 @@ def allocate_pdf_output_paths(pdf_path: Path) -> PDFOutputPaths:
 
 def _clean_override(value: str | None) -> str:
     return str(value).strip() if value is not None else ""
+
+
+def validate_pdf_readable(pdf_path: Path) -> None:
+    """Raise ValueError if a PDF cannot be opened before creating output artifacts."""
+    resolved = Path(pdf_path).expanduser()
+    try:
+        doc = fitz.open(resolved)
+    except Exception as exc:
+        raise ValueError(f"PDF unreadable: {resolved}: {exc}") from exc
+    try:
+        _page_count = doc.page_count
+    finally:
+        doc.close()
 
 
 def build_pdf_metadata(

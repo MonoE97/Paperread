@@ -19,7 +19,7 @@ from zotero_paperread.note_table_migration import (
     has_markdown_table_separator,
 )
 from zotero_paperread.pdf_extract import extract_pdf
-from zotero_paperread.pdf_workflow import allocate_pdf_output_paths
+from zotero_paperread.pdf_workflow import allocate_pdf_output_paths, validate_pdf_readable
 from zotero_paperread.review import apply_review_to_summary
 from zotero_paperread.runs import allocate_run_dir, write_run_manifest
 from zotero_paperread.summary_lint import lint_summary
@@ -184,15 +184,31 @@ def prepare_pdf_command(
     max_pages: int | None = typer.Option(None, "--max-pages", min=1, help="Extract at most this many pages."),
 ) -> None:
     """Prepare a local PDF analysis bundle beside the PDF without writing Zotero."""
-    output_paths = allocate_pdf_output_paths(pdf_path)
+    resolved_pdf_path = Path(pdf_path).expanduser()
+    if resolved_pdf_path.suffix.lower() != ".pdf":
+        console.print(f"prepare_pdf_failed: expected a .pdf file: {resolved_pdf_path}", soft_wrap=True)
+        raise typer.Exit(1)
+    if not resolved_pdf_path.exists():
+        console.print(f"prepare_pdf_failed: PDF not found: {resolved_pdf_path}", soft_wrap=True)
+        raise typer.Exit(1)
+    if not resolved_pdf_path.is_file():
+        console.print(f"prepare_pdf_failed: PDF path is not a file: {resolved_pdf_path}", soft_wrap=True)
+        raise typer.Exit(1)
+    try:
+        validate_pdf_readable(resolved_pdf_path)
+    except ValueError as exc:
+        console.print(f"prepare_pdf_failed: {exc}", soft_wrap=True)
+        raise typer.Exit(1)
+
+    output_paths = allocate_pdf_output_paths(resolved_pdf_path)
     manifest_path = write_run_manifest(
         output_paths.analysis_dir,
         {
-            "title": str(title).strip() if title else Path(pdf_path).expanduser().stem,
+            "title": str(title).strip() if title else resolved_pdf_path.stem,
             "slug": output_paths.analysis_dir.name,
             "item_key": "",
             "source_type": "pdf_path",
-            "pdf_path": str(Path(pdf_path).expanduser()),
+            "pdf_path": str(resolved_pdf_path),
             "final_note_path": str(output_paths.final_note_path),
             "version_suffix": output_paths.version_suffix,
             "status": "initialized",
@@ -200,7 +216,7 @@ def prepare_pdf_command(
     )
     try:
         bundle = prepare_pdf_bundle(
-            pdf_path,
+            resolved_pdf_path,
             output_paths.analysis_dir,
             title=title,
             authors=authors,

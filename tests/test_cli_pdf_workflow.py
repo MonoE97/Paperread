@@ -109,6 +109,29 @@ def test_prepare_pdf_command_versions_when_outputs_already_exist(monkeypatch, tm
     assert (tmp_path / "paper_note.md").read_text(encoding="utf-8") == "old"
 
 
+def test_prepare_pdf_command_rejects_missing_pdf_without_creating_analysis_dir(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "missing.pdf"
+
+    result = CliRunner().invoke(app, ["prepare-pdf", str(pdf_path)])
+
+    assert result.exit_code == 1
+    assert "PDF not found" in result.stdout
+    assert not (tmp_path / "missing_analysis").exists()
+    assert not (tmp_path / "missing_note.md").exists()
+
+
+def test_prepare_pdf_command_rejects_invalid_pdf_without_creating_analysis_dir(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "bad.pdf"
+    pdf_path.write_text("not a pdf", encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["prepare-pdf", str(pdf_path)])
+
+    assert result.exit_code == 1
+    assert "PDF unreadable" in result.stdout
+    assert not (tmp_path / "bad_analysis").exists()
+    assert not (tmp_path / "bad_note.md").exists()
+
+
 def test_local_gate_run_command_prints_report(tmp_path: Path) -> None:
     analysis_dir = tmp_path / "paper_analysis"
     write_json(analysis_dir / "metadata.json", {"title": "PDF Paper", "source_type": "pdf_path"})
