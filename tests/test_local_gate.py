@@ -40,6 +40,8 @@ def trusted_summary() -> dict:
 
 def prepare_ready_analysis_dir(tmp_path: Path) -> Path:
     analysis_dir = tmp_path / "paper_analysis"
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
     write_json(
         analysis_dir / "metadata.json",
         {
@@ -47,6 +49,7 @@ def prepare_ready_analysis_dir(tmp_path: Path) -> Path:
             "creators": "A. Researcher",
             "date": "2026",
             "source_type": "pdf_path",
+            "pdf_path": str(pdf_path),
         },
     )
     write_json(analysis_dir / "summary.json", trusted_summary())
@@ -64,6 +67,7 @@ def prepare_ready_analysis_dir(tmp_path: Path) -> Path:
         {
             "title": "Example PDF Paper",
             "source_type": "pdf_path",
+            "version_suffix": "",
             "final_note_path": str(tmp_path / "paper_note.md"),
         },
     )
@@ -134,6 +138,36 @@ def test_build_local_gate_report_requires_pdf_source_and_final_note_path(tmp_pat
     assert "run.json final_note_path is required" in report["blockers"]
 
 
+def test_build_local_gate_report_blocks_final_note_overwrite(tmp_path: Path) -> None:
+    analysis_dir = prepare_ready_analysis_dir(tmp_path)
+    final_note_path = tmp_path / "paper_note.md"
+    final_note_path.write_text("existing note", encoding="utf-8")
+
+    report = build_local_gate_report(analysis_dir, generated_date="2026-06-29")
+
+    assert report["status"] == "blocked"
+    assert f"final note path already exists: {final_note_path}" in report["blockers"]
+    assert final_note_path.read_text(encoding="utf-8") == "existing note"
+
+
+def test_build_local_gate_report_blocks_final_note_outside_pdf_directory(tmp_path: Path) -> None:
+    analysis_dir = prepare_ready_analysis_dir(tmp_path)
+    write_json(
+        analysis_dir / "run.json",
+        {
+            "title": "Example PDF Paper",
+            "source_type": "pdf_path",
+            "version_suffix": "",
+            "final_note_path": str(tmp_path / "elsewhere" / "paper_note.md"),
+        },
+    )
+
+    report = build_local_gate_report(analysis_dir, generated_date="2026-06-29")
+
+    assert report["status"] == "blocked"
+    assert f"run.json final_note_path must be {tmp_path / 'paper_note.md'}" in report["blockers"]
+
+
 def test_build_local_gate_report_blocks_empty_run_manifest(tmp_path: Path) -> None:
     analysis_dir = prepare_ready_analysis_dir(tmp_path)
     write_json(analysis_dir / "run.json", {})
@@ -170,3 +204,15 @@ def test_prepare_local_note_candidate_writes_previews_tags_and_final_markdown(tm
     ]
     assert final_note_path.read_text(encoding="utf-8") == (analysis_dir / "note.md").read_text(encoding="utf-8")
     assert not (analysis_dir / "write-payload.json").exists()
+
+
+def test_prepare_local_note_candidate_does_not_overwrite_existing_final_note(tmp_path: Path) -> None:
+    analysis_dir = prepare_ready_analysis_dir(tmp_path)
+    final_note_path = tmp_path / "paper_note.md"
+    final_note_path.write_text("existing note", encoding="utf-8")
+
+    result = prepare_local_note_candidate(analysis_dir, generated_date="2026-06-29")
+
+    assert result["status"] == "blocked"
+    assert f"final note path already exists: {final_note_path}" in result["blockers"]
+    assert final_note_path.read_text(encoding="utf-8") == "existing note"

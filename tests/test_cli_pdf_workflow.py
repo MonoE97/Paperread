@@ -134,12 +134,17 @@ def test_prepare_pdf_command_rejects_invalid_pdf_without_creating_analysis_dir(t
 
 def test_local_gate_run_command_prints_report(tmp_path: Path) -> None:
     analysis_dir = tmp_path / "paper_analysis"
-    write_json(analysis_dir / "metadata.json", {"title": "PDF Paper", "source_type": "pdf_path"})
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    write_json(
+        analysis_dir / "metadata.json",
+        {"title": "PDF Paper", "source_type": "pdf_path", "pdf_path": str(pdf_path)},
+    )
     write_json(analysis_dir / "summary.json", trusted_summary())
     write_json(analysis_dir / "review.json", {"review_status": "passed_with_caveats", "needs_improvement": False})
     (analysis_dir / "note.md").write_text("# [Codex Summary] PDF Paper - 2026-06-29\n", encoding="utf-8")
     (analysis_dir / "note.html").write_text("<h1>[Codex Summary] PDF Paper - 2026-06-29</h1>", encoding="utf-8")
-    write_json(analysis_dir / "run.json", {"final_note_path": str(tmp_path / "paper_note.md")})
+    write_json(analysis_dir / "run.json", {"final_note_path": str(tmp_path / "paper_note.md"), "version_suffix": ""})
 
     result = CliRunner().invoke(app, ["local-gate-run", str(analysis_dir), "--generated-date", "2026-06-29"])
 
@@ -152,13 +157,21 @@ def test_local_gate_run_command_prints_report(tmp_path: Path) -> None:
 def test_prepare_local_note_candidate_command_writes_final_note_without_payload(tmp_path: Path) -> None:
     analysis_dir = tmp_path / "paper_analysis"
     final_note_path = tmp_path / "paper_note.md"
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
     write_json(
         analysis_dir / "metadata.json",
-        {"title": "PDF Paper", "creators": "A. Author", "date": "2026", "source_type": "pdf_path"},
+        {
+            "title": "PDF Paper",
+            "creators": "A. Author",
+            "date": "2026",
+            "source_type": "pdf_path",
+            "pdf_path": str(pdf_path),
+        },
     )
     write_json(analysis_dir / "summary.json", trusted_summary())
     write_json(analysis_dir / "review.json", {"review_status": "passed_with_caveats", "needs_improvement": False})
-    write_json(analysis_dir / "run.json", {"final_note_path": str(final_note_path)})
+    write_json(analysis_dir / "run.json", {"final_note_path": str(final_note_path), "version_suffix": ""})
 
     result = CliRunner().invoke(
         app,

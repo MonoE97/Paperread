@@ -244,6 +244,40 @@ def test_download_arxiv_source_fetches_and_extracts_tarball(monkeypatch, tmp_pat
     assert (source_root / "paper" / "figures" / "a.png").read_bytes() == b"png"
 
 
+def test_download_arxiv_source_caches_old_style_ids_without_path_splits(monkeypatch, tmp_path: Path) -> None:
+    archive_buffer = io.BytesIO()
+    with tarfile.open(fileobj=archive_buffer, mode="w:gz") as archive:
+        info = tarfile.TarInfo(name="paper/figures/a.png")
+        payload = b"png"
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+    archive_bytes = archive_buffer.getvalue()
+    seen: dict[str, str] = {}
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return archive_bytes
+
+    def fake_urlopen(url: str) -> FakeResponse:
+        seen["url"] = url
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    source_root = download_arxiv_source("hep-th/9901001", tmp_path / "source-cache")
+
+    assert seen["url"] == "https://arxiv.org/e-print/hep-th/9901001"
+    assert source_root == (tmp_path / "source-cache" / "hep-th__9901001")
+    assert (source_root / "paper" / "figures" / "a.png").read_bytes() == b"png"
+    assert not (tmp_path / "source-cache" / "hep-th").exists()
+
+
 def test_download_arxiv_source_returns_none_on_network_failure(monkeypatch, tmp_path: Path) -> None:
     def fake_urlopen(url: str):  # pragma: no cover - explicit failure path
         raise urllib.error.URLError("offline")

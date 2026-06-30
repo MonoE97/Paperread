@@ -42,12 +42,13 @@ def resolve_arxiv_id(details: dict[str, Any], pdf_path: Path | None = None) -> s
 def download_arxiv_source(arxiv_id: str, workdir: Path) -> Path | None:
     destination_root = Path(workdir).expanduser().resolve()
     destination_root.mkdir(parents=True, exist_ok=True)
-    source_root = destination_root / arxiv_id
+    cache_name = _cache_name_for_arxiv_id(arxiv_id)
+    source_root = destination_root / cache_name
     if source_root.exists():
         return source_root
 
-    archive_path = destination_root / f"{arxiv_id}.tar.gz"
-    temp_root = destination_root / f".{arxiv_id}.tmp"
+    archive_path = destination_root / f"{cache_name}.tar.gz"
+    temp_root = destination_root / f".{cache_name}.tmp"
     url = f"https://arxiv.org/e-print/{arxiv_id}"
 
     if temp_root.exists():
@@ -171,6 +172,12 @@ def _extract_arxiv_id(value: Any) -> str | None:
     if match is None:
         return None
     return match.group("id").lower()
+
+
+def _cache_name_for_arxiv_id(arxiv_id: str) -> str:
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "__", arxiv_id.strip())
+    safe_name = safe_name.strip("_")
+    return safe_name or "source"
 
 
 def _safe_member_path(member: tarfile.TarInfo) -> Path:

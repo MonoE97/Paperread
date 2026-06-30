@@ -65,6 +65,19 @@ def _html_h1_title(path: Path) -> str:
     return parser.title
 
 
+def _resolve_for_compare(path: Path) -> Path:
+    return Path(path).expanduser().resolve()
+
+
+def _expected_final_note_path(metadata: dict[str, Any], run_manifest: dict[str, Any]) -> Path | None:
+    pdf_path = str(metadata.get("pdf_path", "")).strip()
+    if not pdf_path:
+        return None
+    version_suffix = str(run_manifest.get("version_suffix", "")).strip()
+    resolved_pdf_path = Path(pdf_path).expanduser()
+    return resolved_pdf_path.parent / f"{resolved_pdf_path.stem}_note{version_suffix}.md"
+
+
 def build_local_gate_report(analysis_dir: Path, *, generated_date: str) -> dict[str, Any]:
     """Build a local PDF note readiness report without Zotero write fields."""
     analysis_dir = Path(analysis_dir)
@@ -126,6 +139,15 @@ def build_local_gate_report(analysis_dir: Path, *, generated_date: str) -> dict[
     final_note_path = str(run_manifest.get("final_note_path", "")).strip()
     if run_manifest_path.exists() and not final_note_path:
         blockers.append("run.json final_note_path is required")
+    if metadata and not str(metadata.get("pdf_path", "")).strip():
+        blockers.append("metadata.json pdf_path is required")
+    expected_final_note_path = _expected_final_note_path(metadata, run_manifest) if metadata and run_manifest else None
+    if final_note_path and expected_final_note_path is not None:
+        target = Path(final_note_path).expanduser()
+        if _resolve_for_compare(target) != _resolve_for_compare(expected_final_note_path):
+            blockers.append(f"run.json final_note_path must be {expected_final_note_path}")
+        elif target.exists():
+            blockers.append(f"final note path already exists: {target}")
     return {
         "status": "blocked" if blockers else "local_ready",
         "blockers": blockers,
