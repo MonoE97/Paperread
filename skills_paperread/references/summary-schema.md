@@ -14,16 +14,25 @@ Required write-ready fields:
 - `abstract_translation`
 - `research_question`
 - `method`
+- `method_modules`
+- `workflow_steps`
+- `technical_details`
 - `experiments`
 - `ai4s_relevance`
 - `key_points`
+- `key_figures`
 - `contributions`
 - `limitations`
+- `author_stated_limitations`
+- `inferred_limits`
+- `applicability_limits`
 - `follow_up_keywords`
 - `trust_rationale`
 - `evidence_summary`
 
 `evidence_summary` entries must cite `context.md` or `figure_context.md` locators.
+
+Rendered note prose is Chinese-first. Paper titles, author names, institution names, formulas, method names, abbreviations, units, evidence locators, code-like keys, and tag keys may remain in English.
 
 ## `review.json`
 

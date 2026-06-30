@@ -22,7 +22,7 @@ The first run writes `<pdf_stem>_analysis/` and targets `<pdf_stem>_note.md`. Re
 
 2. Read the generated `context.md`, `section_context.md`, and `figure_context.md` if available.
 
-3. Write `summary.json` and `review.json` in the analysis directory. Use `section_context.md` only as navigation. Evidence locators must cite `context.md` or `figure_context.md`.
+3. Write `summary.json` and `review.json` in the analysis directory. Use `section_context.md` only as navigation. It is not a canonical evidence source. Evidence locators must cite `context.md` or `figure_context.md`.
 
 4. Run the deterministic review chain:
 
@@ -46,5 +46,5 @@ This writes `note.md`, `note.html`, previews, `note-tags.json`, `local-gate-repo
 - The PDF path workflow must not write Zotero.
 - The PDF path workflow must not call refresh-live-notes.
 - The PDF path workflow must not create write-payload.json.
-- The PDF path workflow must not treat `section_context.md` as canonical evidence.
+- The PDF path workflow must not treat `section_context.md` as a canonical evidence source.
 - The PDF path workflow is local-output only; if the user later wants Zotero write-through, rerun through the Zotero title workflow.
