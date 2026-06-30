@@ -5,6 +5,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 README = PROJECT_ROOT / "README.md"
+README_ZH = PROJECT_ROOT / "README.zh-CN.md"
 AGENTS = PROJECT_ROOT / "AGENTS.md"
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 PAPERREAD_SKILL_DIR = PROJECT_ROOT / "skill"
@@ -13,10 +14,46 @@ ZOTERO_REFERENCE = PAPERREAD_SKILL_DIR / "references" / "zotero-workflow.md"
 PDF_REFERENCE = PAPERREAD_SKILL_DIR / "references" / "pdf-path-workflow.md"
 SUMMARY_REFERENCE = PAPERREAD_SKILL_DIR / "references" / "summary-schema.md"
 CAPTURE_SCRIPT = PAPERREAD_SKILL_DIR / "scripts" / "capture-secondary-url.mjs"
+PUBLIC_READMES = (README, README_ZH)
+PUBLIC_DOC_CONTRACT_PATHS = (*PUBLIC_READMES, AGENTS, PAPERREAD_SKILL)
 
 
 def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def read_public_doc_contract() -> str:
+    return "\n".join(read(path) for path in PUBLIC_DOC_CONTRACT_PATHS)
+
+
+def test_public_doc_contract_covers_chinese_readme() -> None:
+    assert README_ZH in PUBLIC_DOC_CONTRACT_PATHS
+
+
+def test_public_readmes_link_to_each_other_and_keep_english_default() -> None:
+    english = read(README)
+    chinese = read(README_ZH)
+
+    assert english.startswith("# Paperread\n\n**English** | [简体中文](README.zh-CN.md)")
+    assert chinese.startswith("# Paperread\n\n[English](README.md) | **简体中文**")
+
+
+def test_public_readmes_keep_core_workflow_terms_synchronized() -> None:
+    for path in PUBLIC_READMES:
+        text = read(path)
+        for phrase in [
+            "prepare-pdf",
+            "prepare-write-candidate",
+            "prepare-local-note-candidate",
+            "write_note",
+            "verify-zotero-note",
+            "refresh-live-notes",
+            "write-payload.json",
+            "context.md",
+            "figure_context.md",
+            "section_context.md",
+        ]:
+            assert phrase in text, path
 
 
 def tracked_project_files() -> list[Path]:
@@ -31,7 +68,7 @@ def tracked_project_files() -> list[Path]:
 
 
 def test_public_docs_use_single_repo_local_skill_entry() -> None:
-    combined = "\n".join(read(path) for path in [README, AGENTS, PAPERREAD_SKILL])
+    combined = read_public_doc_contract()
 
     assert "`skill/`" in combined
     assert "repo-local" in combined
@@ -52,7 +89,7 @@ def test_public_package_and_primary_cli_are_named_paperread() -> None:
     assert pyproject["project"]["name"] == "paperread"
     assert scripts == {"paperread": "paperread.cli:app"}
 
-    public_text = "\n".join(read(path) for path in [README, AGENTS, PAPERREAD_SKILL])
+    public_text = read_public_doc_contract()
     assert "uv run paperread --help" in public_text
     assert "its skill name is `paperread`" in read(README)
     assert "name: paperread" in read(PAPERREAD_SKILL)
@@ -96,7 +133,7 @@ def test_legacy_project_identity_scan_ignores_local_artifacts() -> None:
 
 
 def test_public_docs_describe_supported_workflows_and_outputs() -> None:
-    combined = "\n".join(read(path) for path in [README, AGENTS, PAPERREAD_SKILL])
+    combined = read_public_doc_contract()
 
     for phrase in [
         "Zotero title",
@@ -137,18 +174,23 @@ def test_zotero_reference_keeps_single_paper_write_safety_contract() -> None:
 
 
 def test_secondary_context_contract_uses_public_script_path() -> None:
-    readme = read(README)
+    english_readme = read(README)
+    chinese_readme = read(README_ZH)
+    readmes = [english_readme, chinese_readme]
     zotero = read(ZOTERO_REFERENCE)
 
-    for text in (readme, zotero):
+    for text in (*readmes, zotero):
         assert "skill/scripts/capture-secondary-url.mjs" in text
         assert "secondary_sources.json" in text
         assert "secondary_contexts" in text
         assert "source_status: secondary_context" in text
         assert "secondary_context_unavailable" in text
         assert "navigation_timeout" in text
-        assert "must not cite secondary context" in text
         assert "--request-retries" in text
+
+    assert "must not cite secondary context" in english_readme
+    assert "Secondary context 不能在 `evidence_summary` 中作为证据引用" in chinese_readme
+    assert "must not cite secondary context" in zotero
 
 
 def test_pdf_path_reference_forbids_zotero_write_path() -> None:
