@@ -53,6 +53,16 @@ class MockCdpHandler(BaseHTTPRequestHandler):
         if self.server.mode == "persistent_eval_400":
             self._send_json({"error": "persistent bad request"}, status=400)
             return
+        if self.server.mode == "chrome_error_403":
+            data = {
+                "title": "mp.weixin.qq.com",
+                "description": "",
+                "finalUrl": "chrome-error://chromewebdata/",
+                "readyState": "complete",
+                "text": "访问 mp.weixin.qq.com 的请求遭到拒绝\nHTTP ERROR 403\n您未获授权，无法查看此网页。",
+            }
+            self._send_json({"value": json.dumps(data)})
+            return
         if self.server.mode == "timeout" or self.server.eval_count < 3:
             data = {
                 "title": "",
@@ -180,3 +190,18 @@ def test_capture_secondary_url_writes_unavailable_file_for_persistent_eval_400(t
     captured = (tmp_path / "secondary_context.md").read_text(encoding="utf-8")
     assert "source_status: secondary_context_unavailable" in captured
     assert "capture_warning: cdp_request_failed:400 Bad Request" in captured
+
+
+def test_capture_secondary_url_marks_chrome_error_403_unavailable(tmp_path: Path) -> None:
+    server, base_url = run_mock_cdp(mode="chrome_error_403")
+    try:
+        result = run_capture(tmp_path, base_url, "--timeout-ms", "2000", "--poll-ms", "10")
+    finally:
+        server.shutdown()
+
+    assert result.returncode == 1
+    captured = (tmp_path / "secondary_context.md").read_text(encoding="utf-8")
+    assert "source_status: secondary_context_unavailable" in captured
+    assert "capture_warning: chrome_error_page" in captured
+    assert "capture_warning: http_403_unauthorized" in captured
+    assert "final_url: chrome-error://chromewebdata/" in captured

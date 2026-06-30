@@ -91,6 +91,13 @@ ALLOWED_MIXED_ENGLISH_PHRASES = (
     "on-the-fly",
     "solid-state electrolyte",
     "all-solid-state",
+    "sulfide SSE",
+    "Li metal interface",
+    "XPS depth profiling",
+    "DC polarization",
+    "post-mortem",
+    "ex situ",
+    "cycling 后",
 )
 RENDERED_TEXT_FIELDS = (
     "one_sentence_summary",
@@ -121,6 +128,10 @@ def _strip_allowed_mixed_english_phrases(value: str) -> str:
     for phrase in ALLOWED_MIXED_ENGLISH_PHRASES:
         text = re.sub(re.escape(phrase), " ", text, flags=re.IGNORECASE)
     return text
+
+
+def _contains_allowed_mixed_english_phrase(value: str) -> bool:
+    return any(re.search(re.escape(phrase), value, flags=re.IGNORECASE) for phrase in ALLOWED_MIXED_ENGLISH_PHRASES)
 
 
 def _is_technical_token(token: str) -> bool:
@@ -161,6 +172,8 @@ def _span_looks_like_english_prose(value: str) -> bool:
     prose_tokens = _english_prose_tokens(value)
     if len(prose_tokens) >= 3:
         return True
+    if len(prose_tokens) == 1 and _contains_allowed_mixed_english_phrase(value):
+        return True
     if len(prose_tokens) < 2:
         return False
     latin_letter_count = len(LATIN_LETTER_RE.findall(_strip_allowed_mixed_english_phrases(value)))
@@ -175,7 +188,9 @@ def _looks_like_english_prose(value: Any) -> bool:
         return False
     if not CJK_RE.search(text):
         return _span_looks_like_english_prose(text)
-    return any(_span_looks_like_english_prose(span) for span in LATIN_SPAN_RE.findall(text))
+    if any(_span_looks_like_english_prose(span) for span in LATIN_SPAN_RE.findall(text)):
+        return True
+    return _contains_allowed_mixed_english_phrase(text) and len(_english_prose_tokens(text)) == 1
 
 
 def _preview(value: str, *, limit: int = 80) -> str:

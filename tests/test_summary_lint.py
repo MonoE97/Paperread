@@ -224,6 +224,52 @@ def test_lint_summary_allows_scattered_technical_terms_units_and_formulas() -> N
     assert not any(issue["code"] == "rendered_note_field_english_prose" for issue in issues)
 
 
+def test_lint_summary_allows_common_experimental_terms_in_chinese_prose() -> None:
+    summary = {
+        "method": "用 XPS depth profiling、DC polarization 和 TOF-SIMS 建立界面证据链。",
+        "technical_details": [
+            "Li metal interface 的 post-mortem 证据来自 XPS depth profiling 与 TOF-SIMS。",
+            "sulfide SSE 成本下降和低湿制造兼容是本文的主要工程价值。",
+        ],
+        "inferred_limits": [
+            {
+                "text": "保护层机制可信但仍偏 ex situ/post-mortem 证据。",
+                "basis": "界面产物主要来自 cycling 后 XPS depth profiling、TOF-SIMS 与 DFT 推断。",
+            }
+        ],
+        "applicability_limits": ["适合关注 sulfide SSE 成本下降和 Li metal interface 的材料筛选。"],
+        "evidence_summary": [],
+        "key_figures": [],
+    }
+
+    issues = lint_summary(summary)
+
+    assert not any(issue["code"] == "rendered_note_field_english_prose" for issue in issues)
+
+
+def test_lint_summary_flags_generic_cycling_english_phrase() -> None:
+    summary = {
+        "technical_details": [
+            "cycling performance 是核心结果。",
+            "solid-state electrolyte performance 是核心结果。",
+            "XPS depth profiling analysis 是核心证据。",
+            "on-the-fly training 是主要方法。",
+            "cycling 后 performance 是核心结果。",
+        ],
+        "evidence_summary": [],
+        "key_figures": [],
+    }
+
+    issues = lint_summary(summary)
+
+    messages = [issue["message"] for issue in issues if issue["code"] == "rendered_note_field_english_prose"]
+    assert any("technical_details[0]" in message for message in messages)
+    assert any("technical_details[1]" in message for message in messages)
+    assert any("technical_details[2]" in message for message in messages)
+    assert any("technical_details[3]" in message for message in messages)
+    assert any("technical_details[4]" in message for message in messages)
+
+
 def test_lint_summary_does_not_let_locator_prefix_hide_english_prose() -> None:
     summary = {
         "technical_details": ["context.md page 3 section Results and discussion supports the claim."],

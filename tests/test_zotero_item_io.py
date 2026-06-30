@@ -29,6 +29,24 @@ def test_normalize_item_details_accepts_mcp_text_response() -> None:
     assert normalize_item_details_payload(payload)["title"] == "Example Paper"
 
 
+def test_normalize_item_details_accepts_jsonrpc_tools_call_envelope() -> None:
+    item = {"key": "ABC123", "title": "Example Paper", "attachments": [], "notes": []}
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(item),
+                }
+            ]
+        },
+    }
+
+    assert normalize_item_details_payload(payload)["key"] == "ABC123"
+
+
 def test_normalize_item_details_rejects_missing_key() -> None:
     with pytest.raises(ValueError, match="item details missing key"):
         normalize_item_details_payload({"title": "No Key"})

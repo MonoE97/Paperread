@@ -10,6 +10,13 @@ from paperread.zotero_sqlite import DEFAULT_ZOTERO_SQLITE_PATH, lookup_extra_by_
 def normalize_item_details_payload(payload: Any) -> dict[str, Any]:
     """Return a Zotero item-details dict from raw MCP or plain JSON payload."""
     raw = payload
+    if (
+        isinstance(raw, dict)
+        and isinstance(raw.get("result"), dict)
+        and isinstance(raw["result"].get("content"), list)
+    ):
+        raw = raw["result"]["content"]
+
     if isinstance(raw, list) and raw and isinstance(raw[0], dict) and raw[0].get("type") == "text":
         text = raw[0].get("text")
         if not isinstance(text, str):

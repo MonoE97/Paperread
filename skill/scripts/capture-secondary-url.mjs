@@ -132,6 +132,19 @@ function hasLoadedText(data) {
   );
 }
 
+function unavailablePageWarnings(data) {
+  const warnings = [];
+  const finalUrl = String(data?.finalUrl || "");
+  const text = markdownEscape(data?.text || "");
+  if (finalUrl.startsWith("chrome-error://")) {
+    warnings.push("chrome_error_page");
+  }
+  if (/HTTP ERROR 403/i.test(text) || /未获授权|请求遭到拒绝/.test(text)) {
+    warnings.push("http_403_unauthorized");
+  }
+  return warnings;
+}
+
 async function waitForLoadedText(targetId) {
   const deadline = Date.now() + timeoutMs;
   let lastData = {
@@ -147,6 +160,14 @@ async function waitForLoadedText(targetId) {
     try {
       lastData = await capturePage(targetId);
       requestWarnings.push(...drainRecoveredRequestWarnings());
+      const unavailableWarnings = unavailablePageWarnings(lastData);
+      if (unavailableWarnings.length) {
+        return {
+          status: "page_unavailable",
+          data: lastData,
+          warnings: uniqueWarnings([...requestWarnings, ...unavailableWarnings]),
+        };
+      }
       if (hasLoadedText(lastData)) {
         return {
           status: "captured",
