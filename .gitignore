@@ -1,7 +1,7 @@
 # macOS
 .DS_Store
 
-# Python
+# Python caches, packaging, and coverage
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -10,20 +10,26 @@ __pycache__/
 .mypy_cache/
 .coverage
 htmlcov/
+dist/
+build/
 
 # uv and virtual environments
 .venv/
 
-# Local outputs and previews
+# Agent/session local state
 .worktrees/
 .superpowers/
 *.log
 tmp/
 .tmp/
+
+# Paper, Zotero, and generated note outputs
 runs/
 papers/
-dist/
-build/
+*_analysis/
+*_analysis_v[0-9]*/
+*_note.md
+*_note_v[0-9]*.md
 *.pdf.txt
 *.extract.json
 *.summary.json
