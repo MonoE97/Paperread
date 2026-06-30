@@ -20,15 +20,13 @@ uv sync
 uv run paperread --help
 ```
 
-The legacy `zotero-paperread` command remains available as a compatibility alias, but new documentation should use `paperread`.
-
 Zotero title workflows also require Zotero Desktop plus a working Zotero MCP server. Local PDF path workflows do not require Zotero.
 
 ## Use As A Repo-Local Skill
 
-The only public workflow bundle is `skills_paperread/`, and its skill name is `paperread`. Public v1 is repo-local: clone this repository, run `uv sync`, and execute commands from the repo root. Do not copy `skills_paperread/` by itself and expect the workflow to run, because it depends on this repository's Python package, templates, lockfile, and CLI.
+The only public workflow bundle is `skill/`, and its skill name is `paperread`. Public v1 is repo-local: clone this repository, run `uv sync`, and execute commands from the repo root. Do not copy `skill/` by itself and expect the workflow to run, because it depends on this repository's Python package, templates, lockfile, and CLI.
 
-Point your agent at `skills_paperread/SKILL.md`. The skill routes a local PDF path to `skills_paperread/references/pdf-path-workflow.md`; otherwise it treats the input as a Zotero title or title fragment and uses `skills_paperread/references/zotero-workflow.md`.
+Point your agent at `skill/SKILL.md`. The skill routes a local PDF path to `skill/references/pdf-path-workflow.md`; otherwise it treats the input as a Zotero title or title fragment and uses `skill/references/zotero-workflow.md`.
 
 ## Zotero Title Workflow
 
@@ -44,7 +42,7 @@ High-level flow:
 
 ```bash
 mkdir -p <run_dir>/secondary_contexts
-node skills_paperread/scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_contexts/secondary-001.md --request-retries 2 --request-retry-ms 500
+node skill/scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_contexts/secondary-001.md --request-retries 2 --request-retry-ms 500
 ```
 
 Captured secondary files use `source_status: secondary_context` when usable. Unavailable captures use `source_status: secondary_context_unavailable`, including warnings such as `navigation_timeout`. Secondary context must not cite secondary context in `evidence_summary`; it is only for cross-checking and background.
@@ -114,7 +112,7 @@ uv run paperread --help
 uv run paperread extract-pdf tests/fixtures/minimal.pdf --output /tmp/paperread-extract.json
 ```
 
-Codex users who have the bundled `skill-creator` validator available can optionally run its local `quick_validate.py` script against `skills_paperread/`. That validator is not required to use this repository.
+Codex users who have the bundled `skill-creator` validator available can optionally run its local `quick_validate.py` script against `skill/`. That validator is not required to use this repository.
 
 ## Safety Boundaries
 

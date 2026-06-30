@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from zotero_paperread.local_candidate import prepare_local_note_candidate
-from zotero_paperread.local_gate import build_local_gate_report
+from paperread.local_candidate import prepare_local_note_candidate
+from paperread.local_gate import build_local_gate_report
 
 
 def write_json(path: Path, payload: dict | list) -> None:

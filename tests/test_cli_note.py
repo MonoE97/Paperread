@@ -4,7 +4,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from zotero_paperread.cli import app
+from paperread.cli import app
 
 
 def write_json(path: Path, payload: dict) -> None:
@@ -1099,7 +1099,7 @@ def test_refresh_live_notes_command_updates_details(monkeypatch, tmp_path: Path)
             }
         ]
 
-    monkeypatch.setattr("zotero_paperread.cli.fetch_item_children_notes", fake_fetch_item_children_notes)
+    monkeypatch.setattr("paperread.cli.fetch_item_children_notes", fake_fetch_item_children_notes)
     runner = CliRunner()
 
     result = runner.invoke(
@@ -1135,7 +1135,7 @@ def test_verify_zotero_note_command_reports_pass(monkeypatch) -> None:
             },
         }
 
-    monkeypatch.setattr("zotero_paperread.cli.fetch_note_snapshot", fake_fetch_note_snapshot)
+    monkeypatch.setattr("paperread.cli.fetch_note_snapshot", fake_fetch_note_snapshot)
     runner = CliRunner()
 
     result = runner.invoke(
@@ -1183,7 +1183,7 @@ def test_verify_zotero_note_command_checks_content_hash(monkeypatch) -> None:
             },
         }
 
-    monkeypatch.setattr("zotero_paperread.cli.fetch_note_snapshot", fake_fetch_note_snapshot)
+    monkeypatch.setattr("paperread.cli.fetch_note_snapshot", fake_fetch_note_snapshot)
     result = CliRunner().invoke(
         app,
         [
@@ -1220,7 +1220,7 @@ def test_prepare_write_candidate_command_writes_payload(monkeypatch, tmp_path: P
         assert kwargs["generated_date"] == "2026-06-22"
         return {"status": "write_ready", "write_payload_path": str(run_dir / "write-payload.json")}
 
-    monkeypatch.setattr("zotero_paperread.cli.prepare_write_candidate", fake_prepare_write_candidate)
+    monkeypatch.setattr("paperread.cli.prepare_write_candidate", fake_prepare_write_candidate)
     result = CliRunner().invoke(
         app,
         [

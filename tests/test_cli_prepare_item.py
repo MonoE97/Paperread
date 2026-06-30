@@ -4,8 +4,8 @@ from pathlib import Path
 import fitz
 from typer.testing import CliRunner
 
-from zotero_paperread import workflow
-from zotero_paperread.cli import app
+from paperread import workflow
+from paperread.cli import app
 
 
 def make_pdf(path: Path, pages: list[str]) -> None:

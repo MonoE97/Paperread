@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCRIPT = Path("skills_paperread/scripts/capture-secondary-url.mjs")
+SCRIPT = Path("skill/scripts/capture-secondary-url.mjs")
 
 
 class MockCdpServer(ThreadingHTTPServer):

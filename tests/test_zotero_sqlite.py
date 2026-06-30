@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from zotero_paperread.zotero_sqlite import lookup_extra_by_item_key
+from paperread.zotero_sqlite import lookup_extra_by_item_key
 
 
 def make_zotero_db(
@@ -52,7 +52,7 @@ def test_lookup_extra_retries_read_only_before_immutable(monkeypatch, tmp_path: 
             raise sqlite3.OperationalError("database is locked")
         return "https://mp.weixin.qq.com/s/retry-success", True
 
-    monkeypatch.setattr("zotero_paperread.zotero_sqlite._lookup_with_mode", fake_lookup)
+    monkeypatch.setattr("paperread.zotero_sqlite._lookup_with_mode", fake_lookup)
 
     result = lookup_extra_by_item_key(
         "ABC123",
@@ -79,7 +79,7 @@ def test_lookup_extra_records_successful_immutable_as_diagnostic(monkeypatch, tm
             raise sqlite3.OperationalError("database is locked")
         return "https://mp.weixin.qq.com/s/immutable-success", True
 
-    monkeypatch.setattr("zotero_paperread.zotero_sqlite._lookup_with_mode", fake_lookup)
+    monkeypatch.setattr("paperread.zotero_sqlite._lookup_with_mode", fake_lookup)
 
     result = lookup_extra_by_item_key(
         "ABC123",

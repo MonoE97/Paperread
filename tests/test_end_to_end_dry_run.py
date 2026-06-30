@@ -4,8 +4,8 @@ from pathlib import Path
 import fitz
 from typer.testing import CliRunner
 
-from zotero_paperread.cli import app
-from zotero_paperread.pdf_extract import extract_pdf
+from paperread.cli import app
+from paperread.pdf_extract import extract_pdf
 
 
 def make_pdf(path: Path) -> None:

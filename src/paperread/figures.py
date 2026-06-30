@@ -6,7 +6,7 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 import fitz
 
-from zotero_paperread import arxiv_source
+from paperread import arxiv_source
 
 CAPTION_PATTERN = re.compile(
     r"^\s*(figure|fig\.?|scheme)\s+([A-Za-z0-9]+)(?:\s*[\.:_-]\s*|\s*$)",

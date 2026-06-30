@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from zotero_paperread.secondary_sources import build_secondary_sources, extract_http_urls
+from paperread.secondary_sources import build_secondary_sources, extract_http_urls
 
 
 def test_extract_http_urls_accepts_only_http_and_https_and_dedupes() -> None:

@@ -3,7 +3,7 @@ from pathlib import Path
 import fitz
 import pytest
 
-from zotero_paperread.pdf_extract import extract_pdf
+from paperread.pdf_extract import extract_pdf
 
 
 def make_pdf(path: Path, pages: list[str]) -> None:

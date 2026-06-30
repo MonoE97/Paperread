@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from zotero_paperread.zotero_sqlite import DEFAULT_ZOTERO_SQLITE_PATH, lookup_extra_by_item_key
+from paperread.zotero_sqlite import DEFAULT_ZOTERO_SQLITE_PATH, lookup_extra_by_item_key
 
 
 def normalize_item_details_payload(payload: Any) -> dict[str, Any]:

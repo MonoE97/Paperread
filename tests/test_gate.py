@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from zotero_paperread.gate import build_gate_report
+from paperread.gate import build_gate_report
 
 
 def write_json(path: Path, payload: dict) -> None:

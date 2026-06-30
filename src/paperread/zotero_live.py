@@ -8,7 +8,7 @@ from typing import Any, Callable
 from urllib.parse import quote
 from urllib.request import urlopen
 
-from zotero_paperread.note_hash import note_html_sha256
+from paperread.note_hash import note_html_sha256
 
 
 FetchJson = Callable[[str], object]

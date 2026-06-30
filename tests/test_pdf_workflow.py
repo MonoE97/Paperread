@@ -2,9 +2,9 @@ from pathlib import Path
 
 import fitz
 
-from zotero_paperread import workflow
-from zotero_paperread.pdf_workflow import allocate_pdf_output_paths, build_pdf_metadata
-from zotero_paperread.workflow import prepare_pdf_bundle
+from paperread import workflow
+from paperread.pdf_workflow import allocate_pdf_output_paths, build_pdf_metadata
+from paperread.workflow import prepare_pdf_bundle
 
 
 def make_pdf(path: Path, pages: list[str]) -> None:

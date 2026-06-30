@@ -8,7 +8,7 @@ from pathlib import Path
 import fitz
 import pytest
 
-from zotero_paperread.arxiv_source import (
+from paperread.arxiv_source import (
     collect_source_figures,
     download_arxiv_source,
     extract_source_package,

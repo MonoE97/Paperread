@@ -4,11 +4,11 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
-from zotero_paperread.gate import build_gate_report
-from zotero_paperread.note import build_note_labels, render_note, render_note_html, validate_note
-from zotero_paperread.write_payload import build_write_payload
-from zotero_paperread.zotero_details import next_version_suffix_from_details
-from zotero_paperread.zotero_live import fetch_item_children_notes, refresh_details_with_live_notes
+from paperread.gate import build_gate_report
+from paperread.note import build_note_labels, render_note, render_note_html, validate_note
+from paperread.write_payload import build_write_payload
+from paperread.zotero_details import next_version_suffix_from_details
+from paperread.zotero_live import fetch_item_children_notes, refresh_details_with_live_notes
 
 
 FetchLiveNotes = Callable[..., list[dict[str, Any]]]

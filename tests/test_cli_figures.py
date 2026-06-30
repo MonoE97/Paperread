@@ -3,7 +3,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from zotero_paperread import cli
+from paperread import cli
 
 
 runner = CliRunner()

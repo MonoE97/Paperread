@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from zotero_paperread.zotero_item_io import (
+from paperread.zotero_item_io import (
     normalize_item_details_payload,
     write_item_details_files,
 )
@@ -64,7 +64,7 @@ def test_write_item_details_files_enriches_missing_extra_from_sqlite(monkeypatch
             },
         }
 
-    monkeypatch.setattr("zotero_paperread.zotero_item_io.lookup_extra_by_item_key", fake_lookup, raising=False)
+    monkeypatch.setattr("paperread.zotero_item_io.lookup_extra_by_item_key", fake_lookup, raising=False)
 
     result = write_item_details_files(item, normalized_path=normalized_path)
     normalized = json.loads(normalized_path.read_text(encoding="utf-8"))
@@ -89,7 +89,7 @@ def test_write_item_details_files_keeps_mcp_extra_without_sqlite_lookup(monkeypa
     def fail_lookup(*args, **kwargs):
         raise AssertionError("sqlite fallback should not run when MCP extra exists")
 
-    monkeypatch.setattr("zotero_paperread.zotero_item_io.lookup_extra_by_item_key", fail_lookup, raising=False)
+    monkeypatch.setattr("paperread.zotero_item_io.lookup_extra_by_item_key", fail_lookup, raising=False)
 
     result = write_item_details_files(item, normalized_path=normalized_path)
     normalized = json.loads(normalized_path.read_text(encoding="utf-8"))

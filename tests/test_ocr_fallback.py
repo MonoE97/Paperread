@@ -5,7 +5,7 @@ from pathlib import Path
 import fitz
 import pytest
 
-from zotero_paperread.figures import extract_figures
+from paperread.figures import extract_figures
 
 
 def make_low_confidence_pdf(path: Path) -> None:
@@ -28,7 +28,7 @@ def test_extract_figures_warns_when_ocr_fallback_is_needed_but_unavailable(
     pdf_path = tmp_path / "low-confidence.pdf"
     output_dir = tmp_path / "figures"
     make_low_confidence_pdf(pdf_path)
-    monkeypatch.setattr("zotero_paperread.figures.ocr_fallback_available", lambda: False)
+    monkeypatch.setattr("paperread.figures.ocr_fallback_available", lambda: False)
 
     payload = extract_figures(
         pdf_path,

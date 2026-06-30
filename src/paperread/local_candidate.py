@@ -5,8 +5,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from zotero_paperread.local_gate import build_local_gate_report
-from zotero_paperread.note import build_note_labels, render_note, render_note_html, validate_note
+from paperread.local_gate import build_local_gate_report
+from paperread.note import build_note_labels, render_note, render_note_html, validate_note
 
 
 def _read_json(path: Path) -> dict[str, Any]:

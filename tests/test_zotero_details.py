@@ -1,4 +1,4 @@
-from zotero_paperread.zotero_details import (
+from paperread.zotero_details import (
     codex_summary_titles_from_details,
     next_version_suffix_from_details,
     primary_pdf_path_from_details,

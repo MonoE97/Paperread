@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from zotero_paperread.zotero_live import (
+from paperread.zotero_live import (
     LiveNoteVerificationError,
     fetch_item_children_notes,
     refresh_details_with_live_notes,

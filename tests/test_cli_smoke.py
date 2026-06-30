@@ -1,6 +1,6 @@
 from typer.testing import CliRunner
 
-from zotero_paperread.cli import app
+from paperread.cli import app
 
 
 def test_version_command_prints_version() -> None:

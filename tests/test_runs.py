@@ -4,7 +4,7 @@ import json
 from datetime import date
 from pathlib import Path
 
-from zotero_paperread.runs import allocate_run_dir, slugify_title, write_run_manifest
+from paperread.runs import allocate_run_dir, slugify_title, write_run_manifest
 
 
 def test_slugify_title_normalizes_unicode_punctuation() -> None:

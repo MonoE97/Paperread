@@ -1,6 +1,6 @@
 import pytest
 
-from zotero_paperread.review import apply_review_to_summary, review_allows_write
+from paperread.review import apply_review_to_summary, review_allows_write
 
 
 def test_apply_review_to_summary_copies_gate_fields() -> None:

@@ -8,34 +8,34 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
-from zotero_paperread.figures import extract_figures
-from zotero_paperread.gate import build_gate_report
-from zotero_paperread.local_candidate import prepare_local_note_candidate
-from zotero_paperread.local_gate import build_local_gate_report
-from zotero_paperread.note import build_note_labels, render_note, render_note_html, validate_note, validate_trusted_summary
-from zotero_paperread.note_table_migration import (
+from paperread.figures import extract_figures
+from paperread.gate import build_gate_report
+from paperread.local_candidate import prepare_local_note_candidate
+from paperread.local_gate import build_local_gate_report
+from paperread.note import build_note_labels, render_note, render_note_html, validate_note, validate_trusted_summary
+from paperread.note_table_migration import (
     classify_note_content,
     convert_note_tables_to_html,
     has_markdown_table_separator,
 )
-from zotero_paperread.pdf_extract import extract_pdf
-from zotero_paperread.pdf_workflow import allocate_pdf_output_paths, validate_pdf_readable
-from zotero_paperread.review import apply_review_to_summary
-from zotero_paperread.runs import allocate_run_dir, write_run_manifest
-from zotero_paperread.summary_lint import lint_summary
-from zotero_paperread.workflow import prepare_item_bundle, prepare_pdf_bundle
-from zotero_paperread.write_candidate import prepare_write_candidate
-from zotero_paperread.write_payload import build_write_payload
-from zotero_paperread.zotero_details import next_version_suffix_from_details
-from zotero_paperread.zotero_live import (
+from paperread.pdf_extract import extract_pdf
+from paperread.pdf_workflow import allocate_pdf_output_paths, validate_pdf_readable
+from paperread.review import apply_review_to_summary
+from paperread.runs import allocate_run_dir, write_run_manifest
+from paperread.summary_lint import lint_summary
+from paperread.workflow import prepare_item_bundle, prepare_pdf_bundle
+from paperread.write_candidate import prepare_write_candidate
+from paperread.write_payload import build_write_payload
+from paperread.zotero_details import next_version_suffix_from_details
+from paperread.zotero_live import (
     LiveNoteVerificationError,
     fetch_item_children_notes,
     fetch_note_snapshot,
     refresh_details_with_live_notes,
     verify_note_snapshot,
 )
-from zotero_paperread.zotero_sqlite import DEFAULT_ZOTERO_SQLITE_PATH
-from zotero_paperread.zotero_item_io import write_item_details_files
+from paperread.zotero_sqlite import DEFAULT_ZOTERO_SQLITE_PATH
+from paperread.zotero_item_io import write_item_details_files
 
 app = typer.Typer(help="Zotero-first paper reading utilities.")
 console = Console()
@@ -131,7 +131,7 @@ def validate_note_path_or_exit(note_path: Path) -> None:
 @app.command()
 def version() -> None:
     """Print the package version."""
-    from zotero_paperread import __version__
+    from paperread import __version__
 
     typer.echo(__version__)
 

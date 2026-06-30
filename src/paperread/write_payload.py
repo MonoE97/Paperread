@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from zotero_paperread.note_hash import canonicalize_note_html_for_hash, note_html_sha256
+from paperread.note_hash import canonicalize_note_html_for_hash, note_html_sha256
 
 
 def build_write_payload(gate_report: dict[str, Any]) -> dict[str, Any]:

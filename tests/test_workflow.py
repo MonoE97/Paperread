@@ -3,8 +3,8 @@ from pathlib import Path
 
 import fitz
 
-from zotero_paperread import workflow
-from zotero_paperread.workflow import prepare_item_bundle
+from paperread import workflow
+from paperread.workflow import prepare_item_bundle
 
 
 def make_pdf(path: Path, pages: list[str]) -> None:

@@ -1,5 +1,5 @@
-import zotero_paperread.note as note_module
-from zotero_paperread.note import render_note, render_note_html, validate_note
+import paperread.note as note_module
+from paperread.note import render_note, render_note_html, validate_note
 
 
 METADATA = {

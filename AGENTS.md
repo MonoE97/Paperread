@@ -6,10 +6,10 @@
 
 ## 目录约定
 
-- `src/zotero_paperread/`: Python package code for deterministic CLI/tooling logic.
+- `src/paperread/`: Python package code for deterministic CLI/tooling logic.
 - `tests/`: pytest tests; never perform real Zotero writes.
 - `templates/`: Jinja2 note template.
-- `skills_paperread/`: the only public repo-local paperread workflow bundle.
+- `skill/`: the only public repo-local paperread workflow bundle.
 - `README.md`: public user entry point.
 - `AGENTS.md`: agent behavior and safety rules.
 

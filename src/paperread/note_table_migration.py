@@ -9,7 +9,7 @@ from typing import Literal
 
 from bs4 import BeautifulSoup
 
-from zotero_paperread.note import render_note_html
+from paperread.note import render_note_html
 
 NoteContentType = Literal[
     "plain_markdown",

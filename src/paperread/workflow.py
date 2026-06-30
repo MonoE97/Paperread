@@ -4,11 +4,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from zotero_paperread.figures import extract_figures
-from zotero_paperread.pdf_workflow import build_pdf_metadata
-from zotero_paperread.pdf_extract import extract_pdf
-from zotero_paperread.runs import write_run_manifest
-from zotero_paperread.secondary_sources import build_secondary_sources
+from paperread.figures import extract_figures
+from paperread.pdf_workflow import build_pdf_metadata
+from paperread.pdf_extract import extract_pdf
+from paperread.runs import write_run_manifest
+from paperread.secondary_sources import build_secondary_sources
 
 LOW_PRIORITY_PDF_TERMS = (
     "appendix",

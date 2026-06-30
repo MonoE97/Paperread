@@ -4,13 +4,13 @@ import base64
 import fitz
 import pytest
 
-from zotero_paperread.figures import (
+from paperread.figures import (
     _detect_captions,
     assess_image_quality,
     classify_figure_evidence_tier,
     extract_figures,
 )
-from zotero_paperread.workflow import build_figure_context_markdown
+from paperread.workflow import build_figure_context_markdown
 
 
 def _selected(payload: dict) -> list[dict]:
@@ -796,7 +796,7 @@ def test_extract_figures_backfills_caption_for_captionless_embedded_image_from_s
     output_dir = tmp_path / "images"
     make_raster_image_pdf(pdf_path)
     monkeypatch.setattr(
-        "zotero_paperread.figures._detect_graphic_regions",
+        "paperread.figures._detect_graphic_regions",
         lambda page: [],
     )
 
@@ -819,7 +819,7 @@ def test_extract_figures_keeps_embedded_image_regions_as_late_supplement(
     output_dir = tmp_path / "images"
     make_raster_image_pdf(pdf_path)
     monkeypatch.setattr(
-        "zotero_paperread.figures._detect_graphic_regions",
+        "paperread.figures._detect_graphic_regions",
         lambda page: [],
     )
 
@@ -868,7 +868,7 @@ def test_extract_figures_does_not_backfill_when_multiple_same_page_captions_matc
     output_dir = tmp_path / "images"
     make_embedded_image_with_multiple_nearby_captions_pdf(pdf_path)
     monkeypatch.setattr(
-        "zotero_paperread.figures._detect_graphic_regions",
+        "paperread.figures._detect_graphic_regions",
         lambda page: [],
     )
 
@@ -929,7 +929,7 @@ def test_extract_figures_claims_backfilled_caption_only_once_across_embedded_sup
     output_dir = tmp_path / "images"
     make_embedded_images_sharing_single_nearby_caption_pdf(pdf_path)
     monkeypatch.setattr(
-        "zotero_paperread.figures._detect_graphic_regions",
+        "paperread.figures._detect_graphic_regions",
         lambda page: [],
     )
 
@@ -953,7 +953,7 @@ def test_extract_figures_does_not_backfill_from_far_caption(
     output_dir = tmp_path / "images"
     make_raster_image_with_far_caption_pdf(pdf_path)
     monkeypatch.setattr(
-        "zotero_paperread.figures._detect_graphic_regions",
+        "paperread.figures._detect_graphic_regions",
         lambda page: [],
     )
 
@@ -1198,15 +1198,15 @@ def test_extract_figures_ranks_source_figures_above_embedded_image_supplements_w
     )
 
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.resolve_arxiv_id",
+        "paperread.figures.arxiv_source.resolve_arxiv_id",
         lambda details, pdf_path=None: "2402.12345",
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.download_arxiv_source",
+        "paperread.figures.arxiv_source.download_arxiv_source",
         lambda arxiv_id, workdir: source_root,
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.collect_source_figures",
+        "paperread.figures.arxiv_source.collect_source_figures",
         lambda source_root, output_dir: [
             {
                 "rel_path": "figure-source.png",
@@ -1217,7 +1217,7 @@ def test_extract_figures_ranks_source_figures_above_embedded_image_supplements_w
         ],
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.render_source_figure_pdfs",
+        "paperread.figures.arxiv_source.render_source_figure_pdfs",
         lambda source_figures, output_dir: [
             {
                 "rel_path": "figure-source.pdf",
@@ -1265,15 +1265,15 @@ def test_extract_figures_normalizes_source_provenance_and_uses_1_based_pages(
     source_doc.close()
 
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.resolve_arxiv_id",
+        "paperread.figures.arxiv_source.resolve_arxiv_id",
         lambda details, pdf_path=None: "2402.12345",
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.download_arxiv_source",
+        "paperread.figures.arxiv_source.download_arxiv_source",
         lambda arxiv_id, workdir: source_root,
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.collect_source_figures",
+        "paperread.figures.arxiv_source.collect_source_figures",
         lambda source_root, output_dir: [
             {
                 "rel_path": "figure-source.png",
@@ -1284,7 +1284,7 @@ def test_extract_figures_normalizes_source_provenance_and_uses_1_based_pages(
         ],
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.render_source_figure_pdfs",
+        "paperread.figures.arxiv_source.render_source_figure_pdfs",
         lambda source_figures, output_dir: [
             {
                 "rel_path": "figure-source.pdf",
@@ -1329,15 +1329,15 @@ def test_extract_figures_keeps_selected_source_figure_paths_raster_safe(
         rendered_doc.load_page(0).get_pixmap().save(rendered_png_path)
 
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.resolve_arxiv_id",
+        "paperread.figures.arxiv_source.resolve_arxiv_id",
         lambda details, pdf_path=None: "2402.12345",
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.download_arxiv_source",
+        "paperread.figures.arxiv_source.download_arxiv_source",
         lambda arxiv_id, workdir: source_root,
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.collect_source_figures",
+        "paperread.figures.arxiv_source.collect_source_figures",
         lambda source_root, output_dir: [
             {
                 "rel_path": "figures/figure-source.pdf",
@@ -1348,7 +1348,7 @@ def test_extract_figures_keeps_selected_source_figure_paths_raster_safe(
         ],
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.render_source_figure_pdfs",
+        "paperread.figures.arxiv_source.render_source_figure_pdfs",
         lambda source_figures, output_dir: [
             {
                 "rel_path": "figures/figure-source.pdf",
@@ -1390,15 +1390,15 @@ def test_extract_figures_dedupes_same_caption_across_source_and_pdf_candidates(
     )
 
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.resolve_arxiv_id",
+        "paperread.figures.arxiv_source.resolve_arxiv_id",
         lambda details, pdf_path=None: "2402.12345",
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.download_arxiv_source",
+        "paperread.figures.arxiv_source.download_arxiv_source",
         lambda arxiv_id, workdir: source_root,
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.collect_source_figures",
+        "paperread.figures.arxiv_source.collect_source_figures",
         lambda source_root, output_dir: [
             {
                 "rel_path": "figures/figure-source.png",
@@ -1411,7 +1411,7 @@ def test_extract_figures_dedupes_same_caption_across_source_and_pdf_candidates(
         ],
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.render_source_figure_pdfs",
+        "paperread.figures.arxiv_source.render_source_figure_pdfs",
         lambda source_figures, output_dir: [],
     )
 
@@ -1441,11 +1441,11 @@ def test_extract_figures_surfaces_arxiv_download_failures_as_warnings(
     make_embedded_image_only_pdf(pdf_path)
 
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.resolve_arxiv_id",
+        "paperread.figures.arxiv_source.resolve_arxiv_id",
         lambda details, pdf_path=None: "2402.12345",
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.download_arxiv_source",
+        "paperread.figures.arxiv_source.download_arxiv_source",
         lambda arxiv_id, workdir: None,
     )
 
@@ -1482,15 +1482,15 @@ def test_extract_figures_ranks_source_model_image_above_source_stats_image(
     stats_image_path.write_bytes(png_bytes)
 
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.resolve_arxiv_id",
+        "paperread.figures.arxiv_source.resolve_arxiv_id",
         lambda details, pdf_path=None: "2501.08998",
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.download_arxiv_source",
+        "paperread.figures.arxiv_source.download_arxiv_source",
         lambda arxiv_id, workdir: source_root,
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.collect_source_figures",
+        "paperread.figures.arxiv_source.collect_source_figures",
         lambda source_root, output_dir: [
             {
                 "rel_path": "crystalgrw_model_new.png",
@@ -1507,7 +1507,7 @@ def test_extract_figures_ranks_source_model_image_above_source_stats_image(
         ],
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.render_source_figure_pdfs",
+        "paperread.figures.arxiv_source.render_source_figure_pdfs",
         lambda source_figures, output_dir: [],
     )
 
@@ -1542,15 +1542,15 @@ def test_extract_figures_keeps_generic_unlabeled_source_images_behind_embedded_s
     )
 
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.resolve_arxiv_id",
+        "paperread.figures.arxiv_source.resolve_arxiv_id",
         lambda details, pdf_path=None: "2501.08998",
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.download_arxiv_source",
+        "paperread.figures.arxiv_source.download_arxiv_source",
         lambda arxiv_id, workdir: source_root,
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.collect_source_figures",
+        "paperread.figures.arxiv_source.collect_source_figures",
         lambda source_root, output_dir: [
             {
                 "rel_path": "pg_alexmp20_gs05.png",
@@ -1561,7 +1561,7 @@ def test_extract_figures_keeps_generic_unlabeled_source_images_behind_embedded_s
         ],
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.render_source_figure_pdfs",
+        "paperread.figures.arxiv_source.render_source_figure_pdfs",
         lambda source_figures, output_dir: [],
     )
 
@@ -1596,15 +1596,15 @@ def test_extract_figures_does_not_let_low_value_source_stats_dominate_real_pdf_f
     )
 
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.resolve_arxiv_id",
+        "paperread.figures.arxiv_source.resolve_arxiv_id",
         lambda details, pdf_path=None: "2501.08998",
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.download_arxiv_source",
+        "paperread.figures.arxiv_source.download_arxiv_source",
         lambda arxiv_id, workdir: source_root,
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.collect_source_figures",
+        "paperread.figures.arxiv_source.collect_source_figures",
         lambda source_root, output_dir: [
             {
                 "rel_path": "alexmp20_stats.png",
@@ -1615,7 +1615,7 @@ def test_extract_figures_does_not_let_low_value_source_stats_dominate_real_pdf_f
         ],
     )
     monkeypatch.setattr(
-        "zotero_paperread.figures.arxiv_source.render_source_figure_pdfs",
+        "paperread.figures.arxiv_source.render_source_figure_pdfs",
         lambda source_figures, output_dir: [],
     )
 

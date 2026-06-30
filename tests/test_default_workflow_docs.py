@@ -6,11 +6,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 README = PROJECT_ROOT / "README.md"
 AGENTS = PROJECT_ROOT / "AGENTS.md"
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
-PAPERREAD_SKILL = PROJECT_ROOT / "skills_paperread" / "SKILL.md"
-ZOTERO_REFERENCE = PROJECT_ROOT / "skills_paperread" / "references" / "zotero-workflow.md"
-PDF_REFERENCE = PROJECT_ROOT / "skills_paperread" / "references" / "pdf-path-workflow.md"
-SUMMARY_REFERENCE = PROJECT_ROOT / "skills_paperread" / "references" / "summary-schema.md"
-CAPTURE_SCRIPT = PROJECT_ROOT / "skills_paperread" / "scripts" / "capture-secondary-url.mjs"
+PAPERREAD_SKILL_DIR = PROJECT_ROOT / "skill"
+PAPERREAD_SKILL = PAPERREAD_SKILL_DIR / "SKILL.md"
+ZOTERO_REFERENCE = PAPERREAD_SKILL_DIR / "references" / "zotero-workflow.md"
+PDF_REFERENCE = PAPERREAD_SKILL_DIR / "references" / "pdf-path-workflow.md"
+SUMMARY_REFERENCE = PAPERREAD_SKILL_DIR / "references" / "summary-schema.md"
+CAPTURE_SCRIPT = PAPERREAD_SKILL_DIR / "scripts" / "capture-secondary-url.mjs"
 
 
 def read(path: Path) -> str:
@@ -20,7 +21,7 @@ def read(path: Path) -> str:
 def test_public_docs_use_single_repo_local_skill_entry() -> None:
     combined = "\n".join(read(path) for path in [README, AGENTS, PAPERREAD_SKILL])
 
-    assert "skills_paperread/" in combined
+    assert "`skill/`" in combined
     assert "repo-local" in combined
     assert "uv sync" in combined
     assert "from the repo root" in combined
@@ -37,15 +38,38 @@ def test_public_package_and_primary_cli_are_named_paperread() -> None:
     scripts = pyproject["project"]["scripts"]
 
     assert pyproject["project"]["name"] == "paperread"
-    assert scripts["paperread"] == "zotero_paperread.cli:app"
-    assert scripts["zotero-paperread"] == scripts["paperread"]
-    assert pyproject["tool"]["uv"]["build-backend"]["module-name"] == "zotero_paperread"
+    assert scripts == {"paperread": "paperread.cli:app"}
 
     public_text = "\n".join(read(path) for path in [README, AGENTS, PAPERREAD_SKILL])
     assert "uv run paperread --help" in public_text
-    assert ("uv run " + "zotero-paperread --help") not in public_text
     assert "its skill name is `paperread`" in read(README)
     assert "name: paperread" in read(PAPERREAD_SKILL)
+
+
+def test_legacy_project_identity_is_absent_from_tracked_text() -> None:
+    legacy_cli = "zotero" + "-paperread"
+    legacy_module = "zotero" + "_paperread"
+    legacy_skill_dir = "skills" + "_paperread"
+
+    assert PAPERREAD_SKILL_DIR.exists()
+    assert (PROJECT_ROOT / "src" / "paperread").exists()
+    assert not (PROJECT_ROOT / "src" / legacy_module).exists()
+    assert not (PROJECT_ROOT / legacy_skill_dir).exists()
+
+    for path in PROJECT_ROOT.rglob("*"):
+        if not path.is_file():
+            continue
+        if any(part in {".git", ".venv", ".pytest_cache", "__pycache__", "runs"} for part in path.parts):
+            continue
+        if path.suffix in {".pyc", ".pdf", ".png", ".jpg", ".jpeg"}:
+            continue
+        try:
+            text = read(path)
+        except UnicodeDecodeError:
+            continue
+        assert legacy_cli not in text, path
+        assert legacy_module not in text, path
+        assert legacy_skill_dir not in text, path
 
 
 def test_public_docs_describe_supported_workflows_and_outputs() -> None:
@@ -94,7 +118,7 @@ def test_secondary_context_contract_uses_public_script_path() -> None:
     zotero = read(ZOTERO_REFERENCE)
 
     for text in (readme, zotero):
-        assert "skills_paperread/scripts/capture-secondary-url.mjs" in text
+        assert "skill/scripts/capture-secondary-url.mjs" in text
         assert "secondary_sources.json" in text
         assert "secondary_contexts" in text
         assert "source_status: secondary_context" in text

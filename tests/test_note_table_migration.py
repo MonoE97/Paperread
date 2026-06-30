@@ -1,4 +1,4 @@
-from zotero_paperread.note_table_migration import (
+from paperread.note_table_migration import (
     classify_note_content,
     convert_note_tables_to_html,
     has_markdown_table_separator,

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from zotero_paperread.write_candidate import prepare_write_candidate
+from paperread.write_candidate import prepare_write_candidate
 
 
 def write_json(path: Path, payload: dict) -> None:

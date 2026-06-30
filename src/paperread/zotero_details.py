@@ -4,8 +4,8 @@ import re
 from html.parser import HTMLParser
 from typing import Any
 
-from zotero_paperread.note import next_same_day_version_suffix
-from zotero_paperread.workflow import select_pdf_attachment
+from paperread.note import next_same_day_version_suffix
+from paperread.workflow import select_pdf_attachment
 
 CODEX_SUMMARY_PREFIX = "[Codex Summary]"
 MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(?P<title>.+?)\s*#*\s*$")

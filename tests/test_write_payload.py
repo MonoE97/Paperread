@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from zotero_paperread.write_payload import build_write_payload
+from paperread.write_payload import build_write_payload
 
 
 def test_build_write_payload_includes_content_length_and_snippets(tmp_path: Path) -> None:

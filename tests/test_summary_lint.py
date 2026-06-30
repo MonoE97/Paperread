@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from zotero_paperread.summary_lint import lint_summary
+from paperread.summary_lint import lint_summary
 
 
 def test_lint_summary_flags_single_line_numbered_workflow() -> None:

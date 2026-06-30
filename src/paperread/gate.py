@@ -5,22 +5,33 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
-from zotero_paperread.note import build_note_labels, validate_trusted_summary
-from zotero_paperread.summary_lint import lint_summary
+from paperread.note import build_note_labels, validate_trusted_summary
+from paperread.summary_lint import lint_summary
+from paperread.zotero_details import next_version_suffix_from_details
 
 
-def _read_json_if_present(path: Path, blockers: list[str]) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        blockers.append(f"invalid {path.name}: {exc}")
-        return {}
-    if not isinstance(payload, dict):
-        blockers.append(f"invalid {path.name}: expected top-level JSON object")
-        return {}
-    return payload
+def _read_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _has_live_notes_refresh(item_details: dict[str, Any], *, parent_key: str) -> bool:
+    if not parent_key:
+        return False
+    paperread = item_details.get("_paperread", {})
+    if not isinstance(paperread, dict):
+        return False
+    enrichment = paperread.get("enrichment", {})
+    if not isinstance(enrichment, dict):
+        return False
+    live_notes = enrichment.get("live_notes", {})
+    if not isinstance(live_notes, dict):
+        return False
+    return (
+        live_notes.get("status") == "refreshed"
+        and live_notes.get("source") == "zotero_local_api_readonly"
+        and str(live_notes.get("item_key", "")).strip() == parent_key
+        and bool(str(live_notes.get("refreshed_at", "")).strip())
+    )
 
 
 class _H1Parser(HTMLParser):
@@ -65,40 +76,31 @@ def _html_h1_title(path: Path) -> str:
     return parser.title
 
 
-def build_local_gate_report(analysis_dir: Path, *, generated_date: str) -> dict[str, Any]:
-    """Build a local PDF note readiness report without Zotero write fields."""
-    analysis_dir = Path(analysis_dir)
+def build_gate_report(run_dir: Path, *, paper_title: str, generated_date: str) -> dict[str, Any]:
+    """Build a single write-readiness report for a run directory."""
+    run_dir = Path(run_dir)
     blockers: list[str] = []
 
-    metadata_path = analysis_dir / "metadata.json"
-    summary_path = analysis_dir / "summary.json"
-    review_path = analysis_dir / "review.json"
-    note_md_path = analysis_dir / "note.md"
-    note_html_path = analysis_dir / "note.html"
-    run_manifest_path = analysis_dir / "run.json"
-    write_payload_path = analysis_dir / "write-payload.json"
+    summary_path = run_dir / "summary.json"
+    review_path = run_dir / "review.json"
+    item_details_path = run_dir / "item-details.json"
+    note_md_path = run_dir / "note.md"
+    note_html_path = run_dir / "note.html"
 
-    metadata = _read_json_if_present(metadata_path, blockers)
-    summary = _read_json_if_present(summary_path, blockers)
-    review = _read_json_if_present(review_path, blockers)
-    run_manifest = _read_json_if_present(run_manifest_path, blockers)
+    summary = _read_json(summary_path) if summary_path.exists() else {}
+    review = _read_json(review_path) if review_path.exists() else {}
+    item_details = _read_json(item_details_path) if item_details_path.exists() else {}
 
-    if not metadata_path.exists():
-        blockers.append("missing metadata.json")
     if not summary_path.exists():
         blockers.append("missing summary.json")
     if not review_path.exists():
         blockers.append("missing review.json")
-    if not run_manifest_path.exists():
-        blockers.append("missing run.json")
+    if not item_details_path.exists():
+        blockers.append("missing item-details.json")
     if not note_md_path.exists():
         blockers.append("missing note.md")
     if not note_html_path.exists():
         blockers.append("missing note.html")
-    if write_payload_path.exists():
-        blockers.append("unexpected write-payload.json in local PDF analysis")
-    if metadata and str(metadata.get("source_type", "")).strip() != "pdf_path":
-        blockers.append("metadata.json source_type must be pdf_path")
 
     trusted_errors = validate_trusted_summary(summary) if summary else ["summary.json unavailable"]
     blockers.extend(f"trusted summary: {error}" for error in trusted_errors)
@@ -109,34 +111,44 @@ def build_local_gate_report(analysis_dir: Path, *, generated_date: str) -> dict[
     if review.get("needs_improvement") is not False:
         blockers.append("review.json needs_improvement is not false")
 
-    paper_title = str(metadata.get("title", "")).strip()
-    note_title = f"[Codex Summary] {paper_title} - {generated_date}" if paper_title else ""
-    if metadata and not paper_title:
-        blockers.append("metadata.json title is required")
+    parent_key = str(item_details.get("key", "")).strip()
+    if item_details and not parent_key:
+        blockers.append("item-details.json key is required")
+    if item_details and not _has_live_notes_refresh(item_details, parent_key=parent_key):
+        blockers.append("item-details.json live_notes refresh missing or stale")
 
-    if note_title and note_md_path.exists():
+    version_suffix = ""
+    if item_details:
+        version_suffix = next_version_suffix_from_details(
+            item_details,
+            paper_title=paper_title,
+            generated_date=generated_date,
+        )
+    note_title = f"[Codex Summary] {paper_title} - {generated_date}{version_suffix}"
+
+    if note_md_path.exists():
         md_title = _markdown_h1_title(note_md_path)
         if md_title != note_title:
             blockers.append(f"note.md title mismatch: expected {note_title}, got {md_title}")
-    if note_title and note_html_path.exists():
+    if note_html_path.exists():
         html_title = _html_h1_title(note_html_path)
         if html_title != note_title:
             blockers.append(f"note.html h1 mismatch: expected {note_title}, got {html_title}")
 
-    final_note_path = str(run_manifest.get("final_note_path", "")).strip()
-    if run_manifest_path.exists() and not final_note_path:
-        blockers.append("run.json final_note_path is required")
+    tags = build_note_labels(summary) if summary else []
+
     return {
-        "status": "blocked" if blockers else "local_ready",
+        "status": "blocked" if blockers else "write_ready",
         "blockers": blockers,
-        "analysis_dir": str(analysis_dir),
-        "final_note_path": final_note_path,
+        "run_dir": str(run_dir),
+        "parentKey": parent_key,
         "paper_title": paper_title,
         "generated_date": generated_date,
+        "version_suffix": version_suffix,
         "note_title": note_title,
         "note_md_path": str(note_md_path),
         "note_html_path": str(note_html_path),
-        "tags": build_note_labels(summary) if summary else [],
+        "tags": tags,
         "review_status": summary.get("review_status"),
         "improvement_status": summary.get("improvement_status"),
         "trust_status": summary.get("trust_status"),
