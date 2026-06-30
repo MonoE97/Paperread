@@ -44,7 +44,9 @@ def validate() -> list[str]:
         for phrase in [
             "skill/",
             "paperread",
+            "uv --version",
             "uv sync --locked",
+            "uv python install 3.13",
             "uv run paperread --help",
             "test ! -e \"$install_dir\"",
             "cp -R /path/to/Paperread/skill \"$install_dir\"",
@@ -88,7 +90,10 @@ def validate() -> list[str]:
 
     for phrase in [
         "skill root",
+        "uv --version",
         "uv sync --locked",
+        "uv python install 3.13",
+        "uv run paperread --help",
         "references/pdf-path-workflow.md",
         "references/zotero-workflow.md",
         "Zotero MCP `write_note`",

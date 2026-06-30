@@ -83,6 +83,10 @@ def test_skill_body_routes_from_skill_root_and_preserves_boundaries() -> None:
 
     for phrase in [
         "skill root",
+        "uv --version",
+        "uv sync --locked",
+        "uv python install 3.13",
+        "uv run paperread --help",
         "references/pdf-path-workflow.md",
         "references/zotero-workflow.md",
         "full-PDF extraction",
@@ -135,6 +139,10 @@ def test_references_use_skill_root_paths_and_workflow_terms() -> None:
     )
 
     for phrase in [
+        "uv --version",
+        "uv sync --locked",
+        "uv python install 3.13",
+        "uv run paperread --help",
         "uv run paperread",
         "scripts/capture-secondary-url.mjs",
         "prepare-pdf",

@@ -264,7 +264,7 @@
   <main>
     <header>
       <h1>Paperread V2 自包含 Skill Repo 行动方案</h1>
-      <p>目标是把当前仓库从“repo-local Python 项目 + 薄 skill wrapper”迁移为真正的 skill repo：复制仓库中的 <code>skill/</code> 目录到 Codex 或 Claude 的 skill 位置后，即可独立安装、运行、测试和使用。这里的“自包含”指文件 artifact 自包含；不同工作流仍需要 <code>uv</code>、Python、Zotero MCP、Node/CDP 等外部运行前提。</p>
+      <p>目标是把当前仓库从“repo-local Python 项目 + 薄 skill wrapper”迁移为真正的 skill repo：先安装 <code>uv</code>，再复制仓库中的 <code>skill/</code> 目录到 Codex 或 Claude 的 skill 位置后，即可独立安装、运行、测试和使用。这里的“自包含”指文件 artifact 自包含；不同工作流仍需要 <code>uv</code>、Python、Zotero MCP、Node/CDP 等外部运行前提。</p>
       <div class="meta">
         <span class="pill">日期：2026-06-30</span>
         <span class="pill">状态：可执行前 review 版</span>
@@ -386,6 +386,19 @@
 
     <section>
       <h2>5. 安装与使用模型</h2>
+      <h3>安装前提</h3>
+      <p>复制 skill 前先安装并确认 <code>uv</code> 可用。常见 bootstrap 命令：</p>
+      <pre><code># 方式 A：standalone installer
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 方式 B：Homebrew
+brew install uv
+
+uv --version</code></pre>
+      <p>Windows 和其他包管理器安装方式见官方 <code>uv</code> 安装文档：<code>https://docs.astral.sh/uv/getting-started/installation/</code>。</p>
+      <p>如果 <code>uv sync --locked</code> 找不到 Python <code>&gt;=3.13</code>，在安装后的 skill root 中运行：</p>
+      <pre><code>uv python install 3.13</code></pre>
+
       <h3>Codex 安装</h3>
       <pre><code>install_dir="${CODEX_HOME:-$HOME/.codex}/skills/paperread"
 test ! -e "$install_dir" || { echo "target exists: $install_dir"; exit 1; }
@@ -422,7 +435,7 @@ uv run paperread --help</code></pre>
           <tr>
             <td>CLI 安装与运行</td>
             <td><code>uv</code> 和 Python <code>&gt;=3.13</code></td>
-            <td>依赖从 <code>skill/uv.lock</code> 安装到本地 skill 环境。</td>
+            <td>用 <code>uv --version</code> 确认工具可用；依赖从 <code>skill/uv.lock</code> 安装到本地 skill 环境；缺少兼容 Python 时运行 <code>uv python install 3.13</code>。</td>
           </tr>
           <tr>
             <td>本地 PDF workflow</td>
@@ -528,7 +541,7 @@ uv run paperread --help</code></pre>
         <div>
           <strong>Skill 元数据与 progressive disclosure。</strong>
           <ul>
-            <li>更新 <code>skill/SKILL.md</code>：描述 V2 自包含模型、skill-root 命令、两个工作流路由。</li>
+            <li>更新 <code>skill/SKILL.md</code>：描述 V2 自包含模型、<code>uv --version</code> / <code>uv sync --locked</code> / <code>uv python install 3.13</code> 初始化、skill-root 命令、两个工作流路由。</li>
             <li>新增或生成 <code>skill/agents/openai.yaml</code>。</li>
             <li>新增 <code>skill/scripts/validate-skill.py</code>，作为复制出去后仍可运行的结构验证脚本。</li>
             <li>更新 <code>references/</code>，移除 repo-root 假设。</li>
@@ -542,7 +555,7 @@ uv run paperread --help</code></pre>
           <ul>
             <li>让 <code>skill/tests/</code> 不依赖根目录 README。</li>
             <li>更新 root <code>README.md</code>、<code>README.zh-CN.md</code>、<code>AGENTS.md</code>。</li>
-            <li>增加维护者 root-doc review gate：<code>python docs/superpowers/scripts/validate-root-docs.py</code> 检查中英文 README、AGENTS 与 <code>skill/SKILL.md</code> 对安装路径、<code>uv sync --locked</code>、skill-root 命令、Zotero 写入红线、本地 PDF local-only 边界表述一致。</li>
+            <li>增加维护者 root-doc review gate：<code>python docs/superpowers/scripts/validate-root-docs.py</code> 检查中英文 README、AGENTS 与 <code>skill/SKILL.md</code> 对安装路径、<code>uv --version</code>、<code>uv sync --locked</code>、<code>uv python install 3.13</code>、skill-root 命令、Zotero 写入红线、本地 PDF local-only 边界表述一致。</li>
             <li>调整 <code>.gitignore</code>，继续忽略本地运行产物、PDF、分析目录、缓存。</li>
           </ul>
         </div>

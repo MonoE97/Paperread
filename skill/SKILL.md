@@ -7,6 +7,18 @@ description: Use when the user asks to analyze a paper either by Zotero title/ti
 
 Paperread is a self-contained paper reading skill. Run bundled CLI commands from the installed skill root with `uv run paperread ...` after the skill environment has been synchronized with `uv sync --locked`.
 
+## Environment Setup
+
+Run setup commands from the installed skill root:
+
+```bash
+uv --version
+uv sync --locked
+uv run paperread --help
+```
+
+If `uv sync --locked` reports that Python `>=3.13` is unavailable, run `uv python install 3.13` from the skill root, then retry `uv sync --locked`. If `uv` itself is missing, stop and ask the user to install `uv` first; do not use `pip`, `conda`, or system Python as a substitute.
+
 ## Entry Routing
 
 - If the user input is a local PDF path and the path exists with suffix `.pdf`, use the local PDF path workflow in `references/pdf-path-workflow.md`.

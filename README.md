@@ -8,6 +8,26 @@ Do not put a `README.md` inside `skill/`; skills should expose `SKILL.md`, direc
 
 ## Install
 
+Install `uv` before copying the skill. Use the official installer or a package manager; common options are:
+
+```bash
+# Option A: standalone installer
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Option B: Homebrew
+brew install uv
+
+uv --version
+```
+
+See the official `uv` installation guide for Windows and other package managers: <https://docs.astral.sh/uv/getting-started/installation/>.
+
+If `uv sync --locked` cannot find Python `>=3.13`, install a managed interpreter and retry:
+
+```bash
+uv python install 3.13
+```
+
 Codex personal skill:
 
 ```bash
@@ -34,6 +54,8 @@ uv run paperread --help
 
 If the target `paperread/` directory already exists, stop before copying. Replacing an installed skill is a deliberate user-approved operation; blind `cp -R` can create an undiscoverable nested layout.
 
+The first `uv sync --locked` initializes the installed skill's local environment from `skill/uv.lock`. Re-run it after updating the copied skill directory.
+
 ## Workflows
 
 Paperread supports two inputs:
@@ -45,7 +67,7 @@ Both workflows use full-PDF extraction by default. Final `evidence_summary` loca
 
 ## Runtime Requirements
 
-- Install and run CLI: `uv` plus Python `>=3.13` available to `uv`.
+- Install and run CLI: `uv` plus Python `>=3.13` available to `uv`; use `uv python install 3.13` if no compatible interpreter is present.
 - Local PDF workflow: no Zotero requirement.
 - Zotero title workflow: Zotero Desktop plus Zotero MCP tools or the local MCP endpoint.
 - Secondary web context capture: Node.js and a reachable CDP helper when this optional path is used.

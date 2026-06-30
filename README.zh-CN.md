@@ -8,6 +8,26 @@ Paperread 是面向 Codex 或 Claude 的自包含 skill bundle。可安装产物
 
 ## 安装
 
+复制 skill 前先安装 `uv`。可使用官方 installer 或包管理器；常见方式：
+
+```bash
+# 方式 A：standalone installer
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 方式 B：Homebrew
+brew install uv
+
+uv --version
+```
+
+Windows 和其他包管理器安装方式见官方 `uv` 安装文档：<https://docs.astral.sh/uv/getting-started/installation/>。
+
+如果 `uv sync --locked` 找不到 Python `>=3.13`，先安装由 `uv` 管理的解释器后重试：
+
+```bash
+uv python install 3.13
+```
+
 Codex personal skill：
 
 ```bash
@@ -34,6 +54,8 @@ uv run paperread --help
 
 如果目标 `paperread/` 目录已经存在，先停止，不要直接覆盖复制。替换已安装 skill 必须是用户明确批准的操作；盲目 `cp -R` 可能生成无法被发现的嵌套目录。
 
+第一次运行 `uv sync --locked` 会根据 `skill/uv.lock` 初始化安装后 skill 的本地环境。更新已复制的 skill 目录后，也应重新运行一次。
+
 ## 工作流
 
 Paperread 支持两类输入：
@@ -45,7 +67,7 @@ Paperread 支持两类输入：
 
 ## 运行要求
 
-- 安装和运行 CLI：`uv`，以及可由 `uv` 使用的 Python `>=3.13`。
+- 安装和运行 CLI：`uv`，以及可由 `uv` 使用的 Python `>=3.13`；如果没有兼容解释器，用 `uv python install 3.13` 补齐。
 - 本地 PDF 工作流：不需要 Zotero。
 - Zotero 标题工作流：需要 Zotero Desktop，以及 Zotero MCP tools 或本地 MCP endpoint。
 - Secondary web context capture：仅在使用该可选路径时需要 Node.js 和可访问的 CDP helper。

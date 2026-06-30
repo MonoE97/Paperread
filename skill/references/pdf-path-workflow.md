@@ -7,8 +7,12 @@ Use this when the user provides a local PDF path.
 Run from the skill root:
 
 ```bash
+uv --version
 uv sync --locked
+uv run paperread --help
 ```
+
+If `uv sync --locked` cannot find Python `>=3.13`, run `uv python install 3.13` from the skill root and retry. If `uv` is not installed, stop and ask the user to install `uv` first; do not use `pip`, `conda`, or system Python as a replacement.
 
 ## Steps
 

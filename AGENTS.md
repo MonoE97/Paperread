@@ -40,6 +40,8 @@ Do not add `README.md`, `INSTALLATION_GUIDE.md`, `QUICK_REFERENCE.md`, or `CHANG
 
 - Python 环境必须用 `uv` 管理。
 - 默认在 `skill/` 内执行命令，使用 `uv run`。
+- 首次使用或复制安装后，先在安装后的 skill root 运行 `uv --version` 确认 `uv` 可用，再运行 `uv sync --locked` 初始化本地环境。
+- 如果 `uv sync --locked` 找不到 Python `>=3.13`，在 skill root 运行 `uv python install 3.13` 后重试。
 - 缺少项目依赖时在 `skill/` 内使用 `uv add` 或 `uv add --dev`，不使用 `pip install`、`conda install` 或全局安装。
 - 不修改系统 Python、conda base 环境或 shell 全局配置。
 

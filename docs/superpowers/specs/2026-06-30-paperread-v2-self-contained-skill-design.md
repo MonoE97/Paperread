@@ -5,7 +5,7 @@ Status: approved implementation plan
 
 ## Goal
 
-Paperread V2 turns this repository into a skill repository whose only required file artifact is `skill/`. A user should be able to copy the repository's `skill/` directory into a Codex or Claude skills location, rename the copied directory to `paperread`, run `uv sync --locked` inside that directory, and use the same Zotero-title and local-PDF workflows without needing any files from the repository root.
+Paperread V2 turns this repository into a skill repository whose only required file artifact is `skill/`. A user should be able to install `uv`, copy the repository's `skill/` directory into a Codex or Claude skills location, rename the copied directory to `paperread`, run `uv sync --locked` inside that directory, and use the same Zotero-title and local-PDF workflows without needing any files from the repository root.
 
 This changes the repository from a repo-local Python project with a thin skill wrapper into a publishable skill source. The repository root remains useful for maintainers and readers, but all code, templates, references, tests, fixtures, scripts, dependency metadata, and lockfile required to run Paperread live under `skill/`.
 
@@ -107,6 +107,26 @@ No `README.md` is placed inside `skill/`. Root README files explain installation
 
 ## Installation Model
 
+Install `uv` before copying the skill. Common bootstrap commands:
+
+```bash
+# Option A: standalone installer
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Option B: Homebrew
+brew install uv
+
+uv --version
+```
+
+See the official `uv` installation guide for Windows and other package managers: <https://docs.astral.sh/uv/getting-started/installation/>.
+
+If the installed skill cannot find Python `>=3.13`, run this from the skill root and retry `uv sync --locked`:
+
+```bash
+uv python install 3.13
+```
+
 Codex personal install:
 
 ```bash
@@ -141,7 +161,7 @@ The bundled skill files are self-contained, but each workflow still has runtime 
 
 | Capability | Required outside `skill/` | Notes |
 | --- | --- | --- |
-| Install and run CLI | `uv`, Python `>=3.13` available to `uv` | Dependencies are installed into the local skill environment from `skill/uv.lock`. |
+| Install and run CLI | `uv`, Python `>=3.13` available to `uv` | Dependencies are installed into the local skill environment from `skill/uv.lock`; use `uv --version`, `uv sync --locked`, and `uv python install 3.13` when bootstrapping. |
 | Local PDF workflow | no Zotero requirement | Uses bundled Python package and dependencies. |
 | Zotero title workflow | Zotero Desktop and Zotero MCP tools or local MCP endpoint | Writes remain MCP-only and explicit-intent only. |
 | Secondary web context capture | Node.js and reachable CDP helper at `ZOTERO_PAPERREAD_CDP_BASE_URL` or `http://localhost:3456` | Optional cross-check path; unavailable captures must degrade to `secondary_context_unavailable`. |
@@ -156,6 +176,7 @@ The bundled skill files are self-contained, but each workflow still has runtime 
   - `description`: include both supported triggers, namely Zotero title/title-fragment paper analysis and local PDF path paper analysis, plus Chinese structured note output and write gates.
 - Body:
   - State that commands run from the skill root, not the repository root.
+  - State the environment bootstrap: `uv --version`, `uv sync --locked`, optional `uv python install 3.13`, and `uv run paperread --help`.
   - Route local existing `.pdf` paths to `references/pdf-path-workflow.md`.
   - Route all other paper-title inputs to `references/zotero-workflow.md`.
   - State full-PDF extraction default.
@@ -223,6 +244,7 @@ Detailed behavior remains unchanged:
 Root `README.md` and `README.zh-CN.md` should shift from clone-and-run V1 wording to skill-install V2 wording:
 
 - Explain that `skill/` is the only installable artifact.
+- Explain how to install or verify `uv`, then initialize the copied skill with `uv sync --locked`.
 - Show Codex and Claude copy commands that install to a folder named `paperread`.
 - Tell users to run `uv sync --locked` and `uv run paperread --help` from the installed skill directory.
 - Keep safety boundaries synchronized in English and Chinese.
