@@ -11,6 +11,7 @@
 - `templates/`: Jinja2 note template.
 - `skill/`: the only public repo-local paperread workflow bundle.
 - `README.md`: public user entry point.
+- `README.zh-CN.md`: Chinese README paired with `README.md`; keep workflow commands, safety boundaries, and public claims synchronized when either README changes.
 - `AGENTS.md`: agent behavior and safety rules.
 
 ## 运行产物与证据边界

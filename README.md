@@ -1,5 +1,7 @@
 # Paperread
 
+**English** | [简体中文](README.zh-CN.md)
+
 Paperread is a clone-and-run literature reading workflow for Codex or Claude. It uses the local `paperread` CLI to extract evidence from a paper PDF, then guides an agent to write a Chinese-first structured reading note.
 
 ## What It Does
