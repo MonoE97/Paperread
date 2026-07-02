@@ -25,6 +25,13 @@ tmp/
 
 # Paper, Zotero, and generated note outputs
 docs/
+!docs/
+docs/*
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/scripts/
+docs/superpowers/scripts/*
+!docs/superpowers/scripts/validate-root-docs.py
 runs/
 papers/
 *_analysis/

@@ -1,4 +1,5 @@
 import tomllib
+import subprocess
 from pathlib import Path
 
 
@@ -11,6 +12,8 @@ PDF_REFERENCE = SKILL_ROOT / "references" / "pdf-path-workflow.md"
 SUMMARY_REFERENCE = SKILL_ROOT / "references" / "summary-schema.md"
 CAPTURE_SCRIPT = SKILL_ROOT / "scripts" / "capture-secondary-url.mjs"
 VALIDATE_SCRIPT = SKILL_ROOT / "scripts" / "validate-skill.py"
+REPO_ROOT = SKILL_ROOT.parent
+ROOT_DOCS_VALIDATE_SCRIPT = REPO_ROOT / "docs" / "superpowers" / "scripts" / "validate-root-docs.py"
 
 
 def read(path: Path) -> str:
@@ -51,6 +54,19 @@ def test_skill_bundle_contains_required_runtime_assets() -> None:
 
     for path in required_paths:
         assert path.exists(), path
+
+
+def test_root_docs_validator_referenced_by_agents_is_tracked() -> None:
+    result = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", str(ROOT_DOCS_VALIDATE_SCRIPT.relative_to(REPO_ROOT))],
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_skill_bundle_excludes_auxiliary_docs() -> None:
@@ -208,6 +224,8 @@ def test_pdf_path_reference_forbids_zotero_write_path() -> None:
         "context.md",
         "figure_context.md",
         "not a canonical evidence source",
+        "arXiv source",
+        "network timeout",
     ]:
         assert phrase in text
 
@@ -233,6 +251,9 @@ def test_summary_reference_documents_rendered_chinese_fields() -> None:
         "context.md",
         "figure_context.md",
         "Chinese-first",
+        "Minimal write-ready example",
+        '"paper_type": "method_paper"',
+        '"context.md page 1 section Abstract"',
     ]:
         assert phrase in text
 

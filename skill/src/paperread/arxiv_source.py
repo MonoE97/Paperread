@@ -17,6 +17,7 @@ ARXIV_ID_PATTERN = re.compile(
 SOURCE_DIR_NAMES = ("pics", "figures", "fig", "images", "img")
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".webp"}
 PDF_SUFFIXES = {".pdf"}
+DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 20.0
 
 
 def resolve_arxiv_id(details: dict[str, Any], pdf_path: Path | None = None) -> str | None:
@@ -39,7 +40,12 @@ def resolve_arxiv_id(details: dict[str, Any], pdf_path: Path | None = None) -> s
     return None
 
 
-def download_arxiv_source(arxiv_id: str, workdir: Path) -> Path | None:
+def download_arxiv_source(
+    arxiv_id: str,
+    workdir: Path,
+    *,
+    timeout_seconds: float = DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
+) -> Path | None:
     destination_root = Path(workdir).expanduser().resolve()
     destination_root.mkdir(parents=True, exist_ok=True)
     cache_name = _cache_name_for_arxiv_id(arxiv_id)
@@ -55,7 +61,7 @@ def download_arxiv_source(arxiv_id: str, workdir: Path) -> Path | None:
         shutil.rmtree(temp_root)
 
     try:
-        with urllib.request.urlopen(url) as response:
+        with urllib.request.urlopen(url, timeout=timeout_seconds) as response:
             archive_path.write_bytes(response.read())
         extract_source_package(archive_path, temp_root)
         temp_root.replace(source_root)

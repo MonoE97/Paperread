@@ -18,6 +18,10 @@ If `uv sync --locked` cannot find Python `>=3.13`, run `uv python install 3.13` 
 
 `prepare-pdf` writes beside the PDF. The first run creates `<pdf_stem>_analysis/` for analysis artifacts and targets `<pdf_stem>_note.md` as the final Markdown note. Repeated runs preserve existing outputs with `_v2`, `_v3`, and later suffixes.
 
+## Network Boundary
+
+The local PDF path workflow does not require Zotero. Figure extraction may still try an arXiv source download when an arXiv ID is detected in metadata or the PDF filename. The download uses a bounded network timeout and degrades to PDF-only extraction if arXiv source is unavailable.
+
 ## Steps
 
 1. Prepare local artifacts beside the PDF:

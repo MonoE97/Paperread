@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import tarfile
 import urllib.error
+import urllib.request
 from pathlib import Path
 
 import fitz
@@ -59,6 +60,27 @@ def test_resolve_arxiv_id_uses_pdf_path_only_when_metadata_missing() -> None:
 
     assert resolve_arxiv_id(details, Path("/tmp/2404.02020v2-main.pdf")) == "2403.01010"
     assert resolve_arxiv_id({"extra": ""}, Path("/tmp/2404.02020v2-main.pdf")) == "2404.02020"
+
+
+def test_download_arxiv_source_uses_bounded_network_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def fake_urlopen(url: str, *, timeout: float):
+        observed["url"] = url
+        observed["timeout"] = timeout
+        raise urllib.error.URLError("offline")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = download_arxiv_source("2401.00001", tmp_path)
+
+    assert result is None
+    assert observed["url"] == "https://arxiv.org/e-print/2401.00001"
+    assert isinstance(observed["timeout"], (int, float))
+    assert 0 < float(observed["timeout"]) <= 30
 
 
 def test_extract_source_package_rejects_path_traversal(tmp_path: Path) -> None:
@@ -219,7 +241,7 @@ def test_download_arxiv_source_fetches_and_extracts_tarball(monkeypatch, tmp_pat
         info.size = len(payload)
         archive.addfile(info, io.BytesIO(payload))
     archive_bytes = archive_buffer.getvalue()
-    seen: dict[str, str] = {}
+    seen: dict[str, object] = {}
 
     class FakeResponse:
         def __enter__(self) -> "FakeResponse":
@@ -231,8 +253,9 @@ def test_download_arxiv_source_fetches_and_extracts_tarball(monkeypatch, tmp_pat
         def read(self) -> bytes:
             return archive_bytes
 
-    def fake_urlopen(url: str) -> FakeResponse:
+    def fake_urlopen(url: str, *, timeout: float) -> FakeResponse:
         seen["url"] = url
+        seen["timeout"] = timeout
         return FakeResponse()
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
@@ -240,6 +263,7 @@ def test_download_arxiv_source_fetches_and_extracts_tarball(monkeypatch, tmp_pat
     source_root = download_arxiv_source("2402.12345", tmp_path / "source-cache")
 
     assert seen["url"] == "https://arxiv.org/e-print/2402.12345"
+    assert 0 < float(seen["timeout"]) <= 30
     assert source_root == (tmp_path / "source-cache" / "2402.12345")
     assert (source_root / "paper" / "figures" / "a.png").read_bytes() == b"png"
 
@@ -252,7 +276,7 @@ def test_download_arxiv_source_caches_old_style_ids_without_path_splits(monkeypa
         info.size = len(payload)
         archive.addfile(info, io.BytesIO(payload))
     archive_bytes = archive_buffer.getvalue()
-    seen: dict[str, str] = {}
+    seen: dict[str, object] = {}
 
     class FakeResponse:
         def __enter__(self) -> "FakeResponse":
@@ -264,8 +288,9 @@ def test_download_arxiv_source_caches_old_style_ids_without_path_splits(monkeypa
         def read(self) -> bytes:
             return archive_bytes
 
-    def fake_urlopen(url: str) -> FakeResponse:
+    def fake_urlopen(url: str, *, timeout: float) -> FakeResponse:
         seen["url"] = url
+        seen["timeout"] = timeout
         return FakeResponse()
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
@@ -273,13 +298,15 @@ def test_download_arxiv_source_caches_old_style_ids_without_path_splits(monkeypa
     source_root = download_arxiv_source("hep-th/9901001", tmp_path / "source-cache")
 
     assert seen["url"] == "https://arxiv.org/e-print/hep-th/9901001"
+    assert 0 < float(seen["timeout"]) <= 30
     assert source_root == (tmp_path / "source-cache" / "hep-th__9901001")
     assert (source_root / "paper" / "figures" / "a.png").read_bytes() == b"png"
     assert not (tmp_path / "source-cache" / "hep-th").exists()
 
 
 def test_download_arxiv_source_returns_none_on_network_failure(monkeypatch, tmp_path: Path) -> None:
-    def fake_urlopen(url: str):  # pragma: no cover - explicit failure path
+    def fake_urlopen(url: str, *, timeout: float):  # pragma: no cover - explicit failure path
+        assert 0 < timeout <= 30
         raise urllib.error.URLError("offline")
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)

@@ -57,6 +57,13 @@ def format_unreadable_json_error(path: Path, *, label: str, reason: str) -> str:
 
 
 def read_json_or_exit(path: Path, *, label: str) -> dict:
+    payload = read_json_value_or_exit(path, label=label)
+    if not isinstance(payload, dict):
+        exit_with_json_error(f"json_invalid: {label} {path}: expected top-level JSON object")
+    return payload
+
+
+def read_json_value_or_exit(path: Path, *, label: str) -> object:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -74,8 +81,6 @@ def read_json_or_exit(path: Path, *, label: str) -> dict:
     except OSError as exc:
         exit_with_json_error(format_unreadable_json_error(path, label=label, reason=str(exc)))
 
-    if not isinstance(payload, dict):
-        exit_with_json_error(f"json_invalid: {label} {path}: expected top-level JSON object")
     return payload
 
 
@@ -594,14 +599,18 @@ def save_item_details_command(
     ),
 ) -> None:
     """Save raw MCP item details as normalized run item-details.json."""
-    payload = json.loads(input_json.read_text(encoding="utf-8"))
-    result = write_item_details_files(
-        payload,
-        normalized_path=output,
-        raw_path=raw_output,
-        sqlite_path=zotero_sqlite,
-        sqlite_extra_fallback=sqlite_extra_fallback,
-    )
+    payload = read_json_value_or_exit(input_json, label="MCP response JSON")
+    try:
+        result = write_item_details_files(
+            payload,
+            normalized_path=output,
+            raw_path=raw_output,
+            sqlite_path=zotero_sqlite,
+            sqlite_extra_fallback=sqlite_extra_fallback,
+        )
+    except ValueError as exc:
+        console.print(f"item_details_invalid: {exc}", soft_wrap=True)
+        raise typer.Exit(1)
     typer.echo(json.dumps(result, ensure_ascii=False))
 
 

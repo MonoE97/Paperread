@@ -73,7 +73,7 @@ Both workflows use full-PDF extraction by default. Final `evidence_summary` loca
 ## Runtime Requirements
 
 - Install and run CLI: `uv` plus Python `>=3.13` available to `uv`; use `uv python install 3.13` if no compatible interpreter is present.
-- Local PDF workflow: no Zotero requirement.
+- Local PDF workflow: no Zotero requirement. Figure extraction may try an arXiv source download when an arXiv ID is detected in metadata or the PDF filename; this request uses a bounded network timeout and falls back to PDF-only extraction on failure.
 - Zotero title workflow: Zotero Desktop plus Zotero MCP tools or the local MCP endpoint.
 - Secondary web context capture: Node.js and a reachable CDP helper when this optional path is used.
 

@@ -102,6 +102,22 @@ def test_lint_summary_flags_section_context_locator() -> None:
     assert any(issue["code"] == "malformed_trusted_evidence_locator" for issue in issues)
 
 
+def test_lint_summary_flags_table_candidate_without_section() -> None:
+    summary = {
+        "evidence_summary": [
+            {
+                "claim": "Claim",
+                "evidence": [{"locator": "context.md page 6 table_candidate 1", "summary": "Missing section"}],
+            }
+        ],
+        "key_figures": [],
+    }
+
+    issues = lint_summary(summary)
+
+    assert any(issue["code"] == "malformed_trusted_evidence_locator" for issue in issues)
+
+
 def test_lint_summary_allows_canonical_context_and_figure_locators() -> None:
     summary = {
         "evidence_summary": [

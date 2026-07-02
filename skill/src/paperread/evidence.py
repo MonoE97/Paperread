@@ -10,7 +10,7 @@ SECONDARY_EVIDENCE_PREFIXES = (
     "wechat-context",
 )
 CANONICAL_CONTEXT_LOCATOR = re.compile(
-    r"^context\.md page \d+(?: section [A-Za-z0-9][A-Za-z0-9 /&().,+:_-]*)?(?: table_candidate \d+)?$"
+    r"^context\.md page \d+(?: section [A-Za-z0-9][A-Za-z0-9 /&().,+:_-]*(?: table_candidate \d+)?)?$"
 )
 CANONICAL_FIGURE_LOCATOR = re.compile(r"^figure_context\.md [A-Za-z0-9_.:-]+$")
 

@@ -709,6 +709,19 @@ def test_save_item_details_command_can_disable_sqlite_extra_fallback(tmp_path: P
     assert "extra" not in json.loads(output_path.read_text(encoding="utf-8"))
 
 
+def test_save_item_details_command_reports_invalid_json_without_traceback(tmp_path: Path) -> None:
+    input_path = tmp_path / "mcp-response.json"
+    output_path = tmp_path / "run" / "item-details.json"
+    input_path.write_text("not-json\n", encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["save-item-details", str(input_path), "--output", str(output_path)])
+
+    assert result.exit_code == 1
+    assert "json_invalid: MCP response JSON" in result.stdout
+    assert "Traceback" not in result.stdout
+    assert not output_path.exists()
+
+
 def test_next_version_suffix_command_reads_item_details(tmp_path: Path) -> None:
     details_path = tmp_path / "item-details.json"
     write_json(
@@ -948,7 +961,13 @@ def test_validate_trusted_summary_rejects_na_evidence_locator(tmp_path: Path) ->
 
 
 def test_validate_trusted_summary_rejects_noncanonical_evidence_locators(tmp_path: Path) -> None:
-    for locator in ("context.md", "figure_context.md", "page 3 method section", "fig_p1_1"):
+    for locator in (
+        "context.md",
+        "figure_context.md",
+        "page 3 method section",
+        "fig_p1_1",
+        "context.md page 6 table_candidate 1",
+    ):
         summary_path = tmp_path / f"{locator.replace(' ', '_').replace('/', '_')}.json"
         write_ready_trusted_summary_with_evidence(
             summary_path,

@@ -73,7 +73,7 @@ Paperread 支持两类输入：
 ## 运行要求
 
 - 安装和运行 CLI：`uv`，以及可由 `uv` 使用的 Python `>=3.13`；如果没有兼容解释器，用 `uv python install 3.13` 补齐。
-- 本地 PDF 工作流：不需要 Zotero。
+- 本地 PDF 工作流：不需要 Zotero。图表抽取在元数据或 PDF 文件名出现 arXiv ID 时，可能尝试下载 arXiv source；该请求有有界 network timeout，失败后会回退到只基于 PDF 的抽取。
 - Zotero 标题工作流：需要 Zotero Desktop，以及 Zotero MCP tools 或本地 MCP endpoint。
 - Secondary web context capture：仅在使用该可选路径时需要 Node.js 和可访问的 CDP helper。
 
