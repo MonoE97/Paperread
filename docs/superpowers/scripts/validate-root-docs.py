@@ -10,6 +10,7 @@ README = ROOT / "README.md"
 README_ZH = ROOT / "README.zh-CN.md"
 AGENTS = ROOT / "AGENTS.md"
 SKILL = ROOT / "skill" / "SKILL.md"
+BATCH_SKILL = ROOT / "batch_skill" / "SKILL.md"
 
 
 def read(path: Path) -> str:
@@ -32,7 +33,8 @@ def validate() -> list[str]:
     chinese = read(README_ZH)
     agents = read(AGENTS)
     skill = read(SKILL)
-    combined_public = "\n".join([english, chinese, agents, skill])
+    batch_skill = read(BATCH_SKILL)
+    combined_public = "\n".join([english, chinese, agents, skill, batch_skill])
 
     require(english, "[简体中文](README.zh-CN.md)", "README.md", errors)
     require(chinese, "[English](README.md)", "README.zh-CN.md", errors)
@@ -43,14 +45,20 @@ def validate() -> list[str]:
     ]:
         for phrase in [
             "skill/",
+            "batch_skill/",
             "paperread",
+            "paperread-batch",
             "uv --version",
             "uv sync --locked",
             "uv python install 3.13",
             "uv run paperread --help",
+            "uv run paperread-batch --help",
             "test ! -e \"$install_dir\"",
             "cp -R /path/to/Paperread/skill \"$install_dir\"",
+            "cp -R /path/to/Paperread/batch_skill \"$install_dir\"",
             "$HOME/.claude/skills/paperread",
+            "$HOME/.claude/skills/paperread-batch",
+            "prepare_only",
             "write_note",
             "refresh-live-notes",
             "write-payload.json",
@@ -87,6 +95,11 @@ def validate() -> list[str]:
         "skill/src/paperread/",
         "skill/tests/",
         "skill/templates/",
+        "batch_skill/pyproject.toml",
+        "batch_skill/uv.lock",
+        "batch_skill/src/paperread_batch/",
+        "batch_skill/tests/",
+        "batch_skill/references/",
         "python docs/superpowers/scripts/validate-root-docs.py",
     ]:
         require(agents, phrase, "AGENTS.md", errors)
@@ -104,6 +117,19 @@ def validate() -> list[str]:
         require(skill, phrase, "skill/SKILL.md", errors)
 
     for phrase in [
+        "$paperread",
+        "uv --version",
+        "uv sync --locked",
+        "uv run paperread-batch --help",
+        "references/batch-workflow.md",
+        "Default Codex concurrency is 3",
+        "prepare_only",
+        "30 秒结论",
+        "write_note",
+    ]:
+        require(batch_skill, phrase, "batch_skill/SKILL.md", errors)
+
+    for phrase in [
         "clone-and-run",
         "Public V1",
         "repo-local v1",
@@ -119,6 +145,8 @@ def validate() -> list[str]:
 
     if (ROOT / "skill" / "README.md").exists():
         errors.append("skill/README.md must not exist")
+    if (ROOT / "batch_skill" / "README.md").exists():
+        errors.append("batch_skill/README.md must not exist")
 
     return errors
 

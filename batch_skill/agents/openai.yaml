@@ -1,0 +1,6 @@
+interface:
+  display_name: "Paperread Batch"
+  short_description: "Parallel paperread orchestration"
+  default_prompt: "Use $paperread-batch to orchestrate multiple $paperread paper analyses and produce a prepare-only batch report."
+policy:
+  allow_implicit_invocation: true

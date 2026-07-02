@@ -33,6 +33,7 @@ docs/superpowers/*
 docs/superpowers/scripts/*
 !docs/superpowers/scripts/validate-root-docs.py
 runs/
+batch_skill/runs/
 papers/
 *_analysis/
 *_analysis_v[0-9]*/

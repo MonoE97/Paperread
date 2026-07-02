@@ -2,9 +2,14 @@
 
 [English](README.md) | **简体中文**
 
-Paperread 是面向 Codex 或 Claude 的自包含 skill bundle。可安装产物只有本仓库的 `skill/` 目录。安装时把它复制到名为 `paperread` 的目标目录，在安装后的 skill root 中运行命令；仓库根目录只保留维护文档和发布说明。
+Paperread 是面向 Codex 或 Claude 的自包含 skill repo。它包含两个可安装 skill source：
 
-不要在 `skill/` 内放 `README.md`；skill 内只保留 `SKILL.md`、直接链接的 `references/`、bundled scripts、代码、测试、模板、依赖元数据和 fixtures。
+- `skill/` 安装为 `paperread`，负责单篇深度阅读。
+- `batch_skill/` 安装为 `paperread-batch`，负责批量调度和轻量报告。
+
+安装时把对应 source 目录复制到目标 skill 目录，在安装后的 skill root 中运行命令；仓库根目录只保留维护文档和发布说明。
+
+不要在 `skill/` 或 `batch_skill/` 内放 `README.md`；skill 内只保留 `SKILL.md`、直接链接的 `references/`、bundled scripts、代码、测试、模板、依赖元数据和 fixtures。
 
 ## 安装
 
@@ -28,7 +33,7 @@ Windows 和其他包管理器安装方式见官方 `uv` 安装文档：<https://
 uv python install 3.13
 ```
 
-Codex personal skill：
+Codex personal 单篇 skill：
 
 ```bash
 install_dir="${CODEX_HOME:-$HOME/.codex}/skills/paperread"
@@ -40,7 +45,19 @@ uv sync --locked
 uv run paperread --help
 ```
 
-Claude Code personal skill：
+Codex personal batch skill：
+
+```bash
+install_dir="${CODEX_HOME:-$HOME/.codex}/skills/paperread-batch"
+test ! -e "$install_dir" || { echo "target exists: $install_dir"; exit 1; }
+mkdir -p "$(dirname "$install_dir")"
+cp -R /path/to/Paperread/batch_skill "$install_dir"
+cd "$install_dir"
+uv sync --locked
+uv run paperread-batch --help
+```
+
+Claude Code personal 单篇 skill：
 
 ```bash
 install_dir="$HOME/.claude/skills/paperread"
@@ -52,9 +69,21 @@ uv sync --locked
 uv run paperread --help
 ```
 
-如果目标 `paperread/` 目录已经存在，先停止，不要直接覆盖复制。替换已安装 skill 必须是用户明确批准的操作；盲目 `cp -R` 可能生成无法被发现的嵌套目录。
+Claude Code personal batch skill：
 
-第一次运行 `uv sync --locked` 会根据 `skill/uv.lock` 初始化安装后 skill 的本地环境。更新已复制的 skill 目录后，也应重新运行一次。
+```bash
+install_dir="$HOME/.claude/skills/paperread-batch"
+test ! -e "$install_dir" || { echo "target exists: $install_dir"; exit 1; }
+mkdir -p "$(dirname "$install_dir")"
+cp -R /path/to/Paperread/batch_skill "$install_dir"
+cd "$install_dir"
+uv sync --locked
+uv run paperread-batch --help
+```
+
+如果目标 `paperread/` 或 `paperread-batch/` 目录已经存在，先停止，不要直接覆盖复制。替换已安装 skill 必须是用户明确批准的操作；盲目 `cp -R` 可能生成无法被发现的嵌套目录。
+
+第一次运行 `uv sync --locked` 会根据对应 skill root 的 `uv.lock` 初始化安装后的本地环境。更新已复制的 skill 目录后，也应重新运行一次。
 
 ## 工作流
 
@@ -65,10 +94,13 @@ Paperread 支持两类输入：
 
 两个工作流默认都会抽取完整 PDF。最终 `evidence_summary` locator 必须使用以下 canonical 格式之一：`context.md page <N>`、`context.md page <N> section <Section Name>`、`context.md page <N> section <Section Name> table_candidate <N>` 或 `figure_context.md <figure_id>`。裸 `context.md` / `figure_context.md`、`page 3 method section` 这类散文式 locator、`section_context.md` 和 secondary context 路径都无效。`section_context.md` 只作为导航辅助。通过 `scripts/capture-secondary-url.mjs` 抓取的 secondary web context 只用于 cross-check，不能在 `evidence_summary` 中作为证据引用。
 
+Paperread Batch 支持四类批量输入：Zotero collection inventory、多个 Zotero 标题、本地 PDF 文件夹、多个 PDF path。它会归一化为 manifest，把每篇交给 `$paperread`，最后生成 prepare_only 的 batch report。Codex 默认并发数为 3；Claude 兼容 fallback 是顺序执行。每篇 30 秒结果直接从单篇 note 的 `30 秒结论` 行提取，batch 不再重新总结论文。
+
 ## 产物位置
 
 - Zotero 标题工作流的本地产物默认写到 `<skill_root>/runs/YYYY-MM-DD/<title-slug>/`。准备写入候选时，会在同一目录生成 `note.md`、`note.html`、`gate-report.json` 和 `write-payload.json`，然后才可能写入 Zotero。
 - 本地 PDF path 工作流的产物默认写在 PDF 同目录：`<pdf_stem>_analysis/` 保存分析产物，`<pdf_stem>_note.md` 是最终 Markdown 笔记。已有输出不会覆盖，会自动使用 `_v2`、`_v3` 等后缀。
+- Batch workflow 的本地产物默认写到 `<paperread-batch_skill_root>/runs/YYYY-MM-DD/<batch-slug>/`，包含 `manifest.json`、`state.json`、`items/*.json`、`batch-report.json` 和 `batch-report.md`。单篇产物仍归 `paperread` 所有；batch 只保存索引和 local-only path。
 
 ## 运行要求
 
@@ -76,6 +108,7 @@ Paperread 支持两类输入：
 - 本地 PDF 工作流：不需要 Zotero。图表抽取在元数据或 PDF 文件名出现 arXiv ID 时，可能尝试下载 arXiv source；该请求有有界 network timeout，失败后会回退到只基于 PDF 的抽取。
 - Zotero 标题工作流：需要 Zotero Desktop，以及 Zotero MCP tools 或本地 MCP endpoint。
 - Secondary web context capture：仅在使用该可选路径时需要 Node.js 和可访问的 CDP helper。
+- Batch workflow：需要已安装的 `paperread` 和 `paperread-batch`；batch validation 会在派发前检查配置的 `paperread` root。
 
 ## 验证
 
@@ -91,10 +124,22 @@ uv run python scripts/validate-skill.py .
 
 维护者在认为 `skill/` 已自包含前，还应把它复制到仓库外的临时目录，并在复制后的目录中运行同一组验证。
 
+在安装后的目录或源码 `batch_skill/` 目录中运行：
+
+```bash
+uv sync --locked
+uv run pytest
+uv run paperread-batch --help
+uv run python scripts/validate-skill.py .
+```
+
+维护者在认为 `batch_skill/` 已自包含前，也应把它复制到仓库外的临时目录，并在复制后的目录中运行同一组验证。
+
 ## 安全边界
 
 - 默认先 dry-run 和 preview，再写入。
 - Zotero 写入只能通过 Zotero MCP `write_note`，且必须有用户明确写入意图。
 - Zotero local API 和 SQLite 只读。
 - 本地 PDF path workflow 只能输出本地文件；不能写入 Zotero，不能调用 `refresh-live-notes`，不能创建 `write-payload.json`。
+- Batch workflow 默认 `prepare_only`；不能调用 Zotero MCP `write_note`。
 - 渲染出的笔记正文应中文优先，同时保留论文标题、人名、公式、方法名、单位、证据 locator 和 tag key。

@@ -2,6 +2,8 @@ import tomllib
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SKILL = SKILL_ROOT / "SKILL.md"
@@ -57,6 +59,17 @@ def test_skill_bundle_contains_required_runtime_assets() -> None:
 
 
 def test_root_docs_validator_referenced_by_agents_is_tracked() -> None:
+    git_probe = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if git_probe.returncode != 0:
+        pytest.skip("root docs git tracking is validated only in the source repository")
+
     result = subprocess.run(
         ["git", "ls-files", "--error-unmatch", str(ROOT_DOCS_VALIDATE_SCRIPT.relative_to(REPO_ROOT))],
         cwd=REPO_ROOT,
