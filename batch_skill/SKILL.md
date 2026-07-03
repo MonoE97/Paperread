@@ -1,6 +1,6 @@
 ---
 name: paperread-batch
-description: Use when the user asks to analyze multiple papers from Zotero collections, Zotero titles, PDF folders, or PDF paths by dispatching each item to $paperread and producing a resumable prepare-only batch report.
+description: Use when the user asks to analyze multiple papers from Zotero collections, Zotero titles, PDF folders, or PDF paths by dispatching each item to $paperread and producing a resumable batch report with Zotero-backed notes written by default.
 ---
 
 # Paperread Batch
@@ -24,6 +24,19 @@ uv run paperread-batch --help
 batch manifest, run directory, and configured `paperread` skill root before
 dispatch.
 
+For Zotero-backed batch items, Zotero Desktop and `zotero-mcp-plugin` must be
+installed and enabled before dispatch. Use the plugin's Streamable HTTP endpoint
+from Zotero preferences, normally `http://127.0.0.1:23120/mcp`.
+
+## Typical Use
+
+- Zotero collection or multiple Zotero titles: use `$paperread-batch` to build a
+  manifest, dispatch each item to `$paperread`, then use `next-write` and
+  `record-write` for verified Zotero note creation.
+- Local PDF folder or multiple PDF paths: use `$paperread-batch` to dispatch
+  each PDF to `$paperread` local PDF workflow and generate a batch report; PDF
+  items remain local-output only.
+
 ## Routing
 
 Use `references/batch-workflow.md` for all batch workflows:
@@ -34,7 +47,10 @@ Use `references/batch-workflow.md` for all batch workflows:
 - Multiple local PDF paths.
 
 Default Codex concurrency is 3. Claude-compatible fallback is sequential. The
-default write policy is `prepare_only`; batch runs must not write Zotero notes.
-They must not call Zotero MCP `write_note`. Per-paper 30-second report entries
-must be extracted from each single-paper note's `30 秒结论` row, with structured
-fallback only when that row is unavailable.
+default write policy is `zotero_write`: Zotero-backed items must proceed from
+prepared candidates to MCP `write_note`, read-only verification, and
+`record-write`. Pass `--write-policy prepare_only` only for an explicit dry-run.
+PDF items remain local-output only. The batch CLI must not call Zotero MCP
+directly; the outer agent performs the write step from `next-write`. Per-paper
+30-second report entries must be extracted from each single-paper note's
+`30 秒结论` row, with structured fallback only when that row is unavailable.

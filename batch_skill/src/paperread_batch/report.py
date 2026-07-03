@@ -17,7 +17,7 @@ def _input_label(manifest_item: dict[str, Any]) -> str:
     return str(input_payload.get("title", "")).strip() or str(input_payload.get("item_key", "")).strip()
 
 
-def _write_status(item_state: dict[str, Any]) -> str:
+def _write_status(item_state: dict[str, Any], *, write_policy: str) -> str:
     status = item_state.get("status")
     if status == "failed":
         return "failed"
@@ -25,7 +25,14 @@ def _write_status(item_state: dict[str, Any]) -> str:
         return "blocked"
     if item_state.get("expected_output") == "local_note":
         return "not_applicable"
+    explicit_status = str(item_state.get("write_status", "")).strip()
+    if explicit_status == "written" and str(item_state.get("zotero_note_key", "")).strip():
+        return "written"
+    if explicit_status in {"pending_write", "prepared_not_written", "failed", "blocked"}:
+        return explicit_status
     if status == "succeeded" and str(item_state.get("write_payload", "")).strip():
+        if write_policy == "zotero_write":
+            return "pending_write"
         return "prepared_not_written"
     if status == "succeeded":
         return "blocked"
@@ -38,6 +45,7 @@ def _path_entries(item_state: dict[str, Any]) -> list[str]:
         "note_html",
         "gate_report",
         "write_payload",
+        "verify_report",
         "local_note_path",
         "local_gate_report",
         "takeaway_source_path",
@@ -70,7 +78,10 @@ def build_report(manifest: dict[str, Any], state: dict[str, Any], *, reported_at
                 "takeaway_source_path": item_state.get("takeaway_source_path", ""),
                 "takeaway_source_sha256": item_state.get("takeaway_source_sha256", ""),
                 "failure_reason": item_state.get("failure_reason", ""),
-                "write_status": _write_status(item_state),
+                "write_status": _write_status(item_state, write_policy=str(manifest.get("write_policy", ""))),
+                "zotero_note_key": item_state.get("zotero_note_key", ""),
+                "zotero_parent_key": item_state.get("zotero_parent_key", ""),
+                "content_sha256": item_state.get("content_sha256", ""),
                 "output_paths": _path_entries(item_state),
             }
         )
@@ -121,8 +132,8 @@ def render_markdown_report(report: dict[str, Any]) -> str:
             "",
             "## Items",
             "",
-            "| Item | Type | Status | Write | 30 秒结论 | Failure | Paths |",
-            "| --- | --- | --- | --- | --- | --- | --- |",
+            "| Item | Type | Status | Write | Zotero Note | 30 秒结论 | Failure | Paths |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for item in report["items"]:
@@ -135,6 +146,7 @@ def render_markdown_report(report: dict[str, Any]) -> str:
                     _cell(item["input_type"]),
                     _cell(item["status"]),
                     _cell(item["write_status"]),
+                    _cell(item["zotero_note_key"]),
                     _cell(item["thirty_second_takeaway"]),
                     _cell(item["failure_reason"]),
                     _cell(paths),

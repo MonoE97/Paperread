@@ -10,7 +10,10 @@ from paperread_batch.io import read_json
 
 MANIFEST_SCHEMA_VERSION = "paperread-batch.manifest.v1"
 DEFAULT_CONCURRENCY = 3
-WRITE_POLICY = "prepare_only"
+ZOTERO_WRITE_POLICY = "zotero_write"
+PREPARE_ONLY_WRITE_POLICY = "prepare_only"
+DEFAULT_WRITE_POLICY = ZOTERO_WRITE_POLICY
+VALID_WRITE_POLICIES = {ZOTERO_WRITE_POLICY, PREPARE_ONLY_WRITE_POLICY}
 VALID_INPUT_TYPES = {"zotero_item", "zotero_title", "pdf_path"}
 VALID_EXPECTED_OUTPUTS = {"zotero_note_candidate", "local_note"}
 ITEM_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
@@ -108,8 +111,10 @@ def validate_manifest(manifest: Any) -> dict[str, Any]:
     default_concurrency = payload.get("default_concurrency", DEFAULT_CONCURRENCY)
     if not isinstance(default_concurrency, int) or default_concurrency < 1:
         raise ManifestError("default_concurrency must be a positive integer")
-    if payload.get("write_policy") != WRITE_POLICY:
-        raise ManifestError(f"write_policy must be {WRITE_POLICY}")
+    write_policy = _nonempty_string(payload.get("write_policy"), "write_policy")
+    if write_policy not in VALID_WRITE_POLICIES:
+        allowed = ", ".join(sorted(VALID_WRITE_POLICIES))
+        raise ManifestError(f"write_policy must be one of: {allowed}")
     raw_items = payload.get("items")
     if not isinstance(raw_items, list) or not raw_items:
         raise ManifestError("items must be a non-empty list")
@@ -128,7 +133,7 @@ def validate_manifest(manifest: Any) -> dict[str, Any]:
         "created_at": created_at,
         "batch_title": batch_title,
         "default_concurrency": default_concurrency,
-        "write_policy": WRITE_POLICY,
+        "write_policy": write_policy,
         "source_summary": {
             "source_type": source_type,
             "description": description,
@@ -143,6 +148,7 @@ def build_manifest(
     source_summary: dict[str, str],
     items: list[dict[str, Any]],
     default_concurrency: int = DEFAULT_CONCURRENCY,
+    write_policy: str = DEFAULT_WRITE_POLICY,
     created_at: str | None = None,
 ) -> dict[str, Any]:
     return {
@@ -150,7 +156,7 @@ def build_manifest(
         "created_at": created_at or _now_iso(),
         "batch_title": batch_title,
         "default_concurrency": default_concurrency,
-        "write_policy": WRITE_POLICY,
+        "write_policy": write_policy,
         "source_summary": source_summary,
         "items": items,
     }
@@ -169,7 +175,13 @@ def _non_comment_lines(path: Path) -> list[str]:
     return lines
 
 
-def manifest_from_pdf_folder(folder: Path, *, batch_title: str, recursive: bool = False) -> dict[str, Any]:
+def manifest_from_pdf_folder(
+    folder: Path,
+    *,
+    batch_title: str,
+    recursive: bool = False,
+    write_policy: str = DEFAULT_WRITE_POLICY,
+) -> dict[str, Any]:
     root = Path(folder).expanduser().resolve()
     if not root.exists() or not root.is_dir():
         raise ManifestError(f"pdf folder is not a directory: {root}")
@@ -188,11 +200,17 @@ def manifest_from_pdf_folder(folder: Path, *, batch_title: str, recursive: bool 
         batch_title=batch_title,
         source_summary={"source_type": "pdf_folder", "description": str(root)},
         items=items,
+        write_policy=write_policy,
     )
     return validate_manifest(manifest)
 
 
-def manifest_from_pdf_paths_file(paths_file: Path, *, batch_title: str) -> dict[str, Any]:
+def manifest_from_pdf_paths_file(
+    paths_file: Path,
+    *,
+    batch_title: str,
+    write_policy: str = DEFAULT_WRITE_POLICY,
+) -> dict[str, Any]:
     source = Path(paths_file).expanduser().resolve()
     paths: list[Path] = []
     for line in _non_comment_lines(source):
@@ -213,11 +231,17 @@ def manifest_from_pdf_paths_file(paths_file: Path, *, batch_title: str) -> dict[
         batch_title=batch_title,
         source_summary={"source_type": "pdf_paths", "description": str(source)},
         items=items,
+        write_policy=write_policy,
     )
     return validate_manifest(manifest)
 
 
-def manifest_from_zotero_titles_file(titles_file: Path, *, batch_title: str) -> dict[str, Any]:
+def manifest_from_zotero_titles_file(
+    titles_file: Path,
+    *,
+    batch_title: str,
+    write_policy: str = DEFAULT_WRITE_POLICY,
+) -> dict[str, Any]:
     titles = _non_comment_lines(titles_file)
     items = [
         {
@@ -232,6 +256,7 @@ def manifest_from_zotero_titles_file(titles_file: Path, *, batch_title: str) -> 
         batch_title=batch_title,
         source_summary={"source_type": "zotero_titles", "description": str(Path(titles_file).resolve())},
         items=items,
+        write_policy=write_policy,
     )
     return validate_manifest(manifest)
 
@@ -241,6 +266,7 @@ def manifest_from_zotero_collection_inventory(
     *,
     batch_title: str,
     collection_query: str = "",
+    write_policy: str = DEFAULT_WRITE_POLICY,
 ) -> dict[str, Any]:
     inventory = _require_object(read_json(inventory_json), "inventory")
     collection = _require_object(inventory.get("collection"), "inventory.collection")
@@ -278,5 +304,6 @@ def manifest_from_zotero_collection_inventory(
         batch_title=batch_title,
         source_summary={"source_type": "zotero_collection", "description": description},
         items=items,
+        write_policy=write_policy,
     )
     return validate_manifest(manifest)

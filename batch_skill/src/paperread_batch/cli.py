@@ -11,7 +11,9 @@ from rich.console import Console
 
 from paperread_batch.io import JsonFileError, exclusive_file_lock, read_json, write_json_atomic, write_text_atomic
 from paperread_batch.manifest import (
+    DEFAULT_WRITE_POLICY,
     ManifestError,
+    VALID_WRITE_POLICIES,
     manifest_from_pdf_folder,
     manifest_from_pdf_paths_file,
     manifest_from_zotero_collection_inventory,
@@ -27,7 +29,9 @@ from paperread_batch.state import (
     allocate_next,
     initial_state,
     mark_interrupted_running_items,
+    pending_write_items,
     record_item_result,
+    record_write_result,
     retry_failed,
 )
 
@@ -173,6 +177,10 @@ def _item_result_path(items_dir: Path, item_id: str) -> Path:
     return target
 
 
+def _write_result_path(items_dir: Path, item_id: str) -> Path:
+    return _item_result_path(items_dir, f"{item_id}.write")
+
+
 def _date_from_iso(timestamp: str):
     return datetime.fromisoformat(timestamp).date()
 
@@ -216,10 +224,20 @@ def manifest_from_pdf_folder_command(
     batch_title: str = typer.Option(..., "--batch-title", help="Batch title."),
     output: Path = typer.Option(..., "--output", "-o", help="Write manifest JSON here."),
     recursive: bool = typer.Option(False, "--recursive", help="Scan subdirectories explicitly."),
+    write_policy: str = typer.Option(
+        DEFAULT_WRITE_POLICY,
+        "--write-policy",
+        help=f"Write policy: {', '.join(sorted(VALID_WRITE_POLICIES))}.",
+    ),
 ) -> None:
     """Build a manifest from direct child PDF files."""
     try:
-        manifest = manifest_from_pdf_folder(folder, batch_title=batch_title, recursive=recursive)
+        manifest = manifest_from_pdf_folder(
+            folder,
+            batch_title=batch_title,
+            recursive=recursive,
+            write_policy=write_policy,
+        )
     except ManifestError as exc:
         _exit_error(f"manifest_failed: {exc}")
     write_json_atomic(output, manifest)
@@ -231,10 +249,15 @@ def manifest_from_pdf_paths_command(
     paths_file: Path,
     batch_title: str = typer.Option(..., "--batch-title", help="Batch title."),
     output: Path = typer.Option(..., "--output", "-o", help="Write manifest JSON here."),
+    write_policy: str = typer.Option(
+        DEFAULT_WRITE_POLICY,
+        "--write-policy",
+        help=f"Write policy: {', '.join(sorted(VALID_WRITE_POLICIES))}.",
+    ),
 ) -> None:
     """Build a manifest from a text file of PDF paths."""
     try:
-        manifest = manifest_from_pdf_paths_file(paths_file, batch_title=batch_title)
+        manifest = manifest_from_pdf_paths_file(paths_file, batch_title=batch_title, write_policy=write_policy)
     except ManifestError as exc:
         _exit_error(f"manifest_failed: {exc}")
     write_json_atomic(output, manifest)
@@ -246,10 +269,19 @@ def manifest_from_zotero_titles_command(
     titles_file: Path,
     batch_title: str = typer.Option(..., "--batch-title", help="Batch title."),
     output: Path = typer.Option(..., "--output", "-o", help="Write manifest JSON here."),
+    write_policy: str = typer.Option(
+        DEFAULT_WRITE_POLICY,
+        "--write-policy",
+        help=f"Write policy: {', '.join(sorted(VALID_WRITE_POLICIES))}.",
+    ),
 ) -> None:
     """Build a manifest from a text file of Zotero titles or title fragments."""
     try:
-        manifest = manifest_from_zotero_titles_file(titles_file, batch_title=batch_title)
+        manifest = manifest_from_zotero_titles_file(
+            titles_file,
+            batch_title=batch_title,
+            write_policy=write_policy,
+        )
     except ManifestError as exc:
         _exit_error(f"manifest_failed: {exc}")
     write_json_atomic(output, manifest)
@@ -262,6 +294,11 @@ def manifest_from_zotero_collection_command(
     items_json: Path = typer.Option(..., "--items-json", help="Read-only collection inventory JSON."),
     batch_title: str = typer.Option(..., "--batch-title", help="Batch title."),
     output: Path = typer.Option(..., "--output", "-o", help="Write manifest JSON here."),
+    write_policy: str = typer.Option(
+        DEFAULT_WRITE_POLICY,
+        "--write-policy",
+        help=f"Write policy: {', '.join(sorted(VALID_WRITE_POLICIES))}.",
+    ),
 ) -> None:
     """Build a manifest from a read-only Zotero collection inventory JSON file."""
     try:
@@ -269,6 +306,7 @@ def manifest_from_zotero_collection_command(
             items_json,
             batch_title=batch_title,
             collection_query=collection,
+            write_policy=write_policy,
         )
     except (ManifestError, JsonFileError) as exc:
         _exit_error(f"manifest_failed: {exc}")
@@ -367,6 +405,47 @@ def record_result_command(
         write_json_atomic(_item_result_path(items_dir, item_id), result_payload)
         write_json_atomic(run_dir / "state.json", updated)
     console.print(f"recorded_result: {item_id}")
+
+
+@app.command("next-write")
+def next_write_command(
+    batch_run: Path,
+    limit: int = typer.Option(1, "--limit", min=1, help="Maximum number of prepared Zotero notes to emit."),
+) -> None:
+    """List prepared Zotero note candidates that still need MCP write_note and verification."""
+    run_dir = Path(batch_run)
+    manifest = _read_manifest(run_dir)
+    with exclusive_file_lock(_state_lock_path(run_dir)):
+        state = _read_state(run_dir)
+        try:
+            selected = pending_write_items(manifest, state, limit=limit)
+        except (StateError, JsonFileError) as exc:
+            _exit_error(f"next_write_failed: {exc}")
+    typer.echo(json.dumps(selected, ensure_ascii=False, indent=2))
+
+
+@app.command("record-write")
+def record_write_command(
+    batch_run: Path,
+    item_id: str,
+    result: Path = typer.Option(..., "--result", help="Write result JSON with verify report path."),
+    now: str | None = typer.Option(None, "--now", help="Timestamp override for tests."),
+) -> None:
+    """Record a verified Zotero note write into state."""
+    run_dir = Path(batch_run)
+    manifest = _read_manifest(run_dir)
+    result_payload = _read_object(result, "write_result")
+    with exclusive_file_lock(_state_lock_path(run_dir)):
+        state = _read_state(run_dir)
+        try:
+            updated = record_write_result(state, manifest, item_id, result_payload, now=now or _now_iso())
+        except (StateError, JsonFileError) as exc:
+            _exit_error(f"record_write_failed: {exc}")
+        items_dir = run_dir / "items"
+        items_dir.mkdir(exist_ok=True)
+        write_json_atomic(_write_result_path(items_dir, item_id), result_payload)
+        write_json_atomic(run_dir / "state.json", updated)
+    console.print(f"recorded_write: {item_id}")
 
 
 @app.command("report")

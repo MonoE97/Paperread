@@ -85,6 +85,50 @@ uv run paperread-batch --help
 
 第一次运行 `uv sync --locked` 会根据对应 skill root 的 `uv.lock` 初始化安装后的本地环境。更新已复制的 skill 目录后，也应重新运行一次。
 
+## Zotero MCP 设置
+
+Zotero-backed workflow 需要先安装 Zotero Desktop 和 Zotero MCP plugin，agent 才能搜索文献库或调用 `write_note`。按 [cookjohn/zotero-mcp](https://github.com/cookjohn/zotero-mcp#readme) 安装并启用：
+
+1. 从该仓库 releases 下载最新的 `zotero-mcp-plugin-*.xpi`。
+2. 在 Zotero 中通过 `Tools -> Add-ons` 安装 `.xpi`，然后重启 Zotero。
+3. 打开 `Preferences -> Zotero MCP Plugin`，启用 integrated server，并生成 client configuration。
+4. 使用生成的 Streamable HTTP MCP 配置，或直接配置本地 endpoint：`http://127.0.0.1:23120/mcp`。
+
+该插件内置 MCP server，不需要额外启动独立的 Zotero MCP server 进程。Paperread 把 Zotero local API 和 SQLite 视为只读；真正写入只允许走 Zotero MCP `write_note`。
+
+## Skill 使用方式
+
+### Use `paperread`
+
+`paperread` 用于一次分析一篇论文。
+
+- Zotero 标题或标题片段：让 agent 使用 `$paperread` 和论文标题。agent 会通过 Zotero MCP 搜索文献库，准备 evidence artifacts，渲染 `note.md` 与 `note.html`，预览候选笔记，只在明确写入意图后通过 MCP `write_note` 写入，并回读校验新建笔记。
+- 本地 PDF path：给出绝对或相对 `.pdf` 路径。skill 会在 PDF 同目录写 `<pdf_stem>_analysis/` 和 `<pdf_stem>_note.md`，不会写 Zotero。
+
+安装后的常用命令：
+
+```bash
+uv run paperread --help
+uv run paperread prepare-pdf "/abs/path/to/paper.pdf"
+```
+
+### Use `paperread-batch`
+
+`paperread-batch` 用于一次处理多篇论文。必须同时安装 `paperread` 和 `paperread-batch`；batch skill 只负责调度与报告，单篇阅读仍由 `$paperread` 负责。
+
+典型 batch CLI 形态：
+
+```bash
+uv run paperread-batch manifest from-zotero-titles titles.txt --batch-title "my batch" --output manifest.json
+uv run paperread-batch init --manifest manifest.json
+uv run paperread-batch next <batch_run_dir> --limit 3
+uv run paperread-batch next-write <batch_run_dir> --limit 1
+uv run paperread-batch record-write <batch_run_dir> <item_id> --result write-result.json
+uv run paperread-batch report <batch_run_dir>
+```
+
+Zotero-backed items 默认 `write_policy=zotero_write`。需要 dry-run 时，在 manifest builder 中传 `--write-policy prepare_only`。PDF batch items 仍然只输出本地文件。
+
 ## 工作流
 
 Paperread 支持两类输入：
@@ -94,13 +138,13 @@ Paperread 支持两类输入：
 
 两个工作流默认都会抽取完整 PDF。最终 `evidence_summary` locator 必须使用以下 canonical 格式之一：`context.md page <N>`、`context.md page <N> section <Section Name>`、`context.md page <N> section <Section Name> table_candidate <N>` 或 `figure_context.md <figure_id>`。裸 `context.md` / `figure_context.md`、`page 3 method section` 这类散文式 locator、`section_context.md` 和 secondary context 路径都无效。`section_context.md` 只作为导航辅助。通过 `scripts/capture-secondary-url.mjs` 抓取的 secondary web context 只用于 cross-check，不能在 `evidence_summary` 中作为证据引用。
 
-Paperread Batch 支持四类批量输入：Zotero collection inventory、多个 Zotero 标题、本地 PDF 文件夹、多个 PDF path。它会归一化为 manifest，把每篇交给 `$paperread`，最后生成 prepare_only 的 batch report。Codex 默认并发数为 3；Claude 兼容 fallback 是顺序执行。每篇 30 秒结果直接从单篇 note 的 `30 秒结论` 行提取，batch 不再重新总结论文。
+Paperread Batch 支持四类批量输入：Zotero collection inventory、多个 Zotero 标题、本地 PDF 文件夹、多个 PDF path。它会归一化为 manifest，把每篇交给 `$paperread`，Zotero-backed items 默认使用 `zotero_write`：生成写入候选后通过 `next-write` 串行交给外层 agent 调 Zotero MCP 写入、只读校验，再用 `record-write` 记录结果。需要 dry-run 时显式传 `--write-policy prepare_only`。Codex 默认并发数为 3；Claude 兼容 fallback 是顺序执行。每篇 30 秒结果直接从单篇 note 的 `30 秒结论` 行提取，batch 不再重新总结论文。
 
 ## 产物位置
 
 - Zotero 标题工作流的本地产物默认写到 `<skill_root>/runs/YYYY-MM-DD/<title-slug>/`。准备写入候选时，会在同一目录生成 `note.md`、`note.html`、`gate-report.json` 和 `write-payload.json`，然后才可能写入 Zotero。
 - 本地 PDF path 工作流的产物默认写在 PDF 同目录：`<pdf_stem>_analysis/` 保存分析产物，`<pdf_stem>_note.md` 是最终 Markdown 笔记。已有输出不会覆盖，会自动使用 `_v2`、`_v3` 等后缀。
-- Batch workflow 的本地产物默认写到 `<paperread-batch_skill_root>/runs/YYYY-MM-DD/<batch-slug>/`，包含 `manifest.json`、`state.json`、`items/*.json`、`batch-report.json` 和 `batch-report.md`。单篇产物仍归 `paperread` 所有；batch 只保存索引和 local-only path。
+- Batch workflow 的本地产物默认写到 `<paperread-batch_skill_root>/runs/YYYY-MM-DD/<batch-slug>/`，包含 `manifest.json`、`state.json`、`items/*.json`、`items/*.write.json`、`batch-report.json` 和 `batch-report.md`。单篇产物仍归 `paperread` 所有；batch 只保存索引、local-only path、Zotero note key 和 verify report path。
 
 ## 运行要求
 
@@ -137,9 +181,9 @@ uv run python scripts/validate-skill.py .
 
 ## 安全边界
 
-- 默认先 dry-run 和 preview，再写入。
+- 每次 Zotero 写入前必须先 preview 并通过单篇 write gate；批量 dry-run 显式使用 `--write-policy prepare_only`。
 - Zotero 写入只能通过 Zotero MCP `write_note`，且必须有用户明确写入意图。
 - Zotero local API 和 SQLite 只读。
 - 本地 PDF path workflow 只能输出本地文件；不能写入 Zotero，不能调用 `refresh-live-notes`，不能创建 `write-payload.json`。
-- Batch workflow 默认 `prepare_only`；不能调用 Zotero MCP `write_note`。
+- Zotero-backed batch workflow 默认 `zotero_write`：batch CLI 只输出待写项并记录校验，外层 agent 调 Zotero MCP `write_note`；PDF batch items 仍然 local-only。需要 dry-run 时传 `--write-policy prepare_only`。
 - 渲染出的笔记正文应中文优先，同时保留论文标题、人名、公式、方法名、单位、证据 locator 和 tag key。

@@ -6,6 +6,14 @@ Paperread Batch is a scheduler and reporter. It must dispatch each paper to
 `$paperread` for single-paper analysis. It must not copy single-paper prompts,
 summary schema, note templates, evidence locator rules, or Zotero write gates.
 
+## Prerequisites
+
+Install both skills before running a batch: `paperread` for single-paper work
+and `paperread-batch` for scheduling. Zotero-backed batch items also require
+Zotero Desktop and `zotero-mcp-plugin` with the integrated MCP server enabled.
+Use the local Streamable HTTP endpoint from the plugin preferences, normally
+`http://127.0.0.1:23120/mcp`.
+
 ## Inputs
 
 Supported input sources:
@@ -62,11 +70,38 @@ Use `resume` after an interrupted session. It first records complete archived
 worker results found at `items/<item_id>.json` for running or interrupted
 assignments, then marks the remaining running assignments as interrupted.
 
+## Zotero Write Stage
+
+The default write policy is `zotero_write`. After all eligible Zotero-backed
+items have successful single-paper candidates, list pending writes:
+
+```bash
+uv run paperread-batch next-write <batch_run_dir> --limit 1
+```
+
+For each returned item, read `write_payload` and `note_html`, then call Zotero
+MCP `write_note(action="create", parentKey=<payload parentKey>,
+content=<contents of note.html>, tags=<payload tags>)`. Verify the created note
+with `$paperread` `verify-zotero-note` using the payload's required readback
+checks. Record the verified write:
+
+```bash
+uv run paperread-batch record-write <batch_run_dir> <item_id> --result write-result.json
+```
+
+`write-result.json` must use schema
+`paperread-batch.write-result.v1`, include `status: "written"`, the Zotero
+`note_key`, `parent_key`, `contentSha256`, and a local `verify_report` path whose
+JSON has `status: "passed"`, matching `noteKey`, `parentKey`, and
+`contentSha256`.
+
 ## Safety
 
-The default write policy is `prepare_only`. Batch execution must not call
-Zotero MCP `write_note`. Zotero-backed items may prepare write candidates
-through `$paperread`; PDF items remain local-output only.
+Batch CLI code must not call Zotero MCP `write_note`; it only schedules,
+records, and reports. The outer agent performs Zotero writes through MCP from
+`next-write`, then records the read-only verification with `record-write`.
+Pass manifest builders `--write-policy prepare_only` for an explicit dry-run.
+PDF items remain local-output only.
 
 ## Reporting
 

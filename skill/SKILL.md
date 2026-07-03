@@ -19,6 +19,13 @@ uv run paperread --help
 
 If `uv sync --locked` reports that Python `>=3.13` is unavailable, run `uv python install 3.13` from the skill root, then retry `uv sync --locked`. If `uv` itself is missing, stop and ask the user to install `uv` first; do not use `pip`, `conda`, or system Python as a substitute.
 
+For Zotero title workflows, Zotero Desktop and Zotero MCP must already be installed and enabled. Use the Zotero MCP plugin from https://github.com/cookjohn/zotero-mcp#readme (`zotero-mcp-plugin` installed in Zotero via `Tools -> Add-ons`) and configure the local Streamable HTTP endpoint, normally `http://127.0.0.1:23120/mcp`.
+
+## Typical Use
+
+- Zotero title or title fragment: use `$paperread` with the paper title. The agent searches Zotero via Zotero MCP, creates a run, prepares evidence artifacts, writes `summary.json` and `review.json`, renders `note.md` and `note.html`, previews the target, writes only through MCP `write_note` after explicit write intent, and verifies the created note.
+- Local PDF path: use `$paperread` with a `.pdf` path. The skill prepares `<pdf_stem>_analysis/` and `<pdf_stem>_note.md` beside the PDF and never writes Zotero.
+
 ## Entry Routing
 
 - If the user input is a local PDF path and the path exists with suffix `.pdf`, use the local PDF path workflow in `references/pdf-path-workflow.md`.

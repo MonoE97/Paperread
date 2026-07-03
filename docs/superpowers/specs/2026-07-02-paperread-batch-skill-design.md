@@ -1,7 +1,17 @@
 # Paperread Batch Skill Design
 
 Date: 2026-07-02
-Status: design for review
+Status: implemented and merged to `main` on 2026-07-03
+
+Implementation note: the deterministic `paperread-batch` layer now lives in
+`batch_skill/`, with root docs and validators updated for the two-skill install
+model. This file is now an implemented design record. Public release still
+requires copied-install verification outside the repository.
+
+Follow-up note on 2026-07-03: Zotero-backed batch items now default to verified
+`zotero_write`. The batch CLI still does not call Zotero MCP directly; it emits
+pending writes with `next-write`, and the outer agent records verified writes
+with `record-write`.
 
 ## Goal
 
@@ -39,10 +49,11 @@ The batch run must be recoverable from files, not from chat memory. A batch can
 be interrupted, resumed, partially retried, or inspected later only if the
 manifest, item results, and state transitions are durable artifacts.
 
-Zotero writing must remain explicit and separate. Batch mode can prepare write
-candidates, but it must not create Zotero notes by default. A later write phase
-must require a separate user action and should consume the prepared payloads
-from successful single-paper runs.
+Zotero writing must remain explicit and separated from deterministic batch CLI
+code. Batch mode now defaults eligible Zotero-backed items to verified
+`zotero_write`: the scheduler prepares candidates, emits pending write records,
+the outer agent calls Zotero MCP `write_note`, and `record-write` consumes the
+read-only verification report from the successful single-paper run.
 
 ## Confirmed Decisions
 
@@ -66,7 +77,8 @@ from successful single-paper runs.
   `zotero_item`, `zotero_title`, or `pdf_path`. A Zotero collection is an input
   source, not a worker item type; collection entries become `zotero_item`
   records before dispatch.
-- Default write policy is `prepare_only`.
+- Default write policy is `zotero_write` for Zotero-backed items; manifest
+  builders keep `--write-policy prepare_only` for explicit dry-run.
 - Default Codex concurrency is 3.
 - Single-paper artifacts stay in `paperread/runs/...`. The batch run stores
   only indexes, state, item result summaries, and reports.
@@ -77,7 +89,7 @@ from successful single-paper runs.
 
 ## Repository Shape
 
-The source repository should become:
+The source repository is:
 
 ```text
 Paperread/
@@ -172,9 +184,10 @@ of the `$paperread` single-paper workflow.
 
 ### Local PDF Folder
 
-The user provides a directory. V1 scans direct child `*.pdf` files by default.
-Recursive scanning is an explicit option because accidental recursive scans can
-pull in old analysis directories, downloads, or unrelated papers.
+The user provides a directory. V1 scans direct child files whose suffix is
+`.pdf` case-insensitively by default. Recursive scanning is an explicit option
+because accidental recursive scans can pull in old analysis directories,
+downloads, or unrelated papers.
 
 The manifest stores absolute PDF paths to make resume independent of the
 current shell directory.
@@ -199,7 +212,7 @@ Recommended shape:
   "created_at": "2026-07-02T10:00:00+08:00",
   "batch_title": "solid-state-electrolytes",
   "default_concurrency": 3,
-  "write_policy": "prepare_only",
+  "write_policy": "zotero_write",
   "source_summary": {
     "source_type": "mixed",
     "description": "Zotero collection plus local PDFs"
@@ -260,6 +273,7 @@ Batch statuses:
 - `pending`
 - `running`
 - `completed`
+- `completed_pending_writes`
 - `completed_with_failures`
 - `blocked`
 
@@ -282,13 +296,19 @@ Each item state should record:
 - `worker_id`
 - `started_at`
 - `completed_at`
+- `write_status`
+- `write_completed_at`
 - `paperread_run_dir`
 - `summary_json`
 - `note_md`
 - `note_html`
 - `gate_report`
 - `write_payload`
+- `verify_report`
 - `local_note_path`
+- `zotero_note_key`
+- `zotero_parent_key`
+- `content_sha256`
 - `thirty_second_takeaway`
 - `takeaway_source_type`
 - `takeaway_source_path`
@@ -358,6 +378,7 @@ The batch skill stores its own run artifacts under its installed skill root:
         state.json
         items/
           001.json
+          001.write.json
           002.json
         batch-report.json
         batch-report.md
@@ -388,6 +409,9 @@ V1 uses Codex-first parallel scheduling.
    writes.
 8. When a worker slot opens, dispatch the next pending item.
 9. When no pending or running items remain, generate reports.
+10. For Zotero-backed `pending_write` items, use `next-write` to emit one
+    prepared candidate, perform MCP `write_note` outside the batch CLI, verify
+    the note read-only, and record the result with `record-write`.
 
 Default concurrency is 3. The concurrency setting is a scheduler limit, not a
 promise that every host supports real parallel agent execution.
@@ -404,8 +428,9 @@ Each worker receives one manifest item and must follow these rules:
 - For `pdf_path`, use `$paperread` local PDF path workflow.
 - Use full-PDF extraction unless the user explicitly requested shortened
   debugging or preview.
-- Do not write Zotero notes.
-- For Zotero items, stop after `prepare-write-candidate` succeeds or fails.
+- Do not write Zotero notes inside the single-paper worker.
+- For Zotero items, stop after `prepare-write-candidate` succeeds or fails; the
+  batch write stage handles MCP write-through later.
 - For local PDF items, stop after `prepare-local-note-candidate` succeeds or
   fails.
 - Record the actual `paperread_run_dir`, key output paths, `worker_id`, and
@@ -434,6 +459,8 @@ uv run paperread-batch init --manifest manifest.json --output <batch_run>
 uv run paperread-batch validate <batch_run>
 uv run paperread-batch next <batch_run> --limit 3
 uv run paperread-batch record-result <batch_run> <item_id> --result <batch_run>/items/<item_id>.json
+uv run paperread-batch next-write <batch_run> --limit 1
+uv run paperread-batch record-write <batch_run> <item_id> --result write-result.json
 uv run paperread-batch report <batch_run>
 uv run paperread-batch resume <batch_run>
 uv run paperread-batch retry-failed <batch_run>
@@ -447,10 +474,11 @@ output directory already contains `manifest.json` or `state.json`. Re-running
 Optional manifest builders can be added around the same manifest schema:
 
 ```bash
-uv run paperread-batch manifest from-pdf-folder "/abs/path/to/folder" --output manifest.json
-uv run paperread-batch manifest from-pdf-paths paths.txt --output manifest.json
-uv run paperread-batch manifest from-zotero-titles titles.txt --output manifest.json
-uv run paperread-batch manifest from-zotero-collection "<collection>" --output manifest.json
+uv run paperread-batch manifest from-pdf-folder "/abs/path/to/folder" --batch-title "folder batch" --output manifest.json
+uv run paperread-batch manifest from-pdf-paths paths.txt --batch-title "paths batch" --output manifest.json
+uv run paperread-batch manifest from-zotero-titles titles.txt --batch-title "titles batch" --output manifest.json
+uv run paperread-batch manifest from-zotero-collection "<collection>" --items-json collection-items.json --batch-title "collection batch" --output manifest.json
+uv run paperread-batch manifest from-zotero-titles titles.txt --batch-title "dry run" --write-policy prepare_only --output manifest.json
 ```
 
 The Zotero collection builder may require MCP access or a read-only inventory
@@ -509,6 +537,8 @@ Required report content:
 Write status values:
 
 - `prepared_not_written`
+- `pending_write`
+- `written`
 - `not_applicable`
 - `blocked`
 - `failed`
@@ -556,10 +586,11 @@ deciding whether to rerun.
 
 ## Safety Boundaries
 
-- Batch default is `prepare_only`.
-- Batch must not call Zotero MCP `write_note` in v1 default execution.
-- Zotero writes, if added later as a phase, must require explicit user intent
-  and must consume the single-paper `write-payload.json` and `note.html`.
+- Batch default is `zotero_write` for Zotero-backed items.
+- Batch CLI code must not call Zotero MCP `write_note`; the outer agent performs
+  the write from `next-write` and records read-only verification with
+  `record-write`.
+- `prepare_only` remains available as an explicit dry-run write policy.
 - PDF-only items never create `write-payload.json`.
 - Local PDF items remain local-output only.
 - Batch reports can link to `write-payload.json`; they must not treat its
@@ -585,7 +616,8 @@ Required test groups:
   - Path-like or unsafe `item_id`.
   - Missing or invalid required fields.
 - Manifest builders:
-  - PDF folder scan ignores non-PDF files.
+  - PDF folder scan ignores non-PDF files and accepts `.pdf` suffixes
+    case-insensitively.
   - PDF folder scan is non-recursive by default.
   - PDF paths are made absolute.
 - State transitions:
@@ -629,15 +661,15 @@ tests. It should use small fixtures and dry-run or prepare-only paths.
 
 ## Documentation Updates
 
-Root docs should eventually explain that this repo contains two installable
-skill sources:
+Root docs now explain that this repo contains two installable skill sources:
 
 - `skill/` -> install as `paperread`.
 - `batch_skill/` -> install as `paperread-batch`.
 
-`README.md`, `README.zh-CN.md`, `AGENTS.md`, and root validators should be
-updated only when `batch_skill/` is implemented. This design document records
-the intended direction but does not itself change the current install contract.
+`README.md`, `README.zh-CN.md`, `AGENTS.md`, and root validators were updated
+with the `batch_skill/` implementation. The active install contract is now the
+two-skill model documented in those root files; this design document records the
+rationale and constraints behind that implemented contract.
 
 The batch skill's `SKILL.md` should be lean:
 
@@ -645,12 +677,12 @@ The batch skill's `SKILL.md` should be lean:
 - State that `$paperread` must be installed and available.
 - Route detailed workflow rules to `references/batch-workflow.md`.
 - State default concurrency 3 for Codex.
-- State prepare-only write policy.
+- State default `zotero_write` policy and explicit `prepare_only` dry-run.
 - State Claude sequential fallback.
 
-## Corrected Implementation Order
+## Implemented Order
 
-The implementation plan should follow this order after the review corrections:
+The implementation followed this order after the review corrections:
 
 1. Scaffold `batch_skill/` as a self-contained installable skill named
    `paperread-batch`.
@@ -677,7 +709,7 @@ The implementation plan should follow this order after the review corrections:
 
 - Do not rename existing `skill/` to `paperread/`.
 - Do not copy single-paper prompt/schema/template logic into `batch_skill/`.
-- Do not implement automatic Zotero writing.
+- Do not let batch CLI directly call Zotero MCP or write without verification.
 - Do not make research synthesis the default report.
 - Do not require all inputs to be Zotero-backed.
 - Do not require all inputs to be PDF-backed.
@@ -690,7 +722,7 @@ Potential later work:
 
 - `synthesize` command that reads all successful single-paper `summary.json`
   files and creates a research-level cross-paper analysis.
-- Explicit `write-approved` phase for Zotero-backed successful items.
+- Richer write approval UX for Zotero-backed successful items.
 - Priority scheduling.
 - Per-source concurrency limits.
 - Recursive PDF folder scanning with ignore rules.
@@ -701,15 +733,15 @@ Potential later work:
 These extensions should not be included in the first implementation unless the
 core scheduler and report contracts are already stable.
 
-## Implementation Readiness
+## Implementation Status
 
-The design is ready for an implementation plan when these constraints are
-accepted:
+The design was implemented with these constraints:
 
 - `paperread-batch` is a separate installed skill.
 - `skill/` remains the source directory for `paperread` in v1.
 - `batch_skill/` is the source directory for `paperread-batch`.
-- Batch reads are prepare-only by default.
+- Zotero-backed batch reads default to verified `zotero_write`; `prepare_only`
+  remains the explicit dry-run policy.
 - Parallel execution is Codex-first with sequential fallback.
 - Batch stores indexes and reports, not copies of complete single-paper runs.
 - V1 report is operational, not a literature synthesis.

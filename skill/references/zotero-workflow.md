@@ -20,6 +20,11 @@ By default, `create-run` writes local artifacts under `<skill_root>/runs/YYYY-MM
 
 ## Tool Discovery
 
+Before using the Zotero workflow, install and enable Zotero MCP from
+https://github.com/cookjohn/zotero-mcp#readme. Download the
+`zotero-mcp-plugin-*.xpi`, install it in Zotero with `Tools -> Add-ons`, restart
+Zotero, then enable the integrated server in `Preferences -> Zotero MCP Plugin`.
+
 Load Zotero MCP tools before the workflow: `search_library`, `get_item_details`, `get_content`, `write_note`, and optional `annotations`.
 
 If native MCP tools are not injected, use the local Zotero MCP endpoint `http://127.0.0.1:23120/mcp` as an HTTP JSON-RPC fallback. The fallback still calls Zotero MCP methods such as `zotero-mcp write_note`; it is not a Zotero local API write path. If localhost requests hit a proxy, clear `ALL_PROXY`, `HTTP_PROXY`, and `HTTPS_PROXY`, then set `NO_PROXY=127.0.0.1,localhost` and `no_proxy=127.0.0.1,localhost`.

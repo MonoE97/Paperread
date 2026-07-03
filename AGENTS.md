@@ -2,7 +2,7 @@
 
 ## 项目目标
 
-本项目维护一个自包含的 Paperread skill repo。可安装运行产物是两个 skill source：`skill/` 复制到 Codex 或 Claude 的 skills 目录并命名为 `paperread` 后，用户应能在安装后的 skill root 内运行 `uv sync --locked`、`uv run paperread ...`，使用 Zotero 标题工作流和本地 PDF path 工作流；`batch_skill/` 复制并命名为 `paperread-batch` 后，用户应能运行 `uv run paperread-batch ...`，把多篇论文派发给 `$paperread` 并生成 prepare_only batch report。仓库根目录只承担维护文档、发布说明和规划记录职责，不是运行时 Python project。
+本项目维护一个自包含的 Paperread skill repo。可安装运行产物是两个 skill source：`skill/` 复制到 Codex 或 Claude 的 skills 目录并命名为 `paperread` 后，用户应能在安装后的 skill root 内运行 `uv sync --locked`、`uv run paperread ...`，使用 Zotero 标题工作流和本地 PDF path 工作流；`batch_skill/` 复制并命名为 `paperread-batch` 后，用户应能运行 `uv run paperread-batch ...`，把多篇论文派发给 `$paperread`，对 Zotero-backed items 默认走 verified `zotero_write`，并生成 batch report。仓库根目录只承担维护文档、发布说明和规划记录职责，不是运行时 Python project。
 
 ## 目录约定
 
@@ -14,7 +14,7 @@
 - `skill/references/`: workflow and schema references loaded by the skill when needed.
 - `skill/scripts/`: bundled helper scripts, including portable skill validation.
 - `skill/pyproject.toml` and `skill/uv.lock`: dependency and lock metadata for the installed skill root.
-- `batch_skill/SKILL.md`: batch skill 入口，只保留批量触发、路由和 prepare_only 安全边界。
+- `batch_skill/SKILL.md`: batch skill 入口，只保留批量触发、路由和 Zotero write-through 安全边界。
 - `batch_skill/agents/openai.yaml`: Codex UI metadata for `paperread-batch`。
 - `batch_skill/src/paperread_batch/`: deterministic batch CLI/tooling logic，包括 manifest、state、takeaway extraction 和 report。
 - `batch_skill/tests/`: pytest tests; never perform real Zotero writes or real LLM dispatch.
@@ -32,7 +32,7 @@ Do not add `README.md`, `INSTALLATION_GUIDE.md`, `QUICK_REFERENCE.md`, or `CHANG
 ## 运行产物与证据边界
 
 - Zotero title workflow 使用 `create-run`，默认把本地产物写到安装后的 skill root 下：`runs/YYYY-MM-DD/<title-slug>/`；准备写入候选后，同目录包含 `note.md`、`note.html`、`gate-report.json` 和 `write-payload.json`。
-- Batch workflow 使用 `paperread-batch init/next/record-result/report`，默认把 batch 产物写到安装后的 batch skill root 下：`runs/YYYY-MM-DD/<batch-slug>/`；同目录包含 `manifest.json`、`state.json`、`items/*.json`、`batch-report.json` 和 `batch-report.md`。单篇产物仍由 `paperread` 生成并拥有，batch 只记录索引和 local-only path。
+- Batch workflow 使用 `paperread-batch init/next/record-result/next-write/record-write/report`，默认把 batch 产物写到安装后的 batch skill root 下：`runs/YYYY-MM-DD/<batch-slug>/`；同目录包含 `manifest.json`、`state.json`、`items/*.json`、`items/*.write.json`、`batch-report.json` 和 `batch-report.md`。单篇产物仍由 `paperread` 生成并拥有，batch 只记录索引、local-only path、Zotero note key 和 verify report path。
 - `prepare-item` 默认生成 `context.md`，并在结构化抽取可用时生成 `section_context.md`；`section_context.md` 只用于帮助 Codex 定位章节、表格候选和值候选。
 - PDF path workflow 使用 `prepare-pdf <pdf_path>`，首次在 PDF 同目录生成 `<pdf_stem>_analysis/` 和 `<pdf_stem>_note.md`，重复运行使用 `<pdf_stem>_analysis_v2/`、`<pdf_stem>_note_v2.md` 等后缀，不覆盖旧输出。
 - `section_context.md` is not a canonical evidence source；最终 `evidence_summary` locator 必须使用 canonical 格式：`context.md page <N>`、`context.md page <N> section <Section Name>`、`context.md page <N> section <Section Name> table_candidate <N>` 或 `figure_context.md <figure_id>`。裸 `context.md` / `figure_context.md`、`page 3 method section` 这类散文式 locator、`section_context.md` 和 secondary context 路径都不是 write-ready evidence locator。
@@ -52,8 +52,14 @@ Do not add `README.md`, `INSTALLATION_GUIDE.md`, `QUICK_REFERENCE.md`, or `CHANG
 - 修改 batch runtime 时默认在 `batch_skill/` 内执行命令，使用 `uv run`。
 - 首次使用或复制安装后，先在安装后的 skill root 运行 `uv --version` 确认 `uv` 可用，再运行 `uv sync --locked` 初始化本地环境。
 - 如果 `uv sync --locked` 找不到 Python `>=3.13`，在 skill root 运行 `uv python install 3.13` 后重试。
+- Zotero-backed workflow 需要 Zotero Desktop 和 `zotero-mcp-plugin`：按 <https://github.com/cookjohn/zotero-mcp#readme> 下载 `.xpi`，在 Zotero 里通过 `Tools -> Add-ons` 安装，启用 `Preferences -> Zotero MCP Plugin` integrated server；默认 Streamable HTTP endpoint 是 `http://127.0.0.1:23120/mcp`。
 - 缺少项目依赖时在 `skill/` 内使用 `uv add` 或 `uv add --dev`，不使用 `pip install`、`conda install` 或全局安装。
 - 不修改系统 Python、conda base 环境或 shell 全局配置。
+
+## Skill 使用方式
+
+- Use `paperread`: 单篇论文阅读。Zotero 标题/标题片段走 Zotero MCP workflow；本地 `.pdf` path 走 local PDF workflow。单篇 skill 负责 extraction、summary/review、note rendering、write gate 和 read-only verification。
+- Use `paperread-batch`: 多篇论文调度。batch skill 负责 manifest/state/report、`next`/`record-result`、`next-write`/`record-write`；每篇仍派发给 `$paperread`，PDF batch items 保持 local-output only。
 
 ## Git 与发布
 
@@ -106,8 +112,8 @@ V2 发布前必须把 `skill/` 和 `batch_skill/` 分别复制到仓库外临时
 
 ## 写入规则
 
-- 默认先 dry-run。
-- Batch workflow 默认 `prepare_only`；只负责调度、状态和报告，禁止调用 Zotero MCP `write_note`。每篇 30 秒结果必须从单篇 note 的 `30 秒结论` 行提取，fallback 才使用 `tldr` / `one_sentence_summary`，不能由 batch 重新总结。
+- 写入前默认先 preview 并通过 gate；dry-run 作为显式策略或显式用户要求处理。
+- Batch workflow 对 Zotero-backed items 默认 `write_policy=zotero_write`；batch CLI 只负责调度、状态和报告，禁止直接调用 Zotero MCP `write_note`。外层 agent 必须用 `next-write` 串行取出待写项，按 `write-payload.json` 和 `note.html` 调 Zotero MCP `write_note`，用只读 `verify-zotero-note` 校验后再 `record-write`。需要 dry-run 时显式传 `--write-policy prepare_only`。PDF batch items 保持 local-output only。每篇 30 秒结果必须从单篇 note 的 `30 秒结论` 行提取，fallback 才使用 `tldr` / `one_sentence_summary`，不能由 batch 重新总结。
 - PDF path workflow 是 local-output only；禁止调用 `refresh-live-notes`，禁止生成 `write-payload.json`，禁止写 Zotero。PDF 本地笔记必须通过 `validate-summary-json -> apply-review -> lint-summary -> validate-trusted-summary -> prepare-local-note-candidate`，最终 Markdown 写到 PDF 同目录的 `<pdf_stem>_note.md` 或版本后缀路径。
 - Zotero exact 搜索出现多个 normalized title 相同的条目时，停止分析和写入，要求用户先在 Zotero 去重；不要替用户选择父条目。
 - MCP 原始 `get_item_details` 响应必须先落盘，再用 `save-item-details` 生成规范化的 `item-details.json`，后续本地命令只读规范化文件。

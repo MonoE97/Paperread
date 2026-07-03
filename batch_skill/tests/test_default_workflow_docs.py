@@ -21,11 +21,17 @@ def test_batch_skill_docs_preserve_scheduler_boundary() -> None:
 
     for phrase in [
         "$paperread",
+        "zotero_write",
         "prepare_only",
         "Default Codex concurrency is 3",
+        "Typical Use",
         "Claude-compatible fallback is sequential",
         "must not call",
         "write_note",
+        "next-write",
+        "record-write",
+        "zotero-mcp-plugin",
+        "http://127.0.0.1:23120/mcp",
         "30 秒结论",
         "tldr",
         "one_sentence_summary",
@@ -62,6 +68,11 @@ def test_root_docs_describe_two_installable_skill_sources() -> None:
             "paperread",
             "paperread-batch",
             "uv run paperread-batch --help",
+            "Use `paperread`",
+            "Use `paperread-batch`",
+            "https://github.com/cookjohn/zotero-mcp#readme",
+            "zotero-mcp-plugin",
+            "zotero_write",
             "prepare_only",
         ]:
             assert phrase in text

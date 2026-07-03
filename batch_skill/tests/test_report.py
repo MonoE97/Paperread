@@ -7,7 +7,7 @@ def _manifest() -> dict:
         "created_at": "2026-07-02T10:00:00+08:00",
         "batch_title": "report batch",
         "default_concurrency": 3,
-        "write_policy": "prepare_only",
+        "write_policy": "zotero_write",
         "source_summary": {"source_type": "mixed", "description": "test inputs"},
         "items": [
             {
@@ -50,6 +50,12 @@ def _state() -> dict:
                 "note_html": "/local/paperread/runs/paper/note.html",
                 "gate_report": "/local/paperread/runs/paper/gate-report.json",
                 "write_payload": "/local/paperread/runs/paper/write-payload.json",
+                "write_status": "written",
+                "zotero_note_key": "NOTE1",
+                "zotero_parent_key": "PARENT1",
+                "verify_report": "/local/paperread/runs/paper/verify-report.json",
+                "content_sha256": "abc",
+                "write_completed_at": "2026-07-02T10:20:00+08:00",
                 "takeaway_source_type": "rendered_note_30_second_row",
                 "takeaway_source_path": "/local/paperread/runs/paper/note.md",
                 "takeaway_source_sha256": "abc",
@@ -85,7 +91,8 @@ def test_build_report_counts_statuses_and_outputs() -> None:
     assert report["batch_title"] == "report batch"
     assert report["counts_by_status"] == {"failed": 1, "succeeded": 2}
     assert report["counts_by_expected_output"] == {"local_note": 1, "zotero_note_candidate": 2}
-    assert report["items"][0]["write_status"] == "prepared_not_written"
+    assert report["items"][0]["write_status"] == "written"
+    assert report["items"][0]["zotero_note_key"] == "NOTE1"
     assert report["items"][1]["write_status"] == "not_applicable"
     assert report["items"][2]["write_status"] == "failed"
 
@@ -99,6 +106,7 @@ def test_markdown_report_is_deterministic_and_uses_existing_takeaways() -> None:
     assert "单篇 note 中的结论。" in markdown
     assert "PDF note 中的结论。" in markdown
     assert "duplicate Zotero title" in markdown
-    assert "prepared_not_written" in markdown
+    assert "written" in markdown
+    assert "NOTE1" in markdown
     assert "local-only path" in markdown
     assert "重新总结" not in markdown

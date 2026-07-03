@@ -4,8 +4,11 @@ from pathlib import Path
 import pytest
 
 from paperread_batch.manifest import (
+    DEFAULT_WRITE_POLICY,
     MANIFEST_SCHEMA_VERSION,
+    PREPARE_ONLY_WRITE_POLICY,
     ManifestError,
+    ZOTERO_WRITE_POLICY,
     build_manifest,
     manifest_from_pdf_folder,
     manifest_from_pdf_paths_file,
@@ -23,7 +26,7 @@ def test_validate_manifest_accepts_mixed_v1_items(tmp_path: Path) -> None:
         "created_at": "2026-07-02T10:00:00+08:00",
         "batch_title": "mixed batch",
         "default_concurrency": 3,
-        "write_policy": "prepare_only",
+        "write_policy": ZOTERO_WRITE_POLICY,
         "source_summary": {"source_type": "mixed", "description": "test"},
         "items": [
             {
@@ -50,7 +53,67 @@ def test_validate_manifest_accepts_mixed_v1_items(tmp_path: Path) -> None:
     normalized = validate_manifest(manifest)
 
     assert normalized["schema_version"] == MANIFEST_SCHEMA_VERSION
+    assert normalized["write_policy"] == ZOTERO_WRITE_POLICY
     assert normalized["items"][2]["input"]["path"] == str(pdf.resolve())
+
+
+def test_build_manifest_defaults_to_zotero_write_policy() -> None:
+    manifest = build_manifest(
+        batch_title="default write",
+        source_summary={"source_type": "manual", "description": "test"},
+        items=[
+            {
+                "item_id": "001",
+                "input_type": "zotero_title",
+                "input": {"title": "one"},
+                "expected_output": "zotero_note_candidate",
+            }
+        ],
+    )
+
+    normalized = validate_manifest(manifest)
+
+    assert DEFAULT_WRITE_POLICY == ZOTERO_WRITE_POLICY
+    assert normalized["write_policy"] == ZOTERO_WRITE_POLICY
+
+
+def test_build_manifest_accepts_prepare_only_override() -> None:
+    manifest = build_manifest(
+        batch_title="dry run",
+        source_summary={"source_type": "manual", "description": "test"},
+        items=[
+            {
+                "item_id": "001",
+                "input_type": "zotero_title",
+                "input": {"title": "one"},
+                "expected_output": "zotero_note_candidate",
+            }
+        ],
+        write_policy=PREPARE_ONLY_WRITE_POLICY,
+    )
+
+    normalized = validate_manifest(manifest)
+
+    assert normalized["write_policy"] == PREPARE_ONLY_WRITE_POLICY
+
+
+def test_validate_manifest_rejects_unknown_write_policy() -> None:
+    manifest = build_manifest(
+        batch_title="bad policy",
+        source_summary={"source_type": "manual", "description": "test"},
+        items=[
+            {
+                "item_id": "001",
+                "input_type": "zotero_title",
+                "input": {"title": "one"},
+                "expected_output": "zotero_note_candidate",
+            }
+        ],
+    )
+    manifest["write_policy"] = "unsafe_auto_update"
+
+    with pytest.raises(ManifestError, match="write_policy"):
+        validate_manifest(manifest)
 
 
 def test_validate_manifest_rejects_duplicate_item_ids() -> None:
@@ -161,8 +224,22 @@ def test_manifest_from_zotero_titles_file_uses_title_items(tmp_path: Path) -> No
     manifest = manifest_from_zotero_titles_file(titles, batch_title="titles batch")
 
     assert [item["item_id"] for item in manifest["items"]] == ["001", "002"]
+    assert manifest["write_policy"] == ZOTERO_WRITE_POLICY
     assert [item["input"]["title"] for item in manifest["items"]] == ["First paper", "Second paper"]
     assert all(item["input_type"] == "zotero_title" for item in manifest["items"])
+
+
+def test_manifest_from_zotero_titles_file_accepts_prepare_only_override(tmp_path: Path) -> None:
+    titles = tmp_path / "titles.txt"
+    titles.write_text("First paper\n", encoding="utf-8")
+
+    manifest = manifest_from_zotero_titles_file(
+        titles,
+        batch_title="titles batch",
+        write_policy=PREPARE_ONLY_WRITE_POLICY,
+    )
+
+    assert manifest["write_policy"] == PREPARE_ONLY_WRITE_POLICY
 
 
 def test_manifest_from_zotero_collection_inventory_uses_zotero_items(tmp_path: Path) -> None:

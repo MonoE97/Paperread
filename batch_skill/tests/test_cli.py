@@ -28,13 +28,29 @@ def _fake_paperread_root(tmp_path: Path, *, include_pyproject: bool = True) -> P
     return root
 
 
-def _successful_result(tmp_path: Path, item_id: str = "001") -> Path:
+def _successful_result(tmp_path: Path, item_id: str = "001", *, write_ready: bool = False) -> Path:
     run_dir = tmp_path / f"paperread-run-{item_id}"
     run_dir.mkdir()
     (run_dir / "summary.json").write_text(json.dumps({"tldr": "结论"}), encoding="utf-8")
     (run_dir / "note.md").write_text("| 30 秒结论 | 结论 |\n", encoding="utf-8")
     (run_dir / "note.html").write_text("<h1>note</h1>", encoding="utf-8")
-    (run_dir / "gate-report.json").write_text(json.dumps({"status": "blocked"}), encoding="utf-8")
+    gate_status = "write_ready" if write_ready else "blocked"
+    (run_dir / "gate-report.json").write_text(json.dumps({"status": gate_status}), encoding="utf-8")
+    write_payload = ""
+    if write_ready:
+        write_payload = str(run_dir / "write-payload.json")
+        (run_dir / "write-payload.json").write_text(
+            json.dumps(
+                {
+                    "action": "create",
+                    "parentKey": "PARENT1",
+                    "note_html_path": str(run_dir / "note.html"),
+                    "contentSha256": "b" * 64,
+                    "tags": ["paperread/summary"],
+                }
+            ),
+            encoding="utf-8",
+        )
     result = tmp_path / "items" / f"{item_id}.json"
     result.parent.mkdir(exist_ok=True)
     result.write_text(
@@ -50,7 +66,7 @@ def _successful_result(tmp_path: Path, item_id: str = "001") -> Path:
                 "note_md": str(run_dir / "note.md"),
                 "note_html": str(run_dir / "note.html"),
                 "gate_report": str(run_dir / "gate-report.json"),
-                "write_payload": "",
+                "write_payload": write_payload,
                 "local_note_path": "",
                 "local_gate_report": "",
                 "thirty_second_takeaway": "结论",
@@ -91,6 +107,7 @@ def test_batch_run_init_validate_next_record_report_retry(tmp_path: Path, monkey
         ["manifest", "from-zotero-titles", str(titles), "--batch-title", "cli batch", "--output", str(manifest_path)],
     )
     assert result.exit_code == 0, result.output
+    assert _read_json(manifest_path)["write_policy"] == "zotero_write"
 
     result = runner.invoke(app, ["init", "--manifest", str(manifest_path), "--output", str(batch_run)])
     assert result.exit_code == 0, result.output
@@ -144,6 +161,112 @@ def test_batch_run_init_validate_next_record_report_retry(tmp_path: Path, monkey
     assert result.exit_code == 0, result.output
     state = _read_json(batch_run / "state.json")
     assert state["items"][1]["status"] == "pending"
+
+
+def test_manifest_from_zotero_titles_command_accepts_prepare_only_override(tmp_path: Path) -> None:
+    titles = tmp_path / "titles.txt"
+    titles.write_text("First paper\n", encoding="utf-8")
+    output = tmp_path / "manifest.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "manifest",
+            "from-zotero-titles",
+            str(titles),
+            "--batch-title",
+            "dry batch",
+            "--write-policy",
+            "prepare_only",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _read_json(output)["write_policy"] == "prepare_only"
+
+
+def test_next_write_and_record_write_commands(tmp_path: Path) -> None:
+    titles = tmp_path / "titles.txt"
+    titles.write_text("First paper\n", encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    batch_run = tmp_path / "batch-run"
+
+    result = runner.invoke(
+        app,
+        ["manifest", "from-zotero-titles", str(titles), "--batch-title", "write batch", "--output", str(manifest_path)],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["init", "--manifest", str(manifest_path), "--output", str(batch_run)])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["next", str(batch_run), "--limit", "1", "--now", "2026-07-02T10:01:00+08:00"])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(
+        app,
+        [
+            "record-result",
+            str(batch_run),
+            "001",
+            "--result",
+            str(_successful_result(tmp_path, write_ready=True)),
+            "--now",
+            "2026-07-02T10:02:00+08:00",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    result = runner.invoke(app, ["next-write", str(batch_run), "--limit", "1"])
+    assert result.exit_code == 0, result.output
+    pending = json.loads(result.output)
+    assert pending[0]["item_id"] == "001"
+    assert pending[0]["parentKey"] == "PARENT1"
+    assert pending[0]["contentSha256"] == "b" * 64
+
+    verify_report = tmp_path / "verify-report.json"
+    verify_report.write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "noteKey": "NOTE1",
+                "parentKey": "PARENT1",
+                "contentSha256": "b" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+    write_result = tmp_path / "write-result.json"
+    write_result.write_text(
+        json.dumps(
+            {
+                "schema_version": "paperread-batch.write-result.v1",
+                "item_id": "001",
+                "status": "written",
+                "note_key": "NOTE1",
+                "parent_key": "PARENT1",
+                "contentSha256": "b" * 64,
+                "verify_report": str(verify_report),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "record-write",
+            str(batch_run),
+            "001",
+            "--result",
+            str(write_result),
+            "--now",
+            "2026-07-02T10:03:00+08:00",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    state = _read_json(batch_run / "state.json")
+    assert state["items"][0]["write_status"] == "written"
+    assert state["items"][0]["zotero_note_key"] == "NOTE1"
 
 
 def test_init_without_output_allocates_default_run_dir(tmp_path: Path, monkeypatch) -> None:
