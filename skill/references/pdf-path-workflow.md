@@ -1,6 +1,6 @@
 # PDF Path Workflow
 
-Use this when the user provides a local PDF path.
+Use this when the user provides a local PDF path. Local PDF path and directory path inputs skip Zotero lookup and duplicate checks, including same-title or same-DOI checks. Existing local paths are not Zotero title fragments.
 
 ## Setup
 
@@ -20,7 +20,9 @@ If `uv sync --locked` cannot find Python `>=3.13`, run `uv python install 3.13` 
 
 ## Network Boundary
 
-The local PDF path workflow does not require Zotero. Figure extraction may still try an arXiv source download when an arXiv ID is detected in metadata or the PDF filename. The download uses a bounded network timeout and degrades to PDF-only extraction if arXiv source is unavailable.
+The local PDF path workflow does not require Zotero and does not inspect whether Zotero already contains a matching title, DOI, or attachment. Figure extraction may still try an arXiv source download when an arXiv ID is detected in metadata or the PDF filename. The download uses a bounded network timeout and degrades to PDF-only extraction if arXiv source is unavailable.
+
+If the user provides an existing local directory path instead of one PDF, delegate to `$paperread-batch` and its local PDF folder workflow. Do not reinterpret the directory name as a Zotero title fragment.
 
 ## Steps
 
@@ -56,6 +58,7 @@ This writes `note.md`, `note.html`, previews, `note-tags.json`, `local-gate-repo
 ## Hard Boundaries
 
 - The PDF path workflow must not write Zotero.
+- The PDF path workflow must not search Zotero or run duplicate checks.
 - The PDF path workflow must not call refresh-live-notes.
 - The PDF path workflow must not create write-payload.json.
 - The PDF path workflow must not treat `section_context.md` as a canonical evidence source.

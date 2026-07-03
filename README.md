@@ -103,7 +103,8 @@ The plugin includes the MCP server; no separate Zotero MCP server process is req
 Use `paperread` for one paper at a time.
 
 - Zotero title or title fragment: ask the agent to use `$paperread` with the paper title. The agent searches Zotero through Zotero MCP, prepares evidence artifacts, renders `note.md` and `note.html`, previews the candidate, writes only through MCP `write_note` after explicit write intent, and verifies the created note.
-- Local PDF path: give an absolute or relative `.pdf` path. The skill writes `<pdf_stem>_analysis/` and `<pdf_stem>_note.md` beside the PDF and never writes Zotero.
+- Local PDF path: give an absolute or relative `.pdf` path. The skill writes `<pdf_stem>_analysis/` and `<pdf_stem>_note.md` beside the PDF, never searches Zotero for matching items, and never writes Zotero.
+- Local directory path: use `paperread-batch` with the local PDF folder workflow. Existing local paths are not Zotero title fragments.
 
 Useful installed-skill commands:
 
@@ -127,18 +128,20 @@ uv run paperread-batch record-write <batch_run_dir> <item_id> --result write-res
 uv run paperread-batch report <batch_run_dir>
 ```
 
-For Zotero-backed items, the default write policy is `zotero_write`. Pass `--write-policy prepare_only` to manifest builders for dry-run. PDF batch items remain local-output only.
+For Zotero-backed items, the default write policy is `zotero_write`. Pass `--write-policy prepare_only` to manifest builders for dry-run. PDF batch items remain local-output only and skip Zotero lookup or duplicate checks.
 
 ## Workflows
 
 Paperread supports two inputs:
 
 - **Zotero title or title fragment**: use Zotero MCP to locate the paper, prepare deterministic evidence artifacts, render `note.md` and `note.html`, and create a new Zotero child note only after explicit write intent.
-- **Local PDF path**: run the same extraction, summary, review, lint, and render gates on a local PDF, then write local outputs beside the PDF without writing Zotero.
+- **Local PDF path**: run the same extraction, summary, review, lint, and render gates on a local PDF, then write local outputs beside the PDF without writing Zotero or checking whether Zotero already has the same paper.
+
+Local PDF path and directory path inputs skip Zotero lookup and duplicate checks. Existing local paths are not Zotero title fragments; directory paths belong to `paperread-batch manifest from-pdf-folder`, which is non-recursive unless `--recursive` is explicit.
 
 Both workflows use full-PDF extraction by default. Final `evidence_summary` locators must use one of these canonical forms: `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, and secondary context paths are invalid. `section_context.md` is only a navigation aid. Secondary web context captured through `scripts/capture-secondary-url.mjs` is cross-check material only and must not cite secondary context in `evidence_summary`.
 
-Paperread Batch supports four batch inputs: Zotero collection inventories, multiple Zotero titles, local PDF folders, and multiple PDF paths. It normalizes them into a manifest, dispatches each item to `$paperread`, and uses `zotero_write` by default for Zotero-backed items: prepared candidates are listed with `next-write`, written by the outer agent through Zotero MCP, verified read-only, then recorded with `record-write`. Pass `--write-policy prepare_only` for dry-run. Default Codex concurrency is 3. The per-paper 30-second result is extracted from each single-paper note's `30 秒结论` row; batch does not summarize papers again. Claude-compatible fallback is sequential.
+Paperread Batch supports four batch inputs: Zotero collection inventories, multiple Zotero titles, local PDF folders, and multiple PDF paths. It normalizes them into a manifest, dispatches each item to `$paperread`, and uses `zotero_write` by default for Zotero-backed items: prepared candidates are listed with `next-write`, written by the outer agent through Zotero MCP, verified read-only, then recorded with `record-write`. PDF folder/path items are `pdf_path` items with `expected_output=local_note`; they do not run Zotero lookup, duplicate checks, `next-write`, or write-through. Pass `--write-policy prepare_only` for dry-run. Default Codex concurrency is 3. The per-paper 30-second result is extracted from each single-paper note's `30 秒结论` row; batch does not summarize papers again. Claude-compatible fallback is sequential.
 
 ## Output Locations
 
@@ -149,7 +152,7 @@ Paperread Batch supports four batch inputs: Zotero collection inventories, multi
 ## Runtime Requirements
 
 - Install and run CLI: `uv` plus Python `>=3.13` available to `uv`; use `uv python install 3.13` if no compatible interpreter is present.
-- Local PDF workflow: no Zotero requirement. Figure extraction may try an arXiv source download when an arXiv ID is detected in metadata or the PDF filename; this request uses a bounded network timeout and falls back to PDF-only extraction on failure.
+- Local PDF workflow: no Zotero requirement and no Zotero duplicate check. Figure extraction may try an arXiv source download when an arXiv ID is detected in metadata or the PDF filename; this request uses a bounded network timeout and falls back to PDF-only extraction on failure.
 - Zotero title workflow: Zotero Desktop plus Zotero MCP tools or the local MCP endpoint.
 - Secondary web context capture: Node.js and a reachable CDP helper when this optional path is used.
 - Batch workflow: installed `paperread` plus installed `paperread-batch`; batch validation checks the configured `paperread` root before dispatch.
@@ -184,6 +187,6 @@ Maintainers should also validate a copied directory outside the repository befor
 - Preview and pass the single-paper write gate before every Zotero write; use `--write-policy prepare_only` for dry-run batch runs.
 - Zotero writes are allowed only through Zotero MCP `write_note` and only after explicit user intent.
 - Zotero local API and SQLite are read-only.
-- Local PDF path workflow is local-output only; it must not write Zotero, call `refresh-live-notes`, or create `write-payload.json`.
+- Local PDF path workflow is local-output only; it must not search Zotero, run duplicate checks, write Zotero, call `refresh-live-notes`, or create `write-payload.json`.
 - Zotero-backed batch workflow default is `zotero_write`: the batch CLI emits pending writes and records verification, while the outer agent calls Zotero MCP `write_note`. PDF batch items remain local-only. Pass `--write-policy prepare_only` for dry-run.
 - Rendered note prose should be Chinese-first while preserving paper titles, names, formulas, method names, units, evidence locators, and tag keys.

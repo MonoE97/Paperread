@@ -23,6 +23,12 @@ Supported input sources:
 - Local PDF folder, scanned non-recursively by default into `pdf_path`.
 - Multiple local PDF paths, stored as `pdf_path`.
 
+PDF folder and PDF path items are local-only: do not run Zotero lookup,
+duplicate checks, next-write, or Zotero write-through for them. The manifest
+must keep them as `input_type=pdf_path` with `expected_output=local_note`.
+This applies even when Zotero contains an item with the same title, DOI, or
+attachment.
+
 For Zotero collection input, the collection argument must match the read-only
 inventory's `collection.key` or `collection.name`. A mismatch stops before
 manifest creation.
@@ -101,7 +107,7 @@ Batch CLI code must not call Zotero MCP `write_note`; it only schedules,
 records, and reports. The outer agent performs Zotero writes through MCP from
 `next-write`, then records the read-only verification with `record-write`.
 Pass manifest builders `--write-policy prepare_only` for an explicit dry-run.
-PDF items remain local-output only.
+PDF items remain local-output only and are excluded from `next-write`.
 
 ## Reporting
 

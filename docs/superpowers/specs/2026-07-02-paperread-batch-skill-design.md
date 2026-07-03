@@ -192,10 +192,17 @@ downloads, or unrelated papers.
 The manifest stores absolute PDF paths to make resume independent of the
 current shell directory.
 
+Local PDF folder inputs remain local-only. They must not trigger Zotero lookup,
+same-title/same-DOI duplicate checks, `next-write`, or Zotero write-through,
+even if Zotero contains a matching paper.
+
 ### Multiple PDF Paths
 
 The user provides several file paths. The manifest stores each as an absolute
 path after validating existence and `.pdf` suffix.
+
+Local PDF path inputs follow the same local-only rule as PDF folder inputs:
+they are not Zotero title fragments and do not inspect Zotero for duplicates.
 
 ## Manifest
 
@@ -726,7 +733,8 @@ Potential later work:
 - Priority scheduling.
 - Per-source concurrency limits.
 - Recursive PDF folder scanning with ignore rules.
-- Better duplicate grouping across Zotero and local PDFs.
+- Better duplicate grouping among explicitly Zotero-backed inputs. Local PDF
+  path/folder inputs must remain local-only and skip Zotero duplicate checks.
 - HTML report.
 - Export package containing the batch report plus selected single-paper notes.
 

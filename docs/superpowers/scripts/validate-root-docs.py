@@ -84,6 +84,8 @@ def validate() -> list[str]:
         "Zotero local API",
         "SQLite",
         "local-output only",
+        "Local PDF path and directory path inputs skip Zotero lookup and duplicate checks",
+        "Existing local paths are not Zotero title fragments",
     ]:
         require(english, phrase, "README.md", errors)
 
@@ -92,6 +94,8 @@ def validate() -> list[str]:
         "Zotero local API",
         "SQLite",
         "只能输出本地文件",
+        "本地 PDF path 和目录 path 输入会跳过 Zotero 搜索和去重检查",
+        "已存在的本地路径不是 Zotero 标题片段",
     ]:
         require(chinese, phrase, "README.zh-CN.md", errors)
 
@@ -107,6 +111,7 @@ def validate() -> list[str]:
         "batch_skill/tests/",
         "batch_skill/references/",
         "python docs/superpowers/scripts/validate-root-docs.py",
+        "本地 `.pdf` path 和本地目录 path 优先于 Zotero title routing",
     ]:
         require(agents, phrase, "AGENTS.md", errors)
 
@@ -121,6 +126,8 @@ def validate() -> list[str]:
         "references/zotero-workflow.md",
         "https://github.com/cookjohn/zotero-mcp#readme",
         "Zotero MCP `write_note`",
+        "Local PDF path and directory path inputs skip Zotero lookup and duplicate checks",
+        "Existing local paths are not Zotero title fragments",
     ]:
         require(skill, phrase, "skill/SKILL.md", errors)
 
@@ -137,6 +144,8 @@ def validate() -> list[str]:
         "prepare_only",
         "30 秒结论",
         "write_note",
+        "PDF folder and PDF path items are local-only",
+        "do not run Zotero lookup, duplicate checks, next-write, or Zotero write-through",
     ]:
         require(batch_skill, phrase, "batch_skill/SKILL.md", errors)
 

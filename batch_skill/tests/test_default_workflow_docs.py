@@ -38,6 +38,8 @@ def test_batch_skill_docs_preserve_scheduler_boundary() -> None:
         "zotero_item",
         "zotero_title",
         "pdf_path",
+        "PDF folder and PDF path items are local-only",
+        "do not run Zotero lookup, duplicate checks, next-write, or Zotero write-through",
         "runs/YYYY-MM-DD/<batch-slug>/",
         "collection.key",
         "worker_id",

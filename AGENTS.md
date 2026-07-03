@@ -35,6 +35,7 @@ Do not add `README.md`, `INSTALLATION_GUIDE.md`, `QUICK_REFERENCE.md`, or `CHANG
 - Batch workflow 使用 `paperread-batch init/next/record-result/next-write/record-write/report`，默认把 batch 产物写到安装后的 batch skill root 下：`runs/YYYY-MM-DD/<batch-slug>/`；同目录包含 `manifest.json`、`state.json`、`items/*.json`、`items/*.write.json`、`batch-report.json` 和 `batch-report.md`。单篇产物仍由 `paperread` 生成并拥有，batch 只记录索引、local-only path、Zotero note key 和 verify report path。
 - `prepare-item` 默认生成 `context.md`，并在结构化抽取可用时生成 `section_context.md`；`section_context.md` 只用于帮助 Codex 定位章节、表格候选和值候选。
 - PDF path workflow 使用 `prepare-pdf <pdf_path>`，首次在 PDF 同目录生成 `<pdf_stem>_analysis/` 和 `<pdf_stem>_note.md`，重复运行使用 `<pdf_stem>_analysis_v2/`、`<pdf_stem>_note_v2.md` 等后缀，不覆盖旧输出。
+- 本地 `.pdf` path 和本地目录 path 优先于 Zotero title routing；只要输入能解析成已存在的本地 PDF 或目录，就直接走 local PDF / batch local PDF folder workflow，不搜索 Zotero、不做同名/同 DOI 去重检查，也不因 Zotero 中已有相同文献而阻塞分析。目录 path 交给 `paperread-batch manifest from-pdf-folder`，默认非递归，只有用户显式要求才传 `--recursive`。
 - `section_context.md` is not a canonical evidence source；最终 `evidence_summary` locator 必须使用 canonical 格式：`context.md page <N>`、`context.md page <N> section <Section Name>`、`context.md page <N> section <Section Name> table_candidate <N>` 或 `figure_context.md <figure_id>`。裸 `context.md` / `figure_context.md`、`page 3 method section` 这类散文式 locator、`section_context.md` 和 secondary context 路径都不是 write-ready evidence locator。
 - 用户提供微信公众号、新闻稿、博客等网页时，只作为 secondary context capture，用于 cross-check 和补充背景；`evidence_summary` 只能引用 `context.md` 和 `figure_context.md`。Secondary context must not cite secondary context in `evidence_summary`.
 
@@ -58,8 +59,8 @@ Do not add `README.md`, `INSTALLATION_GUIDE.md`, `QUICK_REFERENCE.md`, or `CHANG
 
 ## Skill 使用方式
 
-- Use `paperread`: 单篇论文阅读。Zotero 标题/标题片段走 Zotero MCP workflow；本地 `.pdf` path 走 local PDF workflow。单篇 skill 负责 extraction、summary/review、note rendering、write gate 和 read-only verification。
-- Use `paperread-batch`: 多篇论文调度。batch skill 负责 manifest/state/report、`next`/`record-result`、`next-write`/`record-write`；每篇仍派发给 `$paperread`，PDF batch items 保持 local-output only。
+- Use `paperread`: 单篇论文阅读。Zotero 标题/标题片段走 Zotero MCP workflow；本地 `.pdf` path 走 local PDF workflow；本地目录 path 转交 `paperread-batch`，不要当成 Zotero 标题片段。单篇 skill 负责 extraction、summary/review、note rendering、write gate 和 read-only verification。
+- Use `paperread-batch`: 多篇论文调度。batch skill 负责 manifest/state/report、`next`/`record-result`、`next-write`/`record-write`；每篇仍派发给 `$paperread`，PDF folder/path items 保持 local-output only 且不做 Zotero lookup / duplicate check。
 
 ## Git 与发布
 
@@ -114,7 +115,7 @@ V2 发布前必须把 `skill/` 和 `batch_skill/` 分别复制到仓库外临时
 
 - 写入前默认先 preview 并通过 gate；dry-run 作为显式策略或显式用户要求处理。
 - Batch workflow 对 Zotero-backed items 默认 `write_policy=zotero_write`；batch CLI 只负责调度、状态和报告，禁止直接调用 Zotero MCP `write_note`。外层 agent 必须用 `next-write` 串行取出待写项，按 `write-payload.json` 和 `note.html` 调 Zotero MCP `write_note`，用只读 `verify-zotero-note` 校验后再 `record-write`。需要 dry-run 时显式传 `--write-policy prepare_only`。PDF batch items 保持 local-output only。每篇 30 秒结果必须从单篇 note 的 `30 秒结论` 行提取，fallback 才使用 `tldr` / `one_sentence_summary`，不能由 batch 重新总结。
-- PDF path workflow 是 local-output only；禁止调用 `refresh-live-notes`，禁止生成 `write-payload.json`，禁止写 Zotero。PDF 本地笔记必须通过 `validate-summary-json -> apply-review -> lint-summary -> validate-trusted-summary -> prepare-local-note-candidate`，最终 Markdown 写到 PDF 同目录的 `<pdf_stem>_note.md` 或版本后缀路径。
+- PDF path workflow 是 local-output only；禁止搜索 Zotero、禁止做 Zotero duplicate check、禁止调用 `refresh-live-notes`，禁止生成 `write-payload.json`，禁止写 Zotero。PDF 本地笔记必须通过 `validate-summary-json -> apply-review -> lint-summary -> validate-trusted-summary -> prepare-local-note-candidate`，最终 Markdown 写到 PDF 同目录的 `<pdf_stem>_note.md` 或版本后缀路径。
 - Zotero exact 搜索出现多个 normalized title 相同的条目时，停止分析和写入，要求用户先在 Zotero 去重；不要替用户选择父条目。
 - MCP 原始 `get_item_details` 响应必须先落盘，再用 `save-item-details` 生成规范化的 `item-details.json`，后续本地命令只读规范化文件。
 - 当 MCP 响应缺少 `extra` 时，`save-item-details` 可用只读 Zotero SQLite fallback 补齐 `Extra` / `其他`；成功补齐只记录 `_paperread.enrichment.extra.diagnostics`，不写入 `_paperread.warnings`；缺失、不可读或找不到条目才保留 warning。

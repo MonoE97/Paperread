@@ -190,7 +190,13 @@ def test_manifest_from_pdf_folder_is_non_recursive_and_absolute(tmp_path: Path) 
     assert [item["item_id"] for item in manifest["items"]] == ["001", "002", "003"]
     assert {Path(item["input"]["path"]).name for item in manifest["items"]} == {"Upper.PDF", "a.pdf", "b.pdf"}
     assert all(Path(item["input"]["path"]).is_absolute() for item in manifest["items"])
-    assert all(item["expected_output"] == "local_note" for item in manifest["items"])
+    for item in manifest["items"]:
+        assert item["input_type"] == "pdf_path"
+        assert item["expected_output"] == "local_note"
+        assert set(item["input"]) == {"path"}
+        for forbidden_key in ["item_key", "parent_key", "note_key", "zotero_parent_key", "zotero_note_key"]:
+            assert forbidden_key not in item
+            assert forbidden_key not in item["input"]
 
 
 def test_manifest_from_pdf_paths_file_makes_absolute_paths(tmp_path: Path) -> None:

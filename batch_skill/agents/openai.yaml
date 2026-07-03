@@ -1,6 +1,6 @@
 interface:
   display_name: "Paperread Batch"
-  short_description: "Parallel paperread orchestration with verified Zotero writes"
-  default_prompt: "Use $paperread-batch to orchestrate multiple $paperread paper analyses, write Zotero-backed notes by default, verify them, and produce a batch report."
+  short_description: "Parallel paperread orchestration with local PDF handling"
+  default_prompt: "Use $paperread-batch to orchestrate multiple $paperread paper analyses, keep PDF folder/path items local-only without Zotero lookup, write only Zotero-backed notes by default, verify them, and produce a batch report."
 policy:
   allow_implicit_invocation: true
