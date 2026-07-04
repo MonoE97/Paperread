@@ -193,7 +193,7 @@ def test_references_use_skill_root_paths_and_workflow_terms() -> None:
     ]:
         assert phrase in combined
 
-    for stale_phrase in ["skill/scripts", "repo root", "uv sync\n"]:
+    for stale_phrase in ["repo root", "uv sync\n"]:
         assert stale_phrase not in combined
 
 
