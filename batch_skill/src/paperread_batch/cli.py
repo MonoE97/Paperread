@@ -33,6 +33,7 @@ from paperread_batch.state import (
     record_item_result,
     record_write_result,
     retry_failed,
+    set_resume_decision,
 )
 from paperread_batch.worker_contract import render_worker_prompt
 
@@ -178,6 +179,12 @@ def _item_result_path(items_dir: Path, item_id: str) -> Path:
     return target
 
 
+def _attempt_item_result_path(items_dir: Path, item_id: str, attempt_count: int) -> Path:
+    if attempt_count < 1:
+        raise StateError("attempt_count must be positive for result archive")
+    return _item_result_path(items_dir, f"{item_id}.attempt-{attempt_count}")
+
+
 def _write_result_path(items_dir: Path, item_id: str) -> Path:
     return _item_result_path(items_dir, f"{item_id}.write")
 
@@ -215,7 +222,19 @@ def _record_archived_item_results(state: dict, manifest: dict, run_dir: Path, *,
         if not result_path.exists():
             continue
         result_payload = _read_archived_item_result(result_path, item_id)
-        updated = record_item_result(updated, manifest, item_id, result_payload, now=now)
+        try:
+            updated = record_item_result(updated, manifest, item_id, result_payload, now=now)
+        except StateError as exc:
+            message = str(exc)
+            stale_markers = (
+                "worker_id does not match current item assignment",
+                "attempt_count does not match current item assignment",
+                "item is not currently assigned",
+            )
+            if any(marker in message for marker in stale_markers):
+                updated = set_resume_decision(updated, item_id, f"archived_result_ignored: {message}")
+                continue
+            raise
     return updated
 
 
@@ -417,6 +436,8 @@ def record_result_command(
             _exit_error(f"record_result_failed: {exc}")
         items_dir = run_dir / "items"
         items_dir.mkdir(exist_ok=True)
+        attempt_count = int(result_payload.get("attempt_count", 0))
+        write_json_atomic(_attempt_item_result_path(items_dir, item_id, attempt_count), result_payload)
         write_json_atomic(_item_result_path(items_dir, item_id), result_payload)
         write_json_atomic(run_dir / "state.json", updated)
     console.print(f"recorded_result: {item_id}")

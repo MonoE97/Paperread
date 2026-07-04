@@ -146,6 +146,7 @@ def test_batch_run_init_validate_next_record_report_retry(tmp_path: Path, monkey
     )
     assert result.exit_code == 0, result.output
     assert (batch_run / "items" / "001.json").exists()
+    assert (batch_run / "items" / "001.attempt-1.json").exists()
 
     result = runner.invoke(app, ["report", str(batch_run), "--reported-at", "2026-07-02T10:03:00+08:00"])
     assert result.exit_code == 0, result.output
@@ -480,6 +481,43 @@ def test_resume_records_existing_item_results_before_interrupting_remaining_runn
     assert state["items"][0]["status"] == "succeeded"
     assert state["items"][0]["thirty_second_takeaway"] == "结论"
     assert state["items"][1]["status"] == "interrupted"
+
+
+def test_resume_ignores_stale_archived_result_and_marks_item_interrupted(tmp_path: Path) -> None:
+    titles = tmp_path / "titles.txt"
+    titles.write_text("First paper\n", encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    batch_run = tmp_path / "batch-run"
+    result = runner.invoke(
+        app,
+        ["manifest", "from-zotero-titles", str(titles), "--batch-title", "resume batch", "--output", str(manifest_path)],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["init", "--manifest", str(manifest_path), "--output", str(batch_run)])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["next", str(batch_run), "--limit", "1", "--now", "2026-07-03T10:00:00+08:00"])
+    assert result.exit_code == 0, result.output
+    state = _read_json(batch_run / "state.json")
+    state["items"][0]["attempt_count"] = 2
+    (batch_run / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    items_dir = batch_run / "items"
+    items_dir.mkdir(exist_ok=True)
+    stale = {
+        "schema_version": "paperread-batch.item-result.v1",
+        "item_id": "001",
+        "worker_id": "worker-001",
+        "attempt_count": 1,
+        "status": "failed",
+        "failure_reason": "late attempt",
+    }
+    (items_dir / "001.json").write_text(json.dumps(stale), encoding="utf-8")
+
+    result = runner.invoke(app, ["resume", str(batch_run)])
+
+    assert result.exit_code == 0, result.output
+    state = _read_json(batch_run / "state.json")
+    assert state["items"][0]["status"] == "interrupted"
+    assert state["items"][0]["resume_decision"].startswith("archived_result_ignored")
 
 
 def test_zotero_collection_command_rejects_mismatched_inventory(tmp_path: Path) -> None:

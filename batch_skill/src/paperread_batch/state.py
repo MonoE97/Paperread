@@ -412,8 +412,16 @@ def mark_interrupted_running_items(state: dict[str, Any]) -> dict[str, Any]:
     for item in updated["items"]:
         if item["status"] == RUNNING:
             item["status"] = INTERRUPTED
-            item["resume_decision"] = "marked_interrupted_on_resume"
+            if not item.get("resume_decision"):
+                item["resume_decision"] = "marked_interrupted_on_resume"
     _refresh_batch_status(updated)
+    return updated
+
+
+def set_resume_decision(state: dict[str, Any], item_id: str, decision: str) -> dict[str, Any]:
+    updated = copy.deepcopy(state)
+    item = _find_item(updated["items"], item_id)
+    item["resume_decision"] = _require_text(decision, "resume_decision")
     return updated
 
 

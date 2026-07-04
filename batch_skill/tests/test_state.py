@@ -16,6 +16,7 @@ from paperread_batch.state import (
     record_item_result,
     record_write_result,
     retry_failed,
+    set_resume_decision,
 )
 
 
@@ -397,6 +398,16 @@ def test_running_items_become_interrupted_on_resume() -> None:
     resumed = mark_interrupted_running_items(state)
 
     assert [item["status"] for item in resumed["items"]] == ["interrupted", "interrupted"]
+
+
+def test_set_resume_decision_records_reason_without_mutating_original() -> None:
+    manifest = _zotero_manifest()
+    state = initial_state(manifest)
+
+    updated = set_resume_decision(state, "001", "archived_result_ignored: stale attempt")
+
+    assert state["items"][0]["resume_decision"] == ""
+    assert updated["items"][0]["resume_decision"] == "archived_result_ignored: stale attempt"
 
 
 def test_retry_failed_resets_failed_and_interrupted_items() -> None:
