@@ -111,6 +111,7 @@ Zotero-backed workflow 需要先安装 Zotero Desktop 和 Zotero MCP plugin，ag
 ```bash
 uv run paper_reader --help
 uv run paper_reader prepare-pdf "/abs/path/to/paper.pdf"
+uv run paper_reader prepare-pdf "/abs/path/to/paper.pdf" --json-output /tmp/prepare-result.json
 ```
 
 ### Use `paper_reader_batch`
@@ -128,6 +129,12 @@ uv run paper_reader_batch record-write <batch_run_dir> <item_id> --result write-
 uv run paper_reader_batch report <batch_run_dir>
 ```
 
+本地 PDF batch 在外层 agent 并行不可用时，可先预抽取：
+
+```bash
+uv run paper_reader_batch prepare-local-pdfs <batch_run_dir> --paper-reader-root /path/to/paper_reader
+```
+
 Zotero-backed items 默认 `write_policy=zotero_write`。需要 dry-run 时，在 manifest builder 中传 `--write-policy prepare_only`。PDF batch items 仍然只输出本地文件，并跳过 Zotero 搜索和去重检查。
 
 ## 工作流
@@ -141,13 +148,13 @@ paper_reader 支持两类输入：
 
 两个工作流默认都会抽取完整 PDF。最终 `evidence_summary` locator 必须使用以下 canonical 格式之一：`context.md page <N>`、`context.md page <N> section <Section Name>`、`context.md page <N> section <Section Name> table_candidate <N>` 或 `figure_context.md <figure_id>`。裸 `context.md` / `figure_context.md`、`page 3 method section` 这类散文式 locator、`section_context.md` 和 secondary context 路径都无效。`section_context.md` 只作为导航辅助。通过 `scripts/capture-secondary-url.mjs` 抓取的 secondary web context 只用于 cross-check，不能在 `evidence_summary` 中作为证据引用。
 
-paper_reader_batch 支持四类批量输入：Zotero collection inventory、多个 Zotero 标题、本地 PDF 文件夹、多个 PDF path。它会归一化为 manifest，把每篇交给 `$paper_reader`，Zotero-backed items 默认使用 `zotero_write`：生成写入候选后通过 `next-write` 串行交给外层 agent 调 Zotero MCP 写入、只读校验，再用 `record-write` 记录结果。PDF folder/path items 是 `pdf_path` items，`expected_output=local_note`；它们不做 Zotero 搜索、去重检查、`next-write` 或 write-through。需要 dry-run 时显式传 `--write-policy prepare_only`。Codex 默认并发数为 3；外层 agent 并行不可用时，可用 `prepare-local-pdfs` 先并发预抽取本地 PDF bundle，再由单个 agent 顺序继续深读。每篇 30 秒结果直接从单篇 note 的 `30 秒结论` 行提取，batch 不再重新总结论文。
+paper_reader_batch 支持四类批量输入：Zotero collection inventory、多个 Zotero 标题、本地 PDF 文件夹、多个 PDF path。它会归一化为 manifest，把每篇交给 `$paper_reader`，Zotero-backed items 默认使用 `zotero_write`：生成写入候选后通过 `next-write` 串行交给外层 agent 调 Zotero MCP 写入、只读校验，再用 `record-write` 记录结果。PDF folder/path items 是 `pdf_path` items，`expected_output=local_note`；它们不做 Zotero 搜索、去重检查、`next-write` 或 write-through。需要 dry-run 时显式传 `--write-policy prepare_only`。Codex 默认并发数为 3；外层 agent 并行不可用时，可用 `prepare-local-pdfs` 先并发预抽取本地 PDF bundle，再由单个 agent 顺序继续深读。fallback 以 `prepare-pdf --json-output` 作为稳定机器通道；只有 bundle 真正 prepared 后，才接受从 `run.json` 恢复的结果。纯本地 PDF batch report 会标记 `effective_write_policy=local_only`，即使 manifest 保留默认 `write_policy=zotero_write`。每篇 30 秒结果直接从单篇 note 的 `30 秒结论` 行提取，batch 不再重新总结论文。
 
 ## 产物位置
 
 - Zotero 标题工作流的本地产物默认写到 `<skill_root>/runs/YYYY-MM-DD/<title-slug>/`。准备写入候选时，会在同一目录生成 `note.md`、`note.html`、`gate-report.json` 和 `write-payload.json`，然后才可能写入 Zotero。
 - 本地 PDF path 工作流的产物默认写在 PDF 同目录：`<pdf_stem>_analysis/` 保存分析产物，`<pdf_stem>_note.md` 是最终 Markdown 笔记。已有输出不会覆盖，会自动使用 `_v2`、`_v3` 等后缀。
-- Batch workflow 的本地产物默认写到 `<paper_reader_batch_root>/runs/YYYY-MM-DD/<batch-slug>/`，包含 `manifest.json`、`state.json`、`items/*.json`、`items/*.write.json`、`batch-report.json` 和 `batch-report.md`。单篇产物仍归 `paper_reader` 所有；batch 只保存索引、local-only path、Zotero note key 和 verify report path。
+- Batch workflow 的本地产物默认写到 `<paper_reader_batch_root>/runs/YYYY-MM-DD/<batch-slug>/`，包含 `manifest.json`、`state.json`、`items/*.json`、`items/*.prepare.json`、`items/*.write.json`、`batch-report.json` 和 `batch-report.md`。单篇产物仍归 `paper_reader` 所有；batch 只保存索引、local-only path、Zotero note key 和 verify report path。
 
 ## 运行要求
 

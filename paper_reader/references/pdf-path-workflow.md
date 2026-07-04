@@ -34,6 +34,16 @@ uv run paper_reader prepare-pdf "/path/to/paper.pdf"
 
 The first run writes `<pdf_stem>_analysis/` and targets `<pdf_stem>_note.md`. Repeated runs use `_v2`, `_v3`, and so on without overwriting old notes or analysis directories.
 
+For automation, prefer the explicit machine-readable output file:
+
+```bash
+uv run paper_reader prepare-pdf "/path/to/paper.pdf" --json-output /tmp/prepare-result.json
+```
+
+The command still prints the same JSON payload to stdout for interactive use,
+but batch orchestration should read `--json-output` so diagnostic stdout cannot
+break result parsing.
+
 2. Read the generated `context.md`, `section_context.md`, and `figure_context.md` if available.
 
 3. Write `summary.json` and `review.json` in the analysis directory. Use `section_context.md` only as navigation. It is not a canonical evidence source. Evidence locators must use canonical forms: `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, and secondary context paths are invalid.

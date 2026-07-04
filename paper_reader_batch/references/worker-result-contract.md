@@ -75,6 +75,14 @@ Local PDF results are local-output only. They must not contain a `write_payload`
 }
 ```
 
+A `prepared` local prepare result means the underlying `$paper_reader
+prepare-pdf` bundle is complete, not merely initialized. When the result is
+recovered from `run.json`, that manifest must have `status: "prepared"` and
+readable `metadata_json`, `extract_json`, `section_context_md`,
+`secondary_sources_json`, plus `context.md` in the analysis directory. Recovery
+may include an optional `warning` field, for example when the machine JSON file
+was missing and `run.json` was used.
+
 ## Verified Zotero Write Result
 
 ```json

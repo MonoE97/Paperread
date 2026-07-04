@@ -32,3 +32,10 @@ Before each MCP `write_note` call, show the target Zotero item title or key plus
 ## Fallback Mode: Local PDF Pre-Extraction
 
 When outer-agent parallelism is unavailable, run `uv run paper_reader_batch prepare-local-pdfs <batch_run> --concurrency <N> --paper-reader-root <paper_reader_root>` to prepare local PDF analysis bundles in parallel. A single agent then runs `next` and `worker-prompt`; prompts for prepared PDF items must continue from `prepared_analysis_dir` and must not run `prepare-pdf` again unless the prepared bundle is missing or unreadable. Re-running `prepare-local-pdfs` only processes pending PDF items; use `retry-failed` before retrying failed or interrupted work.
+
+The fallback calls `$paper_reader prepare-pdf --json-output <temp-json>` and
+reads that file as the stable machine result. Stdout JSON and `run.json`
+recovery are compatibility fallbacks. `run.json` recovery is valid only when the
+manifest says `status=prepared` and the expected analysis artifacts are
+readable; an initialized but incomplete run must stay failed or pending for
+retry.

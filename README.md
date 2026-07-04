@@ -111,6 +111,7 @@ Useful installed-skill commands:
 ```bash
 uv run paper_reader --help
 uv run paper_reader prepare-pdf "/abs/path/to/paper.pdf"
+uv run paper_reader prepare-pdf "/abs/path/to/paper.pdf" --json-output /tmp/prepare-result.json
 ```
 
 ### Use `paper_reader_batch`
@@ -128,6 +129,12 @@ uv run paper_reader_batch record-write <batch_run_dir> <item_id> --result write-
 uv run paper_reader_batch report <batch_run_dir>
 ```
 
+For local PDF batches when outer-agent parallelism is unavailable:
+
+```bash
+uv run paper_reader_batch prepare-local-pdfs <batch_run_dir> --paper-reader-root /path/to/paper_reader
+```
+
 For Zotero-backed items, the default write policy is `zotero_write`. Pass `--write-policy prepare_only` to manifest builders for dry-run. PDF batch items remain local-output only and skip Zotero lookup or duplicate checks.
 
 ## Workflows
@@ -141,13 +148,13 @@ Local PDF path and directory path inputs skip Zotero lookup and duplicate checks
 
 Both workflows use full-PDF extraction by default. Final `evidence_summary` locators must use one of these canonical forms: `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, and secondary context paths are invalid. `section_context.md` is only a navigation aid. Secondary web context captured through `scripts/capture-secondary-url.mjs` is cross-check material only and must not cite secondary context in `evidence_summary`.
 
-paper_reader_batch supports four batch inputs: Zotero collection inventories, multiple Zotero titles, local PDF folders, and multiple PDF paths. It normalizes them into a manifest, dispatches each item to `$paper_reader`, and uses `zotero_write` by default for Zotero-backed items: prepared candidates are listed with `next-write`, written by the outer agent through Zotero MCP, verified read-only, then recorded with `record-write`. PDF folder/path items are `pdf_path` items with `expected_output=local_note`; they do not run Zotero lookup, duplicate checks, `next-write`, or write-through. Pass `--write-policy prepare_only` for dry-run. Default Codex concurrency is 3. When outer-agent parallelism is unavailable, `prepare-local-pdfs` can pre-extract local PDF bundles before a single agent continues deep reading sequentially. The per-paper 30-second result is extracted from each single-paper note's `30 秒结论` row; batch does not summarize papers again.
+paper_reader_batch supports four batch inputs: Zotero collection inventories, multiple Zotero titles, local PDF folders, and multiple PDF paths. It normalizes them into a manifest, dispatches each item to `$paper_reader`, and uses `zotero_write` by default for Zotero-backed items: prepared candidates are listed with `next-write`, written by the outer agent through Zotero MCP, verified read-only, then recorded with `record-write`. PDF folder/path items are `pdf_path` items with `expected_output=local_note`; they do not run Zotero lookup, duplicate checks, `next-write`, or write-through. Pass `--write-policy prepare_only` for dry-run. Default Codex concurrency is 3. When outer-agent parallelism is unavailable, `prepare-local-pdfs` can pre-extract local PDF bundles before a single agent continues deep reading sequentially. The fallback reads `prepare-pdf --json-output` as its stable machine channel and accepts recovered `run.json` manifests only after the bundle is actually prepared. A pure local-PDF batch report marks `effective_write_policy=local_only` even when the manifest kept the default `write_policy=zotero_write`. The per-paper 30-second result is extracted from each single-paper note's `30 秒结论` row; batch does not summarize papers again.
 
 ## Output Locations
 
 - Zotero title workflow writes local run artifacts under `<skill_root>/runs/YYYY-MM-DD/<title-slug>/`. The write-candidate step adds `note.md`, `note.html`, `gate-report.json`, and `write-payload.json` there before any Zotero write.
 - Local PDF path workflow writes beside the PDF: `<pdf_stem>_analysis/` for analysis artifacts and `<pdf_stem>_note.md` for the final Markdown note. Existing outputs are preserved with `_v2`, `_v3`, and later suffixes.
-- Batch workflow writes batch run artifacts under `<paper_reader_batch_root>/runs/YYYY-MM-DD/<batch-slug>/`, including `manifest.json`, `state.json`, `items/*.json`, `items/*.write.json`, `batch-report.json`, and `batch-report.md`. Single-paper artifacts remain owned by `paper_reader`; batch stores indexes, local-only paths, Zotero note keys, and verify report paths.
+- Batch workflow writes batch run artifacts under `<paper_reader_batch_root>/runs/YYYY-MM-DD/<batch-slug>/`, including `manifest.json`, `state.json`, `items/*.json`, `items/*.prepare.json`, `items/*.write.json`, `batch-report.json`, and `batch-report.md`. Single-paper artifacts remain owned by `paper_reader`; batch stores indexes, local-only paths, Zotero note keys, and verify report paths.
 
 ## Runtime Requirements
 

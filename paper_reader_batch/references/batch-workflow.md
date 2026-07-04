@@ -63,6 +63,12 @@ the local PDF fallback pre-extraction path only for `pdf_path` items, then
 continue deep reading sequentially from the prepared `prepared_analysis_dir`
 bundles.
 
+`prepare-local-pdfs` uses `$paper_reader prepare-pdf --json-output` as its
+stable machine-readable channel. If the machine JSON is unavailable and the
+command otherwise succeeded, recovery from `run.json` is valid only when that
+manifest has `status=prepared` and the core analysis artifacts are readable.
+An initialized but incomplete `run.json` is not a prepared bundle.
+
 ## Result Ingestion
 
 Each worker result must include the dispatched `item_id`, `worker_id`, and
@@ -119,3 +125,7 @@ The batch report is operational, not a literature synthesis. The per-paper
 `thirty_second_takeaway` is extracted from that paper's rendered single-paper
 note row `30 秒结论`. If the note row is unavailable, fallback to `tldr`, then
 `one_sentence_summary`, and record the fallback source.
+
+For a pure local-PDF batch, the machine report includes
+`effective_write_policy=local_only` so readers do not mistake the manifest's
+default `write_policy=zotero_write` for Zotero write-through on PDF items.

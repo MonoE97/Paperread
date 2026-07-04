@@ -19,6 +19,13 @@ Follow-up note on 2026-07-03: Zotero-backed batch items now default to verified
 pending writes with `next-write`, and the outer agent records verified writes
 with `record-write`.
 
+Follow-up note on 2026-07-04: local PDF fallback preparation now uses
+`$paper_reader prepare-pdf --json-output` as the stable machine channel.
+Recovery from `run.json` is accepted only for completed bundles with
+`status=prepared` and readable core analysis artifacts. Pure local-PDF batch
+reports expose `effective_write_policy=local_only` even when the manifest keeps
+the default `write_policy=zotero_write`.
+
 ## Goal
 
 Add a second skill, `paper_reader_batch`, for batch paper reading orchestration.
@@ -310,6 +317,11 @@ Each item state should record:
 - `completed_at`
 - `write_status`
 - `write_completed_at`
+- `local_prepare_status`
+- `local_prepare_failure_reason`
+- `prepared_analysis_dir`
+- `prepared_final_note_path`
+- `prepared_manifest_path`
 - `paper_reader_run_dir`
 - `summary_json`
 - `note_md`
@@ -431,6 +443,12 @@ promise that every host supports real parallel agent execution.
 Claude fallback uses the same manifest and item result contract but processes
 items sequentially.
 
+When outer-agent parallelism is unavailable for local PDFs,
+`prepare-local-pdfs` can run deterministic pre-extraction concurrently before
+the sequential deep-reading pass. It records `items/*.prepare.json` and updates
+the state with prepared bundle paths. Prepared means the underlying
+`prepare-pdf` bundle is complete, not just initialized.
+
 ## Worker Contract
 
 Each worker receives one manifest item and must follow these rules:
@@ -532,6 +550,8 @@ Required report content:
 - Input source summary.
 - Configured concurrency.
 - Write policy.
+- Effective write policy, so pure local-PDF runs can report `local_only` even
+  when the manifest default remains `zotero_write`.
 - Total item count.
 - Counts by item status.
 - Counts by expected output type.
