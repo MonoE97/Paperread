@@ -1,0 +1,26 @@
+[project]
+name = "paper_reader_batch"
+version = "0.1.0"
+description = "Batch orchestration skill for paper_reader."
+requires-python = ">=3.13"
+dependencies = [
+    "rich>=14.0.0",
+    "typer>=0.16.0",
+]
+
+[project.scripts]
+paper_reader_batch = "paper_reader_batch.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.0,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

@@ -1,0 +1,6 @@
+interface:
+  display_name: "paper_reader_batch"
+  short_description: "Parallel paper_reader orchestration with local PDF handling"
+  default_prompt: "Use $paper_reader_batch to orchestrate multiple $paper_reader paper analyses, keep PDF folder/path items local-only without Zotero lookup, write only Zotero-backed notes by default, verify them, and produce a batch report."
+policy:
+  allow_implicit_invocation: true

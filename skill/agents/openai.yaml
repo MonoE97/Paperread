@@ -1,6 +1,0 @@
-interface:
-  display_name: "Paperread"
-  short_description: "Evidence-grounded paper reading notes"
-  default_prompt: "Use $paperread to analyze this paper and prepare a Chinese structured reading note. If the input is a local PDF path, analyze it locally without Zotero lookup; if it is a local directory path, route it to $paperread-batch."
-policy:
-  allow_implicit_invocation: true

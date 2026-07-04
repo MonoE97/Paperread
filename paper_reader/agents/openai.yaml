@@ -1,0 +1,6 @@
+interface:
+  display_name: "paper_reader"
+  short_description: "Evidence-grounded paper reading notes"
+  default_prompt: "Use $paper_reader to analyze this paper and prepare a Chinese structured reading note. If the input is a local PDF path, analyze it locally without Zotero lookup; if it is a local directory path, route it to $paper_reader_batch."
+policy:
+  allow_implicit_invocation: true
