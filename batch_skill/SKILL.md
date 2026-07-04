@@ -46,6 +46,11 @@ Use `references/batch-workflow.md` for all batch workflows:
 - Local PDF folder.
 - Multiple local PDF paths.
 
+Use `references/parallel-dispatch.md` for concurrency, worker prompt,
+fallback pre-extraction, and serial write rules. Use
+`references/worker-result-contract.md` when constructing or validating item
+result, local prepare result, or write result JSON.
+
 PDF folder and PDF path items are local-only: do not run Zotero lookup, duplicate checks, next-write, or Zotero write-through for them. Manifest builders store these items as `pdf_path` with `expected_output=local_note`.
 An existing directory path passed through `$paperread` should be routed here
 instead of being treated as a Zotero title fragment.

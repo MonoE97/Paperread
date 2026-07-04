@@ -55,9 +55,12 @@ a new output directory.
 
 ## Execution
 
-Default Codex concurrency is 3. When a worker finishes, dispatch the next
-pending item. Claude-compatible fallback is sequential execution of the same
-manifest.
+Default Codex concurrency is 3. Use `references/parallel-dispatch.md` for the
+controller loop and worker prompt contract. When a worker finishes, record the
+result, then dispatch the next pending item. If outer-agent parallelism is
+unavailable, use the local PDF pre-extraction fallback only for `pdf_path`
+items, then continue deep reading sequentially from the prepared
+`prepared_analysis_dir` bundles.
 
 ## Result Ingestion
 
