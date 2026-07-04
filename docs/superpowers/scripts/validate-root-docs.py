@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parents[3]
 README = ROOT / "README.md"
 README_ZH = ROOT / "README.zh-CN.md"
 AGENTS = ROOT / "AGENTS.md"
-SKILL = ROOT / "skill" / "SKILL.md"
-BATCH_SKILL = ROOT / "batch_skill" / "SKILL.md"
+SKILL = ROOT / "paper_reader" / "SKILL.md"
+BATCH_SKILL = ROOT / "paper_reader_batch" / "SKILL.md"
 
 
 def read(path: Path) -> str:
@@ -33,8 +33,8 @@ def validate() -> list[str]:
     chinese = read(README_ZH)
     agents = read(AGENTS)
     skill = read(SKILL)
-    batch_skill = read(BATCH_SKILL)
-    combined_public = "\n".join([english, chinese, agents, skill, batch_skill])
+    paper_reader_batch = read(BATCH_SKILL)
+    combined_public = "\n".join([english, chinese, agents, skill, paper_reader_batch])
 
     require(english, "[简体中文](README.zh-CN.md)", "README.md", errors)
     require(chinese, "[English](README.md)", "README.zh-CN.md", errors)
@@ -44,26 +44,26 @@ def validate() -> list[str]:
         ("README.zh-CN.md", chinese),
     ]:
         for phrase in [
-            "skill/",
-            "batch_skill/",
-            "paperread",
-            "paperread-batch",
+            "paper_reader/",
+            "paper_reader_batch/",
+            "paper_reader",
+            "paper_reader_batch",
             "uv --version",
             "uv sync --locked",
             "uv python install 3.13",
-            "uv run paperread --help",
-            "uv run paperread-batch --help",
-            "Use `paperread`",
-            "Use `paperread-batch`",
+            "uv run paper_reader --help",
+            "uv run paper_reader_batch --help",
+            "Use `paper_reader`",
+            "Use `paper_reader_batch`",
             "https://github.com/cookjohn/zotero-mcp#readme",
             "zotero-mcp-plugin",
             "Tools -> Add-ons",
             "http://127.0.0.1:23120/mcp",
             "test ! -e \"$install_dir\"",
-            "cp -R /path/to/Paperread/skill \"$install_dir\"",
-            "cp -R /path/to/Paperread/batch_skill \"$install_dir\"",
-            "$HOME/.claude/skills/paperread",
-            "$HOME/.claude/skills/paperread-batch",
+            "cp -R /path/to/paper_reader/paper_reader \"$install_dir\"",
+            "cp -R /path/to/paper_reader/paper_reader_batch \"$install_dir\"",
+            "$HOME/.claude/skills/paper_reader",
+            "$HOME/.claude/skills/paper_reader_batch",
             "prepare_only",
             "write_note",
             "refresh-live-notes",
@@ -100,16 +100,16 @@ def validate() -> list[str]:
         require(chinese, phrase, "README.zh-CN.md", errors)
 
     for phrase in [
-        "skill/pyproject.toml",
-        "skill/uv.lock",
-        "skill/src/paperread/",
-        "skill/tests/",
-        "skill/templates/",
-        "batch_skill/pyproject.toml",
-        "batch_skill/uv.lock",
-        "batch_skill/src/paperread_batch/",
-        "batch_skill/tests/",
-        "batch_skill/references/",
+        "paper_reader/pyproject.toml",
+        "paper_reader/uv.lock",
+        "paper_reader/src/paper_reader/",
+        "paper_reader/tests/",
+        "paper_reader/templates/",
+        "paper_reader_batch/pyproject.toml",
+        "paper_reader_batch/uv.lock",
+        "paper_reader_batch/src/paper_reader_batch/",
+        "paper_reader_batch/tests/",
+        "paper_reader_batch/references/",
         "python docs/superpowers/scripts/validate-root-docs.py",
         "本地 `.pdf` path 和本地目录 path 优先于 Zotero title routing",
     ]:
@@ -120,7 +120,7 @@ def validate() -> list[str]:
         "uv --version",
         "uv sync --locked",
         "uv python install 3.13",
-        "uv run paperread --help",
+        "uv run paper_reader --help",
         "Typical Use",
         "references/pdf-path-workflow.md",
         "references/zotero-workflow.md",
@@ -129,13 +129,13 @@ def validate() -> list[str]:
         "Local PDF path and directory path inputs skip Zotero lookup and duplicate checks",
         "Existing local paths are not Zotero title fragments",
     ]:
-        require(skill, phrase, "skill/SKILL.md", errors)
+        require(skill, phrase, "paper_reader/SKILL.md", errors)
 
     for phrase in [
-        "$paperread",
+        "$paper_reader",
         "uv --version",
         "uv sync --locked",
-        "uv run paperread-batch --help",
+        "uv run paper_reader_batch --help",
         "references/batch-workflow.md",
         "Default Codex concurrency is 3",
         "Typical Use",
@@ -147,7 +147,7 @@ def validate() -> list[str]:
         "PDF folder and PDF path items are local-only",
         "do not run Zotero lookup, duplicate checks, next-write, or Zotero write-through",
     ]:
-        require(batch_skill, phrase, "batch_skill/SKILL.md", errors)
+        require(paper_reader_batch, phrase, "paper_reader_batch/SKILL.md", errors)
 
     for phrase in [
         "clone-and-run",
@@ -163,10 +163,10 @@ def validate() -> list[str]:
         if (ROOT / stale_path).exists():
             errors.append(f"runtime path remains at repository root: {stale_path}")
 
-    if (ROOT / "skill" / "README.md").exists():
-        errors.append("skill/README.md must not exist")
-    if (ROOT / "batch_skill" / "README.md").exists():
-        errors.append("batch_skill/README.md must not exist")
+    if (ROOT / "paper_reader" / "README.md").exists():
+        errors.append("paper_reader/README.md must not exist")
+    if (ROOT / "paper_reader_batch" / "README.md").exists():
+        errors.append("paper_reader_batch/README.md must not exist")
 
     return errors
 

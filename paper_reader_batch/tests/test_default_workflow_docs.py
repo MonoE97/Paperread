@@ -66,7 +66,7 @@ def test_root_docs_describe_two_installable_skill_sources() -> None:
 
     for text in [english, chinese, agents]:
         for phrase in [
-            "skill/",
+            "paper_reader/",
             "paper_reader_batch/",
             "paper_reader",
             "paper_reader_batch",
