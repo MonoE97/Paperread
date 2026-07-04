@@ -13,6 +13,7 @@ from paperread_batch.state import (
     initial_state,
     mark_interrupted_running_items,
     pending_write_items,
+    record_local_prepare_result,
     record_item_result,
     record_write_result,
     retry_failed,
@@ -44,6 +45,64 @@ def _zotero_manifest(*, write_policy: str | None = None) -> dict:
             **kwargs,
         )
     )
+
+
+def _pdf_manifest(tmp_path: Path) -> dict:
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    return validate_manifest(
+        build_manifest(
+            batch_title="pdf batch",
+            source_summary={"source_type": "pdf_paths", "description": "test"},
+            items=[
+                {
+                    "item_id": "001",
+                    "input_type": "pdf_path",
+                    "input": {"path": str(pdf)},
+                    "expected_output": "local_note",
+                }
+            ],
+            created_at="2026-07-03T10:00:00+08:00",
+        )
+    )
+
+
+def test_initial_state_marks_pdf_local_prepare_pending(tmp_path: Path) -> None:
+    state = initial_state(_pdf_manifest(tmp_path))
+
+    item = state["items"][0]
+    assert item["local_prepare_status"] == "pending"
+    assert item["prepared_analysis_dir"] == ""
+    assert item["prepared_final_note_path"] == ""
+
+
+def test_record_local_prepare_success_updates_state(tmp_path: Path) -> None:
+    manifest = _pdf_manifest(tmp_path)
+    state = initial_state(manifest)
+    analysis_dir = tmp_path / "paper_analysis"
+    analysis_dir.mkdir()
+    final_note = tmp_path / "paper_note.md"
+    manifest_path = analysis_dir / "run.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    updated = record_local_prepare_result(
+        state,
+        "001",
+        {
+            "schema_version": "paperread-batch.local-prepare-result.v1",
+            "item_id": "001",
+            "status": "prepared",
+            "analysis_dir": str(analysis_dir),
+            "final_note_path": str(final_note),
+            "manifest_path": str(manifest_path),
+        },
+    )
+
+    item = updated["items"][0]
+    assert item["local_prepare_status"] == "prepared"
+    assert item["prepared_analysis_dir"] == str(analysis_dir)
+    assert item["prepared_final_note_path"] == str(final_note)
+    assert item["prepared_manifest_path"] == str(manifest_path)
 
 
 def _write_json(path: Path, payload: dict) -> str:

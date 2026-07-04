@@ -12,6 +12,7 @@ from paperread_batch.takeaway import TakeawayError, extract_takeaway
 STATE_SCHEMA_VERSION = "paperread-batch.state.v1"
 ITEM_RESULT_SCHEMA_VERSION = "paperread-batch.item-result.v1"
 WRITE_RESULT_SCHEMA_VERSION = "paperread-batch.write-result.v1"
+LOCAL_PREPARE_RESULT_SCHEMA_VERSION = "paperread-batch.local-prepare-result.v1"
 
 PENDING = "pending"
 RUNNING = "running"
@@ -40,12 +41,16 @@ def _empty_item_state(manifest_item: dict[str, Any]) -> dict[str, Any]:
     write_status = WRITE_NOT_APPLICABLE
     if manifest_item["expected_output"] == "zotero_note_candidate":
         write_status = PENDING_PREPARE
+    local_prepare_status = "not_applicable"
+    if manifest_item["expected_output"] == "local_note":
+        local_prepare_status = "pending"
     return {
         "item_id": manifest_item["item_id"],
         "input_type": manifest_item["input_type"],
         "expected_output": manifest_item["expected_output"],
         "status": PENDING,
         "write_status": write_status,
+        "local_prepare_status": local_prepare_status,
         "attempt_count": 0,
         "worker_id": "",
         "started_at": "",
@@ -60,6 +65,10 @@ def _empty_item_state(manifest_item: dict[str, Any]) -> dict[str, Any]:
         "verify_report": "",
         "local_note_path": "",
         "local_gate_report": "",
+        "prepared_analysis_dir": "",
+        "prepared_final_note_path": "",
+        "prepared_manifest_path": "",
+        "local_prepare_failure_reason": "",
         "zotero_note_key": "",
         "zotero_parent_key": "",
         "content_sha256": "",
@@ -292,6 +301,37 @@ def record_item_result(
     updated["updated_at"] = now
     _refresh_batch_status(updated)
     return updated
+
+
+def record_local_prepare_result(
+    state: dict[str, Any],
+    item_id: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    if result.get("schema_version") != LOCAL_PREPARE_RESULT_SCHEMA_VERSION:
+        raise StateError(f"local prepare result schema_version must be {LOCAL_PREPARE_RESULT_SCHEMA_VERSION}")
+    if result.get("item_id") != item_id:
+        raise StateError(f"mismatched item_id: expected {item_id}, got {result.get('item_id')}")
+    updated = copy.deepcopy(state)
+    item = _find_item(updated["items"], item_id)
+    if item.get("expected_output") != "local_note":
+        raise StateError("local prepare is only valid for local_note items")
+    status = _require_text(result.get("status"), "local_prepare.status")
+    if status == "prepared":
+        item["local_prepare_status"] = "prepared"
+        item["prepared_analysis_dir"] = _require_directory(result.get("analysis_dir"), "local_prepare.analysis_dir")
+        item["prepared_final_note_path"] = _require_text(result.get("final_note_path"), "local_prepare.final_note_path")
+        item["prepared_manifest_path"] = _require_readable_file(result.get("manifest_path"), "local_prepare.manifest_path")
+        item["local_prepare_failure_reason"] = ""
+        return updated
+    if status == "failed":
+        item["local_prepare_status"] = "failed"
+        item["local_prepare_failure_reason"] = _require_text(
+            result.get("failure_reason"),
+            "local_prepare.failure_reason",
+        )
+        return updated
+    raise StateError(f"unsupported local prepare status: {status}")
 
 
 def pending_write_items(
