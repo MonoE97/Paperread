@@ -1,12 +1,18 @@
-# Paperread Batch Skill Design
+# paper_reader_batch Skill Design
 
 Date: 2026-07-02
-Status: implemented and merged to `main` on 2026-07-03
+Status: implemented and merged to `main` on 2026-07-03; renamed to
+`paper_reader` / `paper_reader_batch` on 2026-07-04
 
-Implementation note: the deterministic `paperread-batch` layer now lives in
-`batch_skill/`, with root docs and validators updated for the two-skill install
+Implementation note: the deterministic `paper_reader_batch` layer now lives in
+`paper_reader_batch/`, with root docs and validators updated for the two-skill install
 model. This file is now an implemented design record. Public release still
 requires copied-install verification outside the repository.
+
+Rename note on 2026-07-04: earlier directory and skill names in this design
+record have been normalized to the current active contract. The current source
+directories are `paper_reader/` and `paper_reader_batch/`, and the installed
+skill names are `paper_reader` and `paper_reader_batch`.
 
 Follow-up note on 2026-07-03: Zotero-backed batch items now default to verified
 `zotero_write`. The batch CLI still does not call Zotero MCP directly; it emits
@@ -15,14 +21,14 @@ with `record-write`.
 
 ## Goal
 
-Add a second skill, `paperread-batch`, for batch paper reading orchestration.
-The existing single-paper `paperread` skill remains the only owner of deep
+Add a second skill, `paper_reader_batch`, for batch paper reading orchestration.
+The existing single-paper `paper_reader` skill remains the only owner of deep
 paper reading quality: extraction, evidence rules, summary schema, note
 template, review gates, Zotero write payloads, and local PDF note rendering.
 
 The batch skill is a scheduler and reporter. It accepts multiple paper inputs,
 normalizes them into a batch manifest, dispatches individual items to
-`$paperread`, tracks progress for resume, and produces a lightweight batch
+`$paper_reader`, tracks progress for resume, and produces a lightweight batch
 report. It must not copy single-paper prompts, parsing logic, summary schema,
 note templates, or write gates.
 
@@ -42,7 +48,7 @@ Batch reading has three separate problems:
 Only the first problem requires the full single-paper prompt, schema, evidence
 contract, and note rendering logic. Rebuilding those inside a batch skill would
 create drift and reduce quality. The batch skill should therefore outsource one
-paper at a time to `$paperread` and own only the second and third problems:
+paper at a time to `$paper_reader` and own only the second and third problems:
 queueing, concurrency, resume, item-level failure handling, and a run report.
 
 The batch run must be recoverable from files, not from chat memory. A batch can
@@ -57,16 +63,15 @@ read-only verification report from the successful single-paper run.
 
 ## Confirmed Decisions
 
-- Use an independent `paperread-batch` skill instead of expanding `paperread`
+- Use an independent `paper_reader_batch` skill instead of expanding `paper_reader`
   with a batch mode.
-- Keep the current source `skill/` directory for the single-paper skill. It is
-  still installed as `paperread`.
-- Add a new source directory, `batch_skill/`, for the batch skill. It is
-  installed as `paperread-batch`.
-- Do not rename the existing `skill/` source directory in the first batch
-  version. Renaming it would churn README, AGENTS, validators, install commands,
-  and the already-verified self-contained skill contract without improving batch
-  behavior.
+- Keep `paper_reader/` as the source directory for the single-paper skill. It is
+  installed as `paper_reader`.
+- Keep `paper_reader_batch/` as the source directory for the batch skill. It is
+  installed as `paper_reader_batch`.
+- Treat the two source directories as the active self-contained install
+  contract. Any older local naming in historical notes is superseded by this
+  contract.
 - Support four equally important input forms in v1:
   - Zotero collection.
   - Multiple Zotero titles or title fragments.
@@ -80,7 +85,7 @@ read-only verification report from the successful single-paper run.
 - Default write policy is `zotero_write` for Zotero-backed items; manifest
   builders keep `--write-policy prepare_only` for explicit dry-run.
 - Default Codex concurrency is 3.
-- Single-paper artifacts stay in `paperread/runs/...`. The batch run stores
+- Single-paper artifacts stay in `paper_reader/runs/...`. The batch run stores
   only indexes, state, item result summaries, and reports.
 - The final v1 report is lightweight: counts, per-paper status, each paper's
   30-second takeaway extracted from that paper's own rendered quick-read note,
@@ -92,26 +97,26 @@ read-only verification report from the successful single-paper run.
 The source repository is:
 
 ```text
-Paperread/
+paper_reader/
   AGENTS.md
   README.md
   README.zh-CN.md
   docs/superpowers/specs/
   docs/superpowers/scripts/
-  skill/          # source for installed skill name: paperread
-  batch_skill/    # source for installed skill name: paperread-batch
+  paper_reader/          # source for installed skill name: paper_reader
+  paper_reader_batch/    # source for installed skill name: paper_reader_batch
 ```
 
 Installed skill shape:
 
 ```text
 ~/.codex/skills/
-  paperread/
-  paperread-batch/
+  paper_reader/
+  paper_reader_batch/
 ```
 
-`skill/` continues to satisfy the existing self-contained single-paper skill
-contract. `batch_skill/` is a separate self-contained skill source with its own
+`paper_reader/` continues to satisfy the existing self-contained single-paper skill
+contract. `paper_reader_batch/` is a separate self-contained skill source with its own
 `SKILL.md`, `references/`, scripts, tests, dependency metadata, and validation
 script.
 
@@ -121,7 +126,7 @@ installation entry point.
 
 ## Skill Boundary
 
-### `paperread`
+### `paper_reader`
 
 The single-paper skill owns:
 
@@ -137,7 +142,7 @@ The single-paper skill owns:
 - `prepare-local-note-candidate` for local PDF workflow.
 - Zotero write gate, write payload, and read-only write verification.
 
-### `paperread-batch`
+### `paper_reader_batch`
 
 The batch skill owns:
 
@@ -174,13 +179,13 @@ available, title, and original order if the source provides one.
 Duplicate normalized titles should be detected during manifest validation when
 enough metadata is available. If exact duplicate Zotero items are found, the
 manifest should mark them as blocked or require the single-paper workflow to
-stop according to the current `paperread` Zotero duplicate rule.
+stop according to the current `paper_reader` Zotero duplicate rule.
 
 ### Multiple Zotero Titles
 
 The user provides several titles or title fragments. Each becomes a manifest
 item of type `zotero_title`. Exact matching and duplicate handling remain part
-of the `$paperread` single-paper workflow.
+of the `$paper_reader` single-paper workflow.
 
 ### Local PDF Folder
 
@@ -215,7 +220,7 @@ Recommended shape:
 
 ```json
 {
-  "schema_version": "paperread-batch.manifest.v1",
+  "schema_version": "paper_reader_batch.manifest.v1",
   "created_at": "2026-07-02T10:00:00+08:00",
   "batch_title": "solid-state-electrolytes",
   "default_concurrency": 3,
@@ -268,7 +273,7 @@ only, with no leading punctuation or path separators.
 
 - `zotero_item`: a Zotero-backed item already resolved from a collection or
   read-only inventory step.
-- `zotero_title`: a title or title fragment that `$paperread` must resolve.
+- `zotero_title`: a title or title fragment that `$paper_reader` must resolve.
 - `pdf_path`: a local PDF path.
 
 ## State
@@ -305,7 +310,7 @@ Each item state should record:
 - `completed_at`
 - `write_status`
 - `write_completed_at`
-- `paperread_run_dir`
+- `paper_reader_run_dir`
 - `summary_json`
 - `note_md`
 - `note_html`
@@ -333,7 +338,7 @@ To avoid concurrent writes to `state.json`, each worker writes one item result
 file:
 
 ```text
-batch_skill/runs/YYYY-MM-DD/<batch-slug>/
+paper_reader_batch/runs/YYYY-MM-DD/<batch-slug>/
   items/
     001.json
     002.json
@@ -343,12 +348,12 @@ Recommended result shape:
 
 ```json
 {
-  "schema_version": "paperread-batch.item-result.v1",
+  "schema_version": "paper_reader_batch.item-result.v1",
   "item_id": "001",
   "worker_id": "worker-001",
   "attempt_count": 1,
   "status": "succeeded",
-  "paperread_run_dir": "/abs/path/to/paperread/runs/2026-07-02/paper-slug",
+  "paper_reader_run_dir": "/abs/path/to/paper_reader/runs/2026-07-02/paper-slug",
   "summary_json": "/abs/path/to/summary.json",
   "note_md": "/abs/path/to/note.md",
   "note_html": "/abs/path/to/note.html",
@@ -377,7 +382,7 @@ single-paper structured fields that feed that row (`tldr`, then
 The batch skill stores its own run artifacts under its installed skill root:
 
 ```text
-<paperread-batch-skill-root>/
+<paper_reader_batch-skill-root>/
   runs/
     YYYY-MM-DD/
       <batch-slug>/
@@ -391,8 +396,8 @@ The batch skill stores its own run artifacts under its installed skill root:
         batch-report.md
 ```
 
-The single-paper artifacts remain wherever `$paperread` creates them, usually
-under the installed `paperread/runs/YYYY-MM-DD/<title-slug>/` for Zotero title
+The single-paper artifacts remain wherever `$paper_reader` creates them, usually
+under the installed `paper_reader/runs/YYYY-MM-DD/<title-slug>/` for Zotero title
 workflow or beside the source PDF for local PDF workflow. The batch state stores
 absolute paths to those artifacts.
 
@@ -405,11 +410,11 @@ candidate outputs.
 V1 uses Codex-first parallel scheduling.
 
 1. Build or receive `manifest.json`.
-2. Validate manifest, the batch run directory, and `$paperread` availability.
+2. Validate manifest, the batch run directory, and `$paper_reader` availability.
 3. Initialize `state.json`.
 4. Ask the batch CLI for the next available work items, up to the concurrency
    limit.
-5. Dispatch each selected item to a separate `$paperread` single-paper worker.
+5. Dispatch each selected item to a separate `$paper_reader` single-paper worker.
 6. Each worker completes the single-paper workflow and writes an item result
    file.
 7. The batch scheduler records each result into `state.json` using atomic
@@ -430,9 +435,9 @@ items sequentially.
 
 Each worker receives one manifest item and must follow these rules:
 
-- For `zotero_item` or `zotero_title`, use `$paperread` Zotero title
+- For `zotero_item` or `zotero_title`, use `$paper_reader` Zotero title
   workflow.
-- For `pdf_path`, use `$paperread` local PDF path workflow.
+- For `pdf_path`, use `$paper_reader` local PDF path workflow.
 - Use full-PDF extraction unless the user explicitly requested shortened
   debugging or preview.
 - Do not write Zotero notes inside the single-paper worker.
@@ -440,7 +445,7 @@ Each worker receives one manifest item and must follow these rules:
   batch write stage handles MCP write-through later.
 - For local PDF items, stop after `prepare-local-note-candidate` succeeds or
   fails.
-- Record the actual `paperread_run_dir`, key output paths, `worker_id`, and
+- Record the actual `paper_reader_run_dir`, key output paths, `worker_id`, and
   `attempt_count`.
 - Do not write a trusted `thirty_second_takeaway` in the result file. The batch
   scheduler extracts it from the completed single-paper note's existing
@@ -455,22 +460,22 @@ system-wide blocker.
 
 ## Deterministic CLI
 
-Even though the reading work is agent-driven, `paperread-batch` needs a
+Even though the reading work is agent-driven, `paper_reader_batch` needs a
 deterministic CLI for durable state. The CLI should manage manifests, state,
 result ingestion, and reports. It should not perform deep reading.
 
 Proposed command surface:
 
 ```bash
-uv run paperread-batch init --manifest manifest.json --output <batch_run>
-uv run paperread-batch validate <batch_run>
-uv run paperread-batch next <batch_run> --limit 3
-uv run paperread-batch record-result <batch_run> <item_id> --result <batch_run>/items/<item_id>.json
-uv run paperread-batch next-write <batch_run> --limit 1
-uv run paperread-batch record-write <batch_run> <item_id> --result write-result.json
-uv run paperread-batch report <batch_run>
-uv run paperread-batch resume <batch_run>
-uv run paperread-batch retry-failed <batch_run>
+uv run paper_reader_batch init --manifest manifest.json --output <batch_run>
+uv run paper_reader_batch validate <batch_run>
+uv run paper_reader_batch next <batch_run> --limit 3
+uv run paper_reader_batch record-result <batch_run> <item_id> --result <batch_run>/items/<item_id>.json
+uv run paper_reader_batch next-write <batch_run> --limit 1
+uv run paper_reader_batch record-write <batch_run> <item_id> --result write-result.json
+uv run paper_reader_batch report <batch_run>
+uv run paper_reader_batch resume <batch_run>
+uv run paper_reader_batch retry-failed <batch_run>
 ```
 
 `init` must fail with an explicit `batch_run_exists` error when the selected
@@ -481,18 +486,18 @@ output directory already contains `manifest.json` or `state.json`. Re-running
 Optional manifest builders can be added around the same manifest schema:
 
 ```bash
-uv run paperread-batch manifest from-pdf-folder "/abs/path/to/folder" --batch-title "folder batch" --output manifest.json
-uv run paperread-batch manifest from-pdf-paths paths.txt --batch-title "paths batch" --output manifest.json
-uv run paperread-batch manifest from-zotero-titles titles.txt --batch-title "titles batch" --output manifest.json
-uv run paperread-batch manifest from-zotero-collection "<collection>" --items-json collection-items.json --batch-title "collection batch" --output manifest.json
-uv run paperread-batch manifest from-zotero-titles titles.txt --batch-title "dry run" --write-policy prepare_only --output manifest.json
+uv run paper_reader_batch manifest from-pdf-folder "/abs/path/to/folder" --batch-title "folder batch" --output manifest.json
+uv run paper_reader_batch manifest from-pdf-paths paths.txt --batch-title "paths batch" --output manifest.json
+uv run paper_reader_batch manifest from-zotero-titles titles.txt --batch-title "titles batch" --output manifest.json
+uv run paper_reader_batch manifest from-zotero-collection "<collection>" --items-json collection-items.json --batch-title "collection batch" --output manifest.json
+uv run paper_reader_batch manifest from-zotero-titles titles.txt --batch-title "dry run" --write-policy prepare_only --output manifest.json
 ```
 
 The Zotero collection builder may require MCP access or a read-only inventory
 step. It must not write Zotero.
 
 `validate` must fail early if the batch run directory is not writable, the
-manifest uses an unknown item type, or `$paperread` is not installed or cannot
+manifest uses an unknown item type, or `$paper_reader` is not installed or cannot
 be invoked in the current agent environment.
 
 ## Resume Rules
@@ -574,7 +579,7 @@ Action: mark the item failed, store `failure_reason`, continue other items.
 
 Examples:
 
-- `$paperread` is not installed or not discoverable.
+- `$paper_reader` is not installed or not discoverable.
 - `uv sync --locked` fails for the required skill environment.
 - Zotero MCP is unavailable and all remaining items require Zotero access.
 - The batch run directory is not writable.
@@ -603,7 +608,7 @@ deciding whether to rerun.
 - Batch reports can link to `write-payload.json`; they must not treat its
   existence as permission to write.
 - Batch must not cite secondary context as canonical evidence; that rule remains
-  enforced by `paperread`.
+  enforced by `paper_reader`.
 - Machine-readable state may store absolute local paths. Human reports should
   mark paths as local-only and prefer concise display labels where possible, so
   reports are not accidentally treated as portable or share-safe artifacts.
@@ -659,29 +664,29 @@ Required test groups:
     note is unavailable or does not contain the row.
   - Does not call an LLM or create a new per-paper summary.
 - Skill validation:
-  - `batch_skill/SKILL.md` has `name: paperread-batch`.
+  - `paper_reader_batch/SKILL.md` has `name: paper_reader_batch`.
   - No forbidden in-skill docs exist.
   - Required references, scripts, tests, pyproject, and lockfile exist.
 
-Integration testing with real `$paperread` workers can come after deterministic
+Integration testing with real `$paper_reader` workers can come after deterministic
 tests. It should use small fixtures and dry-run or prepare-only paths.
 
 ## Documentation Updates
 
 Root docs now explain that this repo contains two installable skill sources:
 
-- `skill/` -> install as `paperread`.
-- `batch_skill/` -> install as `paperread-batch`.
+- `paper_reader/` -> install as `paper_reader`.
+- `paper_reader_batch/` -> install as `paper_reader_batch`.
 
 `README.md`, `README.zh-CN.md`, `AGENTS.md`, and root validators were updated
-with the `batch_skill/` implementation. The active install contract is now the
+with the `paper_reader_batch/` implementation. The active install contract is now the
 two-skill model documented in those root files; this design document records the
 rationale and constraints behind that implemented contract.
 
 The batch skill's `SKILL.md` should be lean:
 
-- State that it orchestrates multiple papers by dispatching to `$paperread`.
-- State that `$paperread` must be installed and available.
+- State that it orchestrates multiple papers by dispatching to `$paper_reader`.
+- State that `$paper_reader` must be installed and available.
 - Route detailed workflow rules to `references/batch-workflow.md`.
 - State default concurrency 3 for Codex.
 - State default `zotero_write` policy and explicit `prepare_only` dry-run.
@@ -691,13 +696,13 @@ The batch skill's `SKILL.md` should be lean:
 
 The implementation followed this order after the review corrections:
 
-1. Scaffold `batch_skill/` as a self-contained installable skill named
-   `paperread-batch`.
+1. Scaffold `paper_reader_batch/` as a self-contained installable skill named
+   `paper_reader_batch`.
 2. Implement manifest schema and builders for `zotero_item`, `zotero_title`,
    and `pdf_path`.
 3. Implement state schema, legal transitions, item result ingestion, and atomic
    JSON/Markdown writes.
-4. Implement `$paperread` availability validation as a preflight gate.
+4. Implement `$paper_reader` availability validation as a preflight gate.
 5. Implement quick-read extraction from rendered single-paper notes:
    - first parse the `30 秒结论` row in `note.md`;
    - fall back to structured `tldr`;
@@ -709,13 +714,15 @@ The implementation followed this order after the review corrections:
    dispatch and Claude sequential fallback.
 8. Add deterministic tests for schema validation, state transitions, atomic
    writes, quick-read extraction, resume, and report generation.
-9. Only after the deterministic layer is stable, connect the real `$paperread`
+9. Only after the deterministic layer is stable, connect the real `$paper_reader`
    worker contract and run prepare-only integration checks.
 
 ## Non-Goals For V1
 
-- Do not rename existing `skill/` to `paperread/`.
-- Do not copy single-paper prompt/schema/template logic into `batch_skill/`.
+- Do not rename the active `paper_reader/` and `paper_reader_batch/` source
+  directories without updating README, AGENTS, validators, install commands, and
+  copied-install verification together.
+- Do not copy single-paper prompt/schema/template logic into `paper_reader_batch/`.
 - Do not let batch CLI directly call Zotero MCP or write without verification.
 - Do not make research synthesis the default report.
 - Do not require all inputs to be Zotero-backed.
@@ -745,9 +752,9 @@ core scheduler and report contracts are already stable.
 
 The design was implemented with these constraints:
 
-- `paperread-batch` is a separate installed skill.
-- `skill/` remains the source directory for `paperread` in v1.
-- `batch_skill/` is the source directory for `paperread-batch`.
+- `paper_reader_batch` is a separate installed skill.
+- `paper_reader/` remains the source directory for `paper_reader` in v1.
+- `paper_reader_batch/` is the source directory for `paper_reader_batch`.
 - Zotero-backed batch reads default to verified `zotero_write`; `prepare_only`
   remains the explicit dry-run policy.
 - Parallel execution is Codex-first with sequential fallback.
