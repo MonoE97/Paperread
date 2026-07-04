@@ -213,6 +213,16 @@ def test_record_success_requires_zotero_evidence_and_updates_state(tmp_path: Pat
     assert item["write_status"] == "blocked"
 
 
+def test_record_success_rejects_write_payload_when_gate_is_not_write_ready(tmp_path: Path) -> None:
+    manifest = _zotero_manifest()
+    state, _selected = allocate_next(initial_state(manifest), limit=1, now="2026-07-02T10:01:00+08:00")
+    result = _write_ready_result(tmp_path)
+    result["gate_report"] = _write_json(Path(result["paperread_run_dir"]) / "gate-report.json", {"status": "blocked"})
+
+    with pytest.raises(StateError, match="write_payload"):
+        record_item_result(state, manifest, "001", result, now="2026-07-02T10:02:00+08:00")
+
+
 def test_record_success_requires_write_payload_when_gate_is_write_ready(tmp_path: Path) -> None:
     manifest = _zotero_manifest()
     state, _selected = allocate_next(initial_state(manifest), limit=1, now="2026-07-02T10:01:00+08:00")
@@ -240,6 +250,31 @@ def test_record_success_requires_write_payload_when_gate_is_write_ready(tmp_path
 
     with pytest.raises(StateError, match="write_payload"):
         record_item_result(state, manifest, "001", result, now="2026-07-02T10:02:00+08:00")
+
+
+def test_record_local_note_result_rejects_write_payload(tmp_path: Path) -> None:
+    manifest = _pdf_manifest(tmp_path)
+    state, _selected = allocate_next(initial_state(manifest), limit=1, now="2026-07-03T10:01:00+08:00")
+    run_dir = tmp_path / "paper_analysis"
+    result = {
+        "schema_version": "paperread-batch.item-result.v1",
+        "item_id": "001",
+        "worker_id": "worker-001",
+        "attempt_count": 1,
+        "status": "succeeded",
+        "paperread_run_dir": str(run_dir),
+        "summary_json": _write_json(run_dir / "summary.json", {"tldr": "本地结论"}),
+        "note_md": "",
+        "note_html": "",
+        "gate_report": "",
+        "write_payload": _write_json(run_dir / "write-payload.json", {"action": "create"}),
+        "local_note_path": _write_text(tmp_path / "paper_note.md", "| 30 秒结论 | 本地结论 |"),
+        "local_gate_report": _write_json(run_dir / "local-gate-report.json", {"status": "local_write_ready"}),
+        "failure_reason": "",
+    }
+
+    with pytest.raises(StateError, match="write_payload"):
+        record_item_result(state, manifest, "001", result, now="2026-07-03T10:02:00+08:00")
 
 
 def test_record_success_with_write_payload_queues_zotero_write(tmp_path: Path) -> None:

@@ -231,16 +231,20 @@ def _validate_success_result(result: dict[str, Any], manifest_item: dict[str, An
         if _gate_is_write_ready(normalized["gate_report"]):
             normalized["write_payload"] = _require_readable_file(write_payload, "write_payload")
         else:
-            normalized["write_payload"] = write_payload
+            if write_payload:
+                raise StateError("write_payload is only allowed when gate_report is write_ready")
+            normalized["write_payload"] = ""
         normalized["local_note_path"] = str(result.get("local_note_path", "")).strip()
         normalized["local_gate_report"] = str(result.get("local_gate_report", "")).strip()
     else:
+        if str(result.get("write_payload", "")).strip():
+            raise StateError("write_payload is not allowed for local_note items")
         normalized["local_note_path"] = _require_readable_file(result.get("local_note_path"), "local_note_path")
         normalized["local_gate_report"] = _require_readable_file(result.get("local_gate_report"), "local_gate_report")
         normalized["note_md"] = str(result.get("note_md", "")).strip()
         normalized["note_html"] = str(result.get("note_html", "")).strip()
         normalized["gate_report"] = str(result.get("gate_report", "")).strip()
-        normalized["write_payload"] = str(result.get("write_payload", "")).strip()
+        normalized["write_payload"] = ""
     try:
         note_source_path = normalized["note_md"] or normalized["local_note_path"]
         normalized.update(extract_takeaway(Path(note_source_path), Path(normalized["summary_json"])))

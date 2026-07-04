@@ -179,9 +179,20 @@ def _item_id(index: int) -> str:
     return f"{index + 1:03d}"
 
 
-def _non_comment_lines(path: Path) -> list[str]:
+def _non_comment_lines(path: Path, *, label: str) -> list[str]:
     lines: list[str] = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
+    source = Path(path)
+    try:
+        text = source.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise ManifestError(f"{label} not found: {source}") from exc
+    except IsADirectoryError as exc:
+        raise ManifestError(f"{label} is a directory: {source}") from exc
+    except UnicodeDecodeError as exc:
+        raise ManifestError(f"{label} is not valid UTF-8 text: {source}") from exc
+    except OSError as exc:
+        raise ManifestError(f"cannot read {label}: {source}: {exc}") from exc
+    for line in text.splitlines():
         stripped = line.strip()
         if stripped and not stripped.startswith("#"):
             lines.append(stripped)
@@ -226,7 +237,7 @@ def manifest_from_pdf_paths_file(
 ) -> dict[str, Any]:
     source = Path(paths_file).expanduser().resolve()
     paths: list[Path] = []
-    for line in _non_comment_lines(source):
+    for line in _non_comment_lines(source, label="paths file"):
         path = Path(line).expanduser()
         if not path.is_absolute():
             path = source.parent / path
@@ -255,7 +266,7 @@ def manifest_from_zotero_titles_file(
     batch_title: str,
     write_policy: str = DEFAULT_WRITE_POLICY,
 ) -> dict[str, Any]:
-    titles = _non_comment_lines(titles_file)
+    titles = _non_comment_lines(titles_file, label="titles file")
     items = [
         {
             "item_id": _item_id(index),

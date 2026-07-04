@@ -141,7 +141,7 @@ Paperread 支持两类输入：
 
 两个工作流默认都会抽取完整 PDF。最终 `evidence_summary` locator 必须使用以下 canonical 格式之一：`context.md page <N>`、`context.md page <N> section <Section Name>`、`context.md page <N> section <Section Name> table_candidate <N>` 或 `figure_context.md <figure_id>`。裸 `context.md` / `figure_context.md`、`page 3 method section` 这类散文式 locator、`section_context.md` 和 secondary context 路径都无效。`section_context.md` 只作为导航辅助。通过 `scripts/capture-secondary-url.mjs` 抓取的 secondary web context 只用于 cross-check，不能在 `evidence_summary` 中作为证据引用。
 
-Paperread Batch 支持四类批量输入：Zotero collection inventory、多个 Zotero 标题、本地 PDF 文件夹、多个 PDF path。它会归一化为 manifest，把每篇交给 `$paperread`，Zotero-backed items 默认使用 `zotero_write`：生成写入候选后通过 `next-write` 串行交给外层 agent 调 Zotero MCP 写入、只读校验，再用 `record-write` 记录结果。PDF folder/path items 是 `pdf_path` items，`expected_output=local_note`；它们不做 Zotero 搜索、去重检查、`next-write` 或 write-through。需要 dry-run 时显式传 `--write-policy prepare_only`。Codex 默认并发数为 3；Claude 兼容 fallback 是顺序执行。每篇 30 秒结果直接从单篇 note 的 `30 秒结论` 行提取，batch 不再重新总结论文。
+Paperread Batch 支持四类批量输入：Zotero collection inventory、多个 Zotero 标题、本地 PDF 文件夹、多个 PDF path。它会归一化为 manifest，把每篇交给 `$paperread`，Zotero-backed items 默认使用 `zotero_write`：生成写入候选后通过 `next-write` 串行交给外层 agent 调 Zotero MCP 写入、只读校验，再用 `record-write` 记录结果。PDF folder/path items 是 `pdf_path` items，`expected_output=local_note`；它们不做 Zotero 搜索、去重检查、`next-write` 或 write-through。需要 dry-run 时显式传 `--write-policy prepare_only`。Codex 默认并发数为 3；外层 agent 并行不可用时，可用 `prepare-local-pdfs` 先并发预抽取本地 PDF bundle，再由单个 agent 顺序继续深读。每篇 30 秒结果直接从单篇 note 的 `30 秒结论` 行提取，batch 不再重新总结论文。
 
 ## 产物位置
 

@@ -28,7 +28,7 @@ def _write_status(item_state: dict[str, Any], *, write_policy: str) -> str:
     explicit_status = str(item_state.get("write_status", "")).strip()
     if explicit_status == "written" and str(item_state.get("zotero_note_key", "")).strip():
         return "written"
-    if explicit_status in {"pending_write", "prepared_not_written", "failed", "blocked"}:
+    if explicit_status in {"pending_prepare", "pending_write", "prepared_not_written", "failed", "blocked"}:
         return explicit_status
     if status == "succeeded" and str(item_state.get("write_payload", "")).strip():
         if write_policy == "zotero_write":

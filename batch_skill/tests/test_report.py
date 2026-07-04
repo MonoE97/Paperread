@@ -97,6 +97,24 @@ def test_build_report_counts_statuses_and_outputs() -> None:
     assert report["items"][2]["write_status"] == "failed"
 
 
+def test_build_report_preserves_pending_prepare_write_status() -> None:
+    state = _state()
+    state["batch_status"] = "running"
+    state["items"][0] = {
+        "item_id": "001",
+        "input_type": "zotero_title",
+        "expected_output": "zotero_note_candidate",
+        "status": "pending",
+        "write_status": "pending_prepare",
+        "thirty_second_takeaway": "",
+        "failure_reason": "",
+    }
+
+    report = build_report(_manifest(), state, reported_at="2026-07-02T10:31:00+08:00")
+
+    assert report["items"][0]["write_status"] == "pending_prepare"
+
+
 def test_markdown_report_is_deterministic_and_uses_existing_takeaways() -> None:
     report = build_report(_manifest(), _state(), reported_at="2026-07-02T10:31:00+08:00")
 

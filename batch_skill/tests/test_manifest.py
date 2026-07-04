@@ -249,6 +249,13 @@ def test_manifest_from_pdf_paths_file_resolves_relative_paths_from_file_director
     assert manifest["items"][0]["input"]["path"] == str(pdf.resolve())
 
 
+def test_manifest_from_pdf_paths_file_reports_missing_paths_file(tmp_path: Path) -> None:
+    missing = tmp_path / "missing-paths.txt"
+
+    with pytest.raises(ManifestError, match="paths file"):
+        manifest_from_pdf_paths_file(missing, batch_title="missing paths")
+
+
 def test_manifest_from_zotero_titles_file_uses_title_items(tmp_path: Path) -> None:
     titles = tmp_path / "titles.txt"
     titles.write_text("# comment\nFirst paper\n\nSecond paper\n", encoding="utf-8")
@@ -259,6 +266,13 @@ def test_manifest_from_zotero_titles_file_uses_title_items(tmp_path: Path) -> No
     assert manifest["write_policy"] == ZOTERO_WRITE_POLICY
     assert [item["input"]["title"] for item in manifest["items"]] == ["First paper", "Second paper"]
     assert all(item["input_type"] == "zotero_title" for item in manifest["items"])
+
+
+def test_manifest_from_zotero_titles_file_reports_missing_titles_file(tmp_path: Path) -> None:
+    missing = tmp_path / "missing-titles.txt"
+
+    with pytest.raises(ManifestError, match="titles file"):
+        manifest_from_zotero_titles_file(missing, batch_title="missing titles")
 
 
 def test_manifest_from_zotero_titles_file_accepts_prepare_only_override(tmp_path: Path) -> None:
