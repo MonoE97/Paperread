@@ -47,7 +47,7 @@ def render_worker_prompt(*, batch_run: str, assignment: dict[str, Any]) -> str:
                     "",
                     f"prepared_analysis_dir: {prepared_analysis_dir}",
                     f"prepared_final_note_path: {prepared_final_note_path}",
-                    "Continue from the prepared local PDF bundle: read context.md, section_context.md, and figure_context.md from prepared_analysis_dir; write summary.json and review.json there; run validate-summary-json, apply-review, lint-summary, validate-trusted-summary, and prepare-local-note-candidate on that directory. Do not run prepare-pdf again unless the prepared bundle is missing or unreadable.",
+                    "Continue from the prepared local PDF bundle: read context.md and section_context.md from prepared_analysis_dir. Use figure_context.md only if it is present. Write summary.json and review.json there; run validate-summary-json, apply-review, lint-summary, validate-trusted-summary, and prepare-local-note-candidate on that directory. Do not run prepare-pdf again unless the prepared bundle is missing or unreadable.",
                 ]
             )
         else:

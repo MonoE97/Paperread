@@ -26,8 +26,8 @@ from paperread_batch.report import build_report, render_markdown_report
 from paperread_batch.runs import allocate_batch_run_dir
 from paperread_batch.state import (
     INTERRUPTED,
+    PENDING,
     RUNNING,
-    SUCCEEDED,
     StateError,
     allocate_next,
     initial_state,
@@ -204,7 +204,7 @@ def _local_prepare_candidates(manifest: dict, state: dict) -> list[dict]:
         if manifest_item["input_type"] != "pdf_path":
             continue
         state_item = state_by_id[manifest_item["item_id"]]
-        if state_item.get("status") in {RUNNING, SUCCEEDED}:
+        if state_item.get("status") != PENDING:
             continue
         local_prepare_status = str(state_item.get("local_prepare_status", "")).strip() or "pending"
         if local_prepare_status == "prepared":
@@ -466,7 +466,7 @@ def prepare_local_pdfs_command(
             current_item = current_items.get(item_id)
             if current_item is None:
                 continue
-            if current_item.get("status") in {RUNNING, SUCCEEDED}:
+            if current_item.get("status") != PENDING:
                 continue
             if current_item.get("local_prepare_status") == "prepared":
                 continue
