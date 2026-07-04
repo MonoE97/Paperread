@@ -243,6 +243,121 @@ def test_worker_prompt_rejects_interrupted_assignment(tmp_path: Path) -> None:
     assert "item is not currently running" in result.output
 
 
+def test_prepare_local_pdfs_records_prepared_pdf_bundle(tmp_path: Path, monkeypatch) -> None:
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    paths = tmp_path / "paths.txt"
+    paths.write_text(str(pdf), encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    batch_run = tmp_path / "batch-run"
+    paperread_root = _fake_paperread_root(tmp_path)
+    analysis_dir = tmp_path / "paper_analysis"
+    final_note = tmp_path / "paper_note.md"
+    result = runner.invoke(
+        app,
+        ["manifest", "from-pdf-paths", str(paths), "--batch-title", "pdf batch", "--output", str(manifest_path)],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["init", "--manifest", str(manifest_path), "--output", str(batch_run)])
+    assert result.exit_code == 0, result.output
+
+    def fake_run(command, cwd, **_kwargs):
+        assert command == ["uv", "run", "paperread", "--help"]
+        assert Path(cwd) == paperread_root
+        return SimpleNamespace(returncode=0, stderr="")
+
+    def fake_prepare_pdf(*, paperread_root, pdf_path, timeout_seconds):
+        analysis_dir.mkdir(exist_ok=True)
+        manifest_file = analysis_dir / "run.json"
+        manifest_file.write_text("{}", encoding="utf-8")
+        return {
+            "schema_version": "paperread-batch.local-prepare-result.v1",
+            "status": "prepared",
+            "analysis_dir": str(analysis_dir),
+            "final_note_path": str(final_note),
+            "manifest_path": str(manifest_file),
+            "failure_reason": "",
+        }
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli_module, "prepare_pdf_bundle_subprocess", fake_prepare_pdf)
+
+    result = runner.invoke(
+        app,
+        ["prepare-local-pdfs", str(batch_run), "--paperread-root", str(paperread_root), "--concurrency", "2"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (batch_run / "items" / "001.prepare.json").exists()
+    state = _read_json(batch_run / "state.json")
+    assert state["items"][0]["local_prepare_status"] == "prepared"
+
+    result = runner.invoke(app, ["next", str(batch_run), "--limit", "1"])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["worker-prompt", str(batch_run), "001"])
+    assert result.exit_code == 0, result.output
+    assert "Continue from the prepared local PDF bundle" in result.output
+    assert str(analysis_dir) in result.output
+    assert "Do not run prepare-pdf again" in result.output
+
+
+def test_prepare_local_pdfs_skips_already_prepared_items(tmp_path: Path, monkeypatch) -> None:
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    paths = tmp_path / "paths.txt"
+    paths.write_text(str(pdf), encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    batch_run = tmp_path / "batch-run"
+    paperread_root = _fake_paperread_root(tmp_path)
+    analysis_dir = tmp_path / "paper_analysis"
+    manifest_file = analysis_dir / "run.json"
+
+    result = runner.invoke(
+        app,
+        ["manifest", "from-pdf-paths", str(paths), "--batch-title", "pdf batch", "--output", str(manifest_path)],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["init", "--manifest", str(manifest_path), "--output", str(batch_run)])
+    assert result.exit_code == 0, result.output
+
+    def fake_run(command, cwd, **_kwargs):
+        return SimpleNamespace(returncode=0, stderr="")
+
+    calls: list[str] = []
+
+    def fake_prepare_pdf(*, paperread_root, pdf_path, timeout_seconds):
+        calls.append(pdf_path)
+        analysis_dir.mkdir(exist_ok=True)
+        manifest_file.write_text("{}", encoding="utf-8")
+        return {
+            "schema_version": "paperread-batch.local-prepare-result.v1",
+            "status": "prepared",
+            "analysis_dir": str(analysis_dir),
+            "final_note_path": str(tmp_path / "paper_note.md"),
+            "manifest_path": str(manifest_file),
+            "failure_reason": "",
+        }
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli_module, "prepare_pdf_bundle_subprocess", fake_prepare_pdf)
+    result = runner.invoke(
+        app,
+        ["prepare-local-pdfs", str(batch_run), "--paperread-root", str(paperread_root), "--concurrency", "2"],
+    )
+    assert result.exit_code == 0, result.output
+    assert calls == [str(pdf.resolve())]
+
+    calls.clear()
+    result = runner.invoke(
+        app,
+        ["prepare-local-pdfs", str(batch_run), "--paperread-root", str(paperread_root), "--concurrency", "2"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "local_prepare_skipped: no pending pdf_path items" in result.output
+    assert calls == []
+
+
 def test_manifest_from_zotero_titles_command_accepts_prepare_only_override(tmp_path: Path) -> None:
     titles = tmp_path / "titles.txt"
     titles.write_text("First paper\n", encoding="utf-8")

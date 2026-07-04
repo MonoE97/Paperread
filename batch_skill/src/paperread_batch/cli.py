@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -20,17 +21,20 @@ from paperread_batch.manifest import (
     manifest_from_zotero_titles_file,
     validate_manifest,
 )
+from paperread_batch.local_prepare import prepare_pdf_bundle_subprocess
 from paperread_batch.report import build_report, render_markdown_report
 from paperread_batch.runs import allocate_batch_run_dir
 from paperread_batch.state import (
     INTERRUPTED,
     RUNNING,
+    SUCCEEDED,
     StateError,
     allocate_next,
     initial_state,
     mark_interrupted_running_items,
     pending_write_items,
     record_item_result,
+    record_local_prepare_result,
     record_write_result,
     retry_failed,
     set_resume_decision,
@@ -185,8 +189,30 @@ def _attempt_item_result_path(items_dir: Path, item_id: str, attempt_count: int)
     return _item_result_path(items_dir, f"{item_id}.attempt-{attempt_count}")
 
 
+def _prepare_result_path(items_dir: Path, item_id: str) -> Path:
+    return _item_result_path(items_dir, f"{item_id}.prepare")
+
+
 def _write_result_path(items_dir: Path, item_id: str) -> Path:
     return _item_result_path(items_dir, f"{item_id}.write")
+
+
+def _local_prepare_candidates(manifest: dict, state: dict) -> list[dict]:
+    state_by_id = {item["item_id"]: item for item in state["items"]}
+    candidates: list[dict] = []
+    for manifest_item in manifest["items"]:
+        if manifest_item["input_type"] != "pdf_path":
+            continue
+        state_item = state_by_id[manifest_item["item_id"]]
+        if state_item.get("status") in {RUNNING, SUCCEEDED}:
+            continue
+        local_prepare_status = str(state_item.get("local_prepare_status", "")).strip() or "pending"
+        if local_prepare_status == "prepared":
+            continue
+        if local_prepare_status not in {"pending", "failed"}:
+            continue
+        candidates.append(manifest_item)
+    return candidates
 
 
 def _date_from_iso(timestamp: str):
@@ -382,6 +408,64 @@ def validate_command(
     root = _validate_paperread_root(paperread_root)
     console.print(f"batch_run_valid: {run_dir}")
     console.print(f"paperread_root: {root}")
+
+
+@app.command("prepare-local-pdfs")
+def prepare_local_pdfs_command(
+    batch_run: Path,
+    paperread_root: Path | None = typer.Option(None, "--paperread-root", help="Installed paperread skill root."),
+    concurrency: int = typer.Option(3, "--concurrency", min=1, help="Maximum concurrent prepare-pdf subprocesses."),
+    timeout_seconds: int = typer.Option(900, "--timeout-seconds", min=30, help="Timeout per PDF prepare subprocess."),
+) -> None:
+    """Prepare local PDF analysis bundles concurrently as a non-LLM fallback."""
+    run_dir = Path(batch_run)
+    root = _validate_paperread_root(paperread_root)
+    manifest = _read_manifest(run_dir)
+    with exclusive_file_lock(_state_lock_path(run_dir)):
+        state = _read_state(run_dir)
+        pdf_item_count = sum(1 for item in manifest["items"] if item["input_type"] == "pdf_path")
+        pdf_items = _local_prepare_candidates(manifest, state)
+    if pdf_item_count == 0:
+        console.print("local_prepare_skipped: no pdf_path items")
+        return
+    if not pdf_items:
+        console.print("local_prepare_skipped: no pending pdf_path items")
+        return
+    results: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        future_to_item = {
+            executor.submit(
+                prepare_pdf_bundle_subprocess,
+                paperread_root=root,
+                pdf_path=item["input"]["path"],
+                timeout_seconds=timeout_seconds,
+            ): item
+            for item in pdf_items
+        }
+        for future in as_completed(future_to_item):
+            item = future_to_item[future]
+            try:
+                results[item["item_id"]] = future.result()
+            except Exception as exc:
+                results[item["item_id"]] = {
+                    "schema_version": "paperread-batch.local-prepare-result.v1",
+                    "status": "failed",
+                    "analysis_dir": "",
+                    "final_note_path": "",
+                    "manifest_path": "",
+                    "failure_reason": str(exc),
+                }
+    with exclusive_file_lock(_state_lock_path(run_dir)):
+        state = _read_state(run_dir)
+        items_dir = run_dir / "items"
+        items_dir.mkdir(exist_ok=True)
+        updated = state
+        for item_id, result in sorted(results.items()):
+            archived_result = {**result, "item_id": item_id}
+            write_json_atomic(_prepare_result_path(items_dir, item_id), archived_result)
+            updated = record_local_prepare_result(updated, item_id, archived_result)
+        write_json_atomic(run_dir / "state.json", updated)
+    console.print(f"local_prepare_recorded: {len(results)}")
 
 
 @app.command("next")
