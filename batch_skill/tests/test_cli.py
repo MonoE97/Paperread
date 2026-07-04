@@ -163,6 +163,85 @@ def test_batch_run_init_validate_next_record_report_retry(tmp_path: Path, monkey
     assert state["items"][1]["status"] == "pending"
 
 
+def test_worker_prompt_for_pdf_item_preserves_local_only_rule(tmp_path: Path) -> None:
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    manifest_path = tmp_path / "manifest.json"
+    batch_run = tmp_path / "batch-run"
+    result = runner.invoke(
+        app,
+        ["manifest", "from-pdf-paths", str(tmp_path / "paths.txt"), "--batch-title", "pdf batch", "--output", str(manifest_path)],
+    )
+    assert result.exit_code != 0
+    (tmp_path / "paths.txt").write_text(str(pdf), encoding="utf-8")
+    result = runner.invoke(
+        app,
+        ["manifest", "from-pdf-paths", str(tmp_path / "paths.txt"), "--batch-title", "pdf batch", "--output", str(manifest_path)],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["init", "--manifest", str(manifest_path), "--output", str(batch_run)])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["next", str(batch_run), "--limit", "1"])
+    assert result.exit_code == 0, result.output
+
+    result = runner.invoke(app, ["worker-prompt", str(batch_run), "001"])
+
+    assert result.exit_code == 0, result.output
+    assert "input_type: pdf_path" in result.output
+    assert "local-output only" in result.output
+    assert "Do not search Zotero" in result.output
+
+
+def test_validate_result_does_not_mutate_state_or_archive_result(tmp_path: Path) -> None:
+    titles = tmp_path / "titles.txt"
+    titles.write_text("First paper\n", encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    batch_run = tmp_path / "batch-run"
+    result = runner.invoke(
+        app,
+        ["manifest", "from-zotero-titles", str(titles), "--batch-title", "validate batch", "--output", str(manifest_path)],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["init", "--manifest", str(manifest_path), "--output", str(batch_run)])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["next", str(batch_run), "--limit", "1", "--now", "2026-07-03T10:00:00+08:00"])
+    assert result.exit_code == 0, result.output
+    before = _read_json(batch_run / "state.json")
+
+    result_path = _successful_result(tmp_path, write_ready=True)
+    result = runner.invoke(
+        app,
+        ["validate-result", str(batch_run), "001", "--result", str(result_path), "--now", "2026-07-03T10:01:00+08:00"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _read_json(batch_run / "state.json") == before
+    assert not (batch_run / "items" / "001.json").exists()
+
+
+def test_worker_prompt_rejects_interrupted_assignment(tmp_path: Path) -> None:
+    titles = tmp_path / "titles.txt"
+    titles.write_text("First paper\n", encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    batch_run = tmp_path / "batch-run"
+    result = runner.invoke(
+        app,
+        ["manifest", "from-zotero-titles", str(titles), "--batch-title", "interrupted prompt", "--output", str(manifest_path)],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["init", "--manifest", str(manifest_path), "--output", str(batch_run)])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["next", str(batch_run), "--limit", "1", "--now", "2026-07-03T10:00:00+08:00"])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["resume", str(batch_run)])
+    assert result.exit_code == 0, result.output
+
+    result = runner.invoke(app, ["worker-prompt", str(batch_run), "001"])
+
+    assert result.exit_code == 1
+    assert "item is not currently running" in result.output
+
+
 def test_manifest_from_zotero_titles_command_accepts_prepare_only_override(tmp_path: Path) -> None:
     titles = tmp_path / "titles.txt"
     titles.write_text("First paper\n", encoding="utf-8")

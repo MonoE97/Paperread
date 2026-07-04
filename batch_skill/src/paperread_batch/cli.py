@@ -34,6 +34,7 @@ from paperread_batch.state import (
     record_write_result,
     retry_failed,
 )
+from paperread_batch.worker_contract import render_worker_prompt
 
 console = Console()
 app = typer.Typer(help="Batch orchestration utilities for Paperread.")
@@ -383,6 +384,20 @@ def next_command(
     typer.echo(json.dumps(_selected_for_dispatch(manifest, selected), ensure_ascii=False, indent=2))
 
 
+@app.command("worker-prompt")
+def worker_prompt_command(batch_run: Path, item_id: str) -> None:
+    """Render a deterministic prompt for one currently assigned worker item."""
+    run_dir = Path(batch_run)
+    manifest, state = _read_batch_files(run_dir)
+    state_item = next((item for item in state["items"] if item.get("item_id") == item_id), None)
+    if state_item is None:
+        _exit_error(f"worker_prompt_failed: unknown item_id: {item_id}")
+    if state_item.get("status") != RUNNING:
+        _exit_error(f"worker_prompt_failed: item is not currently running: {item_id}")
+    assignment = _selected_for_dispatch(manifest, [state_item])[0]
+    typer.echo(render_worker_prompt(batch_run=str(run_dir), assignment=assignment))
+
+
 @app.command("record-result")
 def record_result_command(
     batch_run: Path,
@@ -405,6 +420,25 @@ def record_result_command(
         write_json_atomic(_item_result_path(items_dir, item_id), result_payload)
         write_json_atomic(run_dir / "state.json", updated)
     console.print(f"recorded_result: {item_id}")
+
+
+@app.command("validate-result")
+def validate_result_command(
+    batch_run: Path,
+    item_id: str,
+    result: Path = typer.Option(..., "--result", help="Item result JSON."),
+    now: str | None = typer.Option(None, "--now", help="Timestamp override for tests."),
+) -> None:
+    """Validate one worker result without mutating state."""
+    run_dir = Path(batch_run)
+    manifest = _read_manifest(run_dir)
+    result_payload = _read_object(result, "result")
+    state = _read_state(run_dir)
+    try:
+        record_item_result(state, manifest, item_id, result_payload, now=now or _now_iso())
+    except (StateError, JsonFileError) as exc:
+        _exit_error(f"validate_result_failed: {exc}")
+    console.print(f"result_valid: {item_id}")
 
 
 @app.command("next-write")
