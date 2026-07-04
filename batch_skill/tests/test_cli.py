@@ -464,6 +464,25 @@ def test_next_write_and_record_write_commands(tmp_path: Path) -> None:
     assert state["items"][0]["zotero_note_key"] == "NOTE1"
 
 
+def test_next_write_rejects_parallel_write_limit(tmp_path: Path) -> None:
+    titles = tmp_path / "titles.txt"
+    titles.write_text("First paper\n", encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    batch_run = tmp_path / "batch-run"
+    result = runner.invoke(
+        app,
+        ["manifest", "from-zotero-titles", str(titles), "--batch-title", "write limit", "--output", str(manifest_path)],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["init", "--manifest", str(manifest_path), "--output", str(batch_run)])
+    assert result.exit_code == 0, result.output
+
+    result = runner.invoke(app, ["next-write", str(batch_run), "--limit", "2"])
+
+    assert result.exit_code == 1
+    assert "serial" in result.output
+
+
 def test_init_without_output_allocates_default_run_dir(tmp_path: Path, monkeypatch) -> None:
     batch_root = tmp_path / "paperread-batch"
     batch_root.mkdir()

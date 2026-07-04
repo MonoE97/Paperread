@@ -552,6 +552,8 @@ def next_write_command(
     limit: int = typer.Option(1, "--limit", min=1, help="Maximum number of prepared Zotero notes to emit."),
 ) -> None:
     """List prepared Zotero note candidates that still need MCP write_note and verification."""
+    if limit != 1:
+        _exit_error("next_write_failed: Zotero writes are serial; use --limit 1")
     run_dir = Path(batch_run)
     manifest = _read_manifest(run_dir)
     with exclusive_file_lock(_state_lock_path(run_dir)):
