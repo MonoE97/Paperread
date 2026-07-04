@@ -191,6 +191,8 @@ def test_worker_prompt_for_pdf_item_preserves_local_only_rule(tmp_path: Path) ->
     assert "input_type: pdf_path" in result.output
     assert "local-output only" in result.output
     assert "Do not search Zotero" in result.output
+    assert "Chinese-first rendered fields" in result.output
+    assert "contact loss -> 接触损失" in result.output
 
 
 def test_validate_result_does_not_mutate_state_or_archive_result(tmp_path: Path) -> None:

@@ -245,6 +245,12 @@ def _validate_success_result(result: dict[str, Any], manifest_item: dict[str, An
         normalized["note_html"] = str(result.get("note_html", "")).strip()
         normalized["gate_report"] = str(result.get("gate_report", "")).strip()
         normalized["write_payload"] = ""
+        normalized["prepared_analysis_dir"] = normalized["paper_reader_run_dir"]
+        normalized["prepared_final_note_path"] = normalized["local_note_path"]
+        normalized["prepared_manifest_path"] = _require_readable_file(
+            str(Path(normalized["paper_reader_run_dir"]) / "run.json"),
+            "paper_reader_run_dir/run.json",
+        )
     try:
         note_source_path = normalized["note_md"] or normalized["local_note_path"]
         normalized.update(extract_takeaway(Path(note_source_path), Path(normalized["summary_json"])))
@@ -292,6 +298,9 @@ def record_item_result(
         normalized = _validate_success_result(result, manifest_item)
         for key, value in normalized.items():
             state_item[key] = value
+        if manifest_item["expected_output"] == "local_note":
+            state_item["local_prepare_status"] = "prepared"
+            state_item["local_prepare_failure_reason"] = ""
         state_item["write_status"] = _write_status_after_success(manifest, manifest_item, state_item)
         state_item["failure_reason"] = ""
     elif status == FAILED:

@@ -39,6 +39,13 @@ def _write_status(item_state: dict[str, Any], *, write_policy: str) -> str:
     return "blocked"
 
 
+def _effective_write_policy(manifest: dict[str, Any]) -> str:
+    items = manifest.get("items", [])
+    if items and all(item.get("expected_output") == "local_note" for item in items):
+        return "local_only"
+    return str(manifest.get("write_policy", ""))
+
+
 def _path_entries(item_state: dict[str, Any]) -> list[str]:
     keys = [
         "note_md",
@@ -93,6 +100,7 @@ def build_report(manifest: dict[str, Any], state: dict[str, Any], *, reported_at
         "source_summary": manifest["source_summary"],
         "configured_concurrency": manifest["default_concurrency"],
         "write_policy": manifest["write_policy"],
+        "effective_write_policy": _effective_write_policy(manifest),
         "total_items": len(manifest["items"]),
         "batch_status": state.get("batch_status", ""),
         "counts_by_status": dict(sorted(status_counts.items())),
@@ -115,6 +123,7 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         f"- Source: {report['source_summary']['source_type']} - {report['source_summary']['description']}",
         f"- Configured concurrency: {report['configured_concurrency']}",
         f"- Write policy: {report['write_policy']}",
+        f"- Effective write policy: {report['effective_write_policy']}",
         f"- Batch status: {report['batch_status']}",
         f"- Total items: {report['total_items']}",
         "",
@@ -155,5 +164,8 @@ def render_markdown_report(report: dict[str, Any]) -> str:
             + " |"
         )
     lines.append("")
-    lines.append("Note: output paths are local-only path references from this machine.")
+    if report.get("effective_write_policy") == "local_only":
+        lines.append("Note: Local PDF inputs do not enter Zotero write-through; output paths are local-only path references from this machine.")
+    else:
+        lines.append("Note: output paths are local-only path references from this machine.")
     return "\n".join(lines) + "\n"

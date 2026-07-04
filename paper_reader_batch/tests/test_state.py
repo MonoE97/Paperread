@@ -277,6 +277,48 @@ def test_record_local_note_result_rejects_write_payload(tmp_path: Path) -> None:
         record_item_result(state, manifest, "001", result, now="2026-07-03T10:02:00+08:00")
 
 
+def test_record_local_note_success_clears_stale_local_prepare_failure(tmp_path: Path) -> None:
+    manifest = _pdf_manifest(tmp_path)
+    state = initial_state(manifest)
+    state["items"][0]["local_prepare_status"] = "failed"
+    state["items"][0]["local_prepare_failure_reason"] = "prepare-pdf returned invalid JSON"
+    state, _selected = allocate_next(state, limit=1, now="2026-07-03T10:01:00+08:00")
+    run_dir = tmp_path / "paper_analysis"
+    run_manifest = run_dir / "run.json"
+    final_note = tmp_path / "paper_note.md"
+    result = {
+        "schema_version": "paper_reader_batch.item-result.v1",
+        "item_id": "001",
+        "worker_id": "worker-001",
+        "attempt_count": 1,
+        "status": "succeeded",
+        "paper_reader_run_dir": str(run_dir),
+        "summary_json": _write_json(run_dir / "summary.json", {"tldr": "本地结论"}),
+        "note_md": "",
+        "note_html": "",
+        "gate_report": "",
+        "write_payload": "",
+        "local_note_path": _write_text(final_note, "| 30 秒结论 | 本地结论 |"),
+        "local_gate_report": _write_json(run_dir / "local-gate-report.json", {"status": "local_ready"}),
+        "failure_reason": "",
+    }
+    run_manifest.write_text(
+        json.dumps({"source_type": "pdf_path", "final_note_path": str(final_note)}),
+        encoding="utf-8",
+    )
+
+    updated = record_item_result(state, manifest, "001", result, now="2026-07-03T10:02:00+08:00")
+
+    item = updated["items"][0]
+    assert item["status"] == "succeeded"
+    assert item["write_status"] == "not_applicable"
+    assert item["local_prepare_status"] == "prepared"
+    assert item["prepared_analysis_dir"] == str(run_dir)
+    assert item["prepared_final_note_path"] == str(final_note)
+    assert item["prepared_manifest_path"] == str(run_manifest)
+    assert item["local_prepare_failure_reason"] == ""
+
+
 def test_record_success_with_write_payload_queues_zotero_write(tmp_path: Path) -> None:
     manifest = _zotero_manifest()
     state, _selected = allocate_next(initial_state(manifest), limit=1, now="2026-07-02T10:01:00+08:00")

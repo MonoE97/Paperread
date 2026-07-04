@@ -93,6 +93,32 @@ def test_prepare_pdf_command_creates_versioned_analysis_dir_and_manifest(monkeyp
     assert manifest["final_note_path"] == str(tmp_path / "paper_note.md")
 
 
+def test_prepare_pdf_command_writes_machine_json_to_file(monkeypatch, tmp_path: Path) -> None:
+    patch_figure_extraction(monkeypatch)
+    pdf_path = tmp_path / "paper.pdf"
+    make_pdf(pdf_path)
+    json_output = tmp_path / "prepare-result.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "prepare-pdf",
+            str(pdf_path),
+            "--title",
+            "Explicit PDF Title",
+            "--json-output",
+            str(json_output),
+        ],
+    )
+
+    assert result.exit_code == 0
+    stdout_payload = json.loads(result.stdout)
+    file_payload = json.loads(json_output.read_text(encoding="utf-8"))
+    assert file_payload == stdout_payload
+    assert Path(file_payload["analysis_dir"]) == tmp_path / "paper_analysis"
+    assert Path(file_payload["manifest_path"]).exists()
+
+
 def test_prepare_pdf_command_versions_when_outputs_already_exist(monkeypatch, tmp_path: Path) -> None:
     patch_figure_extraction(monkeypatch)
     pdf_path = tmp_path / "paper.pdf"

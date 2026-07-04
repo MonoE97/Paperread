@@ -37,6 +37,11 @@ def render_worker_prompt(*, batch_run: str, assignment: dict[str, Any]) -> str:
                 "## Local PDF Rules",
                 "",
                 "This item is local-output only. Do not search Zotero, do not check Zotero duplicates, do not call refresh-live-notes, do not create write-payload.json, and do not write Zotero.",
+                "",
+                "## Chinese-first rendered fields",
+                "",
+                "Rendered note fields must use Chinese prose. Keep formulas, abbreviations, method names, units, evidence locators, and canonical keys as-is, but translate explanatory English phrases before running lint-summary.",
+                "Common replacements: contact loss -> 接触损失; stack pressure -> 堆压; intrinsic window -> 本征窗口; direct decomposition window -> 直接分解窗口; impurity deposition -> 杂质沉积; stripping -> 剥离; plating -> 沉积; void -> 空洞; interface resistance -> 界面阻抗.",
             ]
         )
         if assignment.get("local_prepare_status") == "prepared" and prepared_analysis_dir:

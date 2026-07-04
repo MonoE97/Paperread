@@ -85,6 +85,50 @@ def _state() -> dict:
     }
 
 
+def _local_manifest() -> dict:
+    return {
+        "schema_version": "paper_reader_batch.manifest.v1",
+        "created_at": "2026-07-02T10:00:00+08:00",
+        "batch_title": "local report batch",
+        "default_concurrency": 3,
+        "write_policy": "zotero_write",
+        "source_summary": {"source_type": "pdf_folder", "description": "/local/folder"},
+        "items": [
+            {
+                "item_id": "001",
+                "input_type": "pdf_path",
+                "input": {"path": "/local/paper.pdf"},
+                "expected_output": "local_note",
+            }
+        ],
+    }
+
+
+def _local_state() -> dict:
+    return {
+        "schema_version": "paper_reader_batch.state.v1",
+        "batch_title": "local report batch",
+        "batch_status": "completed",
+        "created_at": "2026-07-02T10:00:00+08:00",
+        "updated_at": "2026-07-02T10:30:00+08:00",
+        "items": [
+            {
+                "item_id": "001",
+                "input_type": "pdf_path",
+                "expected_output": "local_note",
+                "status": "succeeded",
+                "thirty_second_takeaway": "PDF note 中的结论。",
+                "local_note_path": "/local/paper_note.md",
+                "local_gate_report": "/local/paper_analysis/local-gate-report.json",
+                "takeaway_source_type": "rendered_note_30_second_row",
+                "takeaway_source_path": "/local/paper_note.md",
+                "takeaway_source_sha256": "def",
+                "failure_reason": "",
+            }
+        ],
+    }
+
+
 def test_build_report_counts_statuses_and_outputs() -> None:
     report = build_report(_manifest(), _state(), reported_at="2026-07-02T10:31:00+08:00")
 
@@ -95,6 +139,16 @@ def test_build_report_counts_statuses_and_outputs() -> None:
     assert report["items"][0]["zotero_note_key"] == "NOTE1"
     assert report["items"][1]["write_status"] == "not_applicable"
     assert report["items"][2]["write_status"] == "failed"
+
+
+def test_build_report_marks_pure_local_batch_effective_write_policy_local_only() -> None:
+    report = build_report(_local_manifest(), _local_state(), reported_at="2026-07-02T10:31:00+08:00")
+
+    assert report["write_policy"] == "zotero_write"
+    assert report["effective_write_policy"] == "local_only"
+    markdown = render_markdown_report(report)
+    assert "- Effective write policy: local_only" in markdown
+    assert "Local PDF inputs do not enter Zotero write-through" in markdown
 
 
 def test_build_report_preserves_pending_prepare_write_status() -> None:

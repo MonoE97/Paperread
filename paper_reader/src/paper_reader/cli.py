@@ -187,6 +187,11 @@ def prepare_pdf_command(
     doi: str | None = typer.Option(None, "--doi", help="Override DOI."),
     url: str | None = typer.Option(None, "--url", help="Override source URL."),
     max_pages: int | None = typer.Option(None, "--max-pages", min=1, help="Extract at most this many pages."),
+    json_output: Path | None = typer.Option(
+        None,
+        "--json-output",
+        help="Also write the machine-readable result JSON to this file.",
+    ),
 ) -> None:
     """Prepare a local PDF analysis bundle beside the PDF without writing Zotero."""
     resolved_pdf_path = Path(pdf_path).expanduser()
@@ -240,7 +245,11 @@ def prepare_pdf_command(
         "manifest_path": str(manifest_path),
         **{key: value for key, value in bundle.items() if key != "metadata"},
     }
-    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+    payload_json = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    if json_output is not None:
+        json_output.parent.mkdir(parents=True, exist_ok=True)
+        json_output.write_text(payload_json, encoding="utf-8")
+    typer.echo(payload_json, nl=False)
 
 
 @app.command("create-run")
