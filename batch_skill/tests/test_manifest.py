@@ -140,6 +140,32 @@ def test_validate_manifest_rejects_duplicate_item_ids() -> None:
         validate_manifest(manifest)
 
 
+def test_validate_manifest_rejects_duplicate_pdf_paths(tmp_path: Path) -> None:
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    manifest = build_manifest(
+        batch_title="duplicate pdfs",
+        source_summary={"source_type": "pdf_paths", "description": "test"},
+        items=[
+            {
+                "item_id": "001",
+                "input_type": "pdf_path",
+                "input": {"path": str(pdf)},
+                "expected_output": "local_note",
+            },
+            {
+                "item_id": "002",
+                "input_type": "pdf_path",
+                "input": {"path": str(pdf.resolve())},
+                "expected_output": "local_note",
+            },
+        ],
+    )
+
+    with pytest.raises(ManifestError, match="duplicate pdf_path"):
+        validate_manifest(manifest)
+
+
 def test_validate_manifest_rejects_path_like_item_ids() -> None:
     manifest = build_manifest(
         batch_title="unsafe ids",

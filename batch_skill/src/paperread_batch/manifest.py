@@ -99,6 +99,18 @@ def _normalize_item(raw_item: Any, index: int) -> dict[str, Any]:
     }
 
 
+def _reject_duplicate_pdf_paths(items: list[dict[str, Any]]) -> None:
+    seen: dict[str, str] = {}
+    for item in items:
+        if item["input_type"] != "pdf_path":
+            continue
+        path = item["input"]["path"]
+        first_item_id = seen.get(path)
+        if first_item_id is not None:
+            raise ManifestError(f"duplicate pdf_path: {path} used by {first_item_id} and {item['item_id']}")
+        seen[path] = item["item_id"]
+
+
 def validate_manifest(manifest: Any) -> dict[str, Any]:
     payload = _require_object(manifest, "manifest")
     if payload.get("schema_version") != MANIFEST_SCHEMA_VERSION:
@@ -127,6 +139,7 @@ def validate_manifest(manifest: Any) -> dict[str, Any]:
             raise ManifestError(f"duplicate item_id: {item['item_id']}")
         seen.add(item["item_id"])
         items.append(item)
+    _reject_duplicate_pdf_paths(items)
 
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
