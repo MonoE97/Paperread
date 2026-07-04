@@ -460,12 +460,22 @@ def prepare_local_pdfs_command(
         items_dir = run_dir / "items"
         items_dir.mkdir(exist_ok=True)
         updated = state
+        current_items = {item["item_id"]: item for item in state["items"]}
+        recorded_count = 0
         for item_id, result in sorted(results.items()):
+            current_item = current_items.get(item_id)
+            if current_item is None:
+                continue
+            if current_item.get("status") in {RUNNING, SUCCEEDED}:
+                continue
+            if current_item.get("local_prepare_status") == "prepared":
+                continue
             archived_result = {**result, "item_id": item_id}
             write_json_atomic(_prepare_result_path(items_dir, item_id), archived_result)
             updated = record_local_prepare_result(updated, item_id, archived_result)
+            recorded_count += 1
         write_json_atomic(run_dir / "state.json", updated)
-    console.print(f"local_prepare_recorded: {len(results)}")
+    console.print(f"local_prepare_recorded: {recorded_count}")
 
 
 @app.command("next")

@@ -358,6 +358,64 @@ def test_prepare_local_pdfs_skips_already_prepared_items(tmp_path: Path, monkeyp
     assert calls == []
 
 
+def test_prepare_local_pdfs_does_not_record_result_for_item_claimed_during_prepare(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    paths = tmp_path / "paths.txt"
+    paths.write_text(str(pdf), encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    batch_run = tmp_path / "batch-run"
+    paperread_root = _fake_paperread_root(tmp_path)
+    analysis_dir = tmp_path / "paper_analysis"
+    manifest_file = analysis_dir / "run.json"
+
+    result = runner.invoke(
+        app,
+        ["manifest", "from-pdf-paths", str(paths), "--batch-title", "pdf batch", "--output", str(manifest_path)],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["init", "--manifest", str(manifest_path), "--output", str(batch_run)])
+    assert result.exit_code == 0, result.output
+
+    def fake_run(command, cwd, **_kwargs):
+        return SimpleNamespace(returncode=0, stderr="")
+
+    def fake_prepare_pdf(*, paperread_root, pdf_path, timeout_seconds):
+        state = _read_json(batch_run / "state.json")
+        state["items"][0]["status"] = "running"
+        state["items"][0]["worker_id"] = "worker-001"
+        state["items"][0]["attempt_count"] = 1
+        (batch_run / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        analysis_dir.mkdir(exist_ok=True)
+        manifest_file.write_text("{}", encoding="utf-8")
+        return {
+            "schema_version": "paperread-batch.local-prepare-result.v1",
+            "status": "prepared",
+            "analysis_dir": str(analysis_dir),
+            "final_note_path": str(tmp_path / "paper_note.md"),
+            "manifest_path": str(manifest_file),
+            "failure_reason": "",
+        }
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli_module, "prepare_pdf_bundle_subprocess", fake_prepare_pdf)
+
+    result = runner.invoke(
+        app,
+        ["prepare-local-pdfs", str(batch_run), "--paperread-root", str(paperread_root), "--concurrency", "1"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "local_prepare_recorded: 0" in result.output
+    assert not (batch_run / "items" / "001.prepare.json").exists()
+    state = _read_json(batch_run / "state.json")
+    assert state["items"][0]["status"] == "running"
+    assert state["items"][0]["local_prepare_status"] == "pending"
+
+
 def test_manifest_from_zotero_titles_command_accepts_prepare_only_override(tmp_path: Path) -> None:
     titles = tmp_path / "titles.txt"
     titles.write_text("First paper\n", encoding="utf-8")

@@ -55,11 +55,13 @@ PDF folder and PDF path items are local-only: do not run Zotero lookup, duplicat
 An existing directory path passed through `$paperread` should be routed here
 instead of being treated as a Zotero title fragment.
 
-Default Codex concurrency is 3. Claude-compatible fallback is sequential. The
-default write policy is `zotero_write`: Zotero-backed items must proceed from
-prepared candidates to MCP `write_note`, read-only verification, and
-`record-write`. Pass `--write-policy prepare_only` only for an explicit dry-run.
-PDF items remain local-output only. The batch CLI must not call Zotero MCP
-directly; the outer agent performs the write step from `next-write`. Per-paper
-30-second report entries must be extracted from each single-paper note's
-`30 秒结论` row, with structured fallback only when that row is unavailable.
+Default Codex concurrency is 3. When outer-agent parallelism is unavailable,
+use `prepare-local-pdfs` as the fallback pre-extraction path for local PDF
+items, then continue deep reading from the prepared bundles. The default write
+policy is `zotero_write`: Zotero-backed items must proceed from prepared
+candidates to MCP `write_note`, read-only verification, and `record-write`.
+Pass `--write-policy prepare_only` only for an explicit dry-run. PDF items
+remain local-output only. The batch CLI must not call Zotero MCP directly; the
+outer agent performs the write step from `next-write`. Per-paper 30-second
+report entries must be extracted from each single-paper note's `30 秒结论` row,
+with structured fallback only when that row is unavailable.

@@ -58,9 +58,10 @@ a new output directory.
 Default Codex concurrency is 3. Use `references/parallel-dispatch.md` for the
 controller loop and worker prompt contract. When a worker finishes, record the
 result, then dispatch the next pending item. If outer-agent parallelism is
-unavailable, use the local PDF pre-extraction fallback only for `pdf_path`
-items, then continue deep reading sequentially from the prepared
-`prepared_analysis_dir` bundles.
+unavailable, use `uv run paperread-batch prepare-local-pdfs <batch_run_dir>` as
+the local PDF fallback pre-extraction path only for `pdf_path` items, then
+continue deep reading sequentially from the prepared `prepared_analysis_dir`
+bundles.
 
 ## Result Ingestion
 

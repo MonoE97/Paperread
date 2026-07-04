@@ -24,8 +24,12 @@ REQUIRED_PATHS = [
     "src/paperread_batch/state.py",
     "src/paperread_batch/takeaway.py",
     "src/paperread_batch/report.py",
+    "src/paperread_batch/local_prepare.py",
+    "src/paperread_batch/worker_contract.py",
     "src/paperread_batch/cli.py",
     "references/batch-workflow.md",
+    "references/parallel-dispatch.md",
+    "references/worker-result-contract.md",
     "scripts/validate-skill.py",
 ]
 

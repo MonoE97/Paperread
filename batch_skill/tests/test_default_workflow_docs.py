@@ -25,7 +25,8 @@ def test_batch_skill_docs_preserve_scheduler_boundary() -> None:
         "prepare_only",
         "Default Codex concurrency is 3",
         "Typical Use",
-        "Claude-compatible fallback is sequential",
+        "fallback pre-extraction",
+        "prepare-local-pdfs",
         "must not call",
         "write_note",
         "next-write",
@@ -90,7 +91,11 @@ def test_batch_validator_tracks_required_runtime_modules() -> None:
         "src/paperread_batch/state.py",
         "src/paperread_batch/takeaway.py",
         "src/paperread_batch/report.py",
+        "src/paperread_batch/local_prepare.py",
+        "src/paperread_batch/worker_contract.py",
         "src/paperread_batch/cli.py",
         "references/batch-workflow.md",
+        "references/parallel-dispatch.md",
+        "references/worker-result-contract.md",
     ]:
         assert phrase in validator
