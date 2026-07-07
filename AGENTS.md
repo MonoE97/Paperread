@@ -23,8 +23,6 @@
 - `paper_reader_batch/pyproject.toml` and `paper_reader_batch/uv.lock`: dependency and lock metadata for the installed batch skill root.
 - `README.md`: English public entry point; explain install from `paper_reader/`, not root runtime usage.
 - `README.zh-CN.md`: Chinese README paired with `README.md`; keep workflow commands, safety boundaries, and public claims synchronized when either README changes.
-- `docs/superpowers/specs/`: planning and review artifacts.
-- `docs/superpowers/scripts/`: maintainer-only validation scripts.
 - `AGENTS.md`: agent behavior and safety rules.
 
 Do not add `README.md`, `INSTALLATION_GUIDE.md`, `QUICK_REFERENCE.md`, or `CHANGELOG.md` inside `paper_reader/` or `paper_reader_batch/`.
@@ -103,11 +101,7 @@ uv run paper_reader_batch --help
 uv run python scripts/validate-skill.py .
 ```
 
-涉及根 README、中文 README、AGENTS 或安装说明时，还必须在仓库根目录运行：
-
-```bash
-python docs/superpowers/scripts/validate-root-docs.py
-```
+涉及根 README、中文 README、AGENTS 或安装说明时，必须运行与修改范围对应的 skill-root 验证命令；仓库根目录不再维护单独的根文档 validator。
 
 V2 发布前必须把 `paper_reader/` 和 `paper_reader_batch/` 分别复制到仓库外临时目录并在复制后的目录中运行同一组 skill-root 验证，证明两个 skill source 都自包含。
 

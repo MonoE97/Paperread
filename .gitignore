@@ -25,13 +25,6 @@ tmp/
 
 # Paper, Zotero, and generated note outputs
 docs/
-!docs/
-docs/*
-!docs/superpowers/
-docs/superpowers/*
-!docs/superpowers/scripts/
-docs/superpowers/scripts/*
-!docs/superpowers/scripts/validate-root-docs.py
 runs/
 paper_reader_batch/runs/
 papers/

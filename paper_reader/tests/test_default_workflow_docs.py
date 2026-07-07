@@ -1,8 +1,5 @@
 import tomllib
-import subprocess
 from pathlib import Path
-
-import pytest
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -14,8 +11,6 @@ PDF_REFERENCE = SKILL_ROOT / "references" / "pdf-path-workflow.md"
 SUMMARY_REFERENCE = SKILL_ROOT / "references" / "summary-schema.md"
 CAPTURE_SCRIPT = SKILL_ROOT / "scripts" / "capture-secondary-url.mjs"
 VALIDATE_SCRIPT = SKILL_ROOT / "scripts" / "validate-skill.py"
-REPO_ROOT = SKILL_ROOT.parent
-ROOT_DOCS_VALIDATE_SCRIPT = REPO_ROOT / "docs" / "superpowers" / "scripts" / "validate-root-docs.py"
 
 
 def read(path: Path) -> str:
@@ -56,30 +51,6 @@ def test_skill_bundle_contains_required_runtime_assets() -> None:
 
     for path in required_paths:
         assert path.exists(), path
-
-
-def test_root_docs_validator_referenced_by_agents_is_tracked() -> None:
-    git_probe = subprocess.run(
-        ["git", "rev-parse", "--is-inside-work-tree"],
-        cwd=REPO_ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if git_probe.returncode != 0:
-        pytest.skip("root docs git tracking is validated only in the source repository")
-
-    result = subprocess.run(
-        ["git", "ls-files", "--error-unmatch", str(ROOT_DOCS_VALIDATE_SCRIPT.relative_to(REPO_ROOT))],
-        cwd=REPO_ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
 
 
 def test_skill_bundle_excludes_auxiliary_docs() -> None:
