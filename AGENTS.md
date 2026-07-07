@@ -66,7 +66,8 @@ Do not add `README.md`, `INSTALLATION_GUIDE.md`, `QUICK_REFERENCE.md`, or `CHANG
 - 功能开发在 feature branch 或 worktree 中进行。
 - 可以创建本地 commit。
 - 禁止在未获用户明确确认前执行 `git push`、创建 GitHub remote、公开发布或部署。
-- `.DS_Store`、虚拟环境、缓存、本地预览文件、PDF 分析目录和生成笔记必须被 `.gitignore` 忽略。
+- `.DS_Store`、虚拟环境、缓存、本地预览文件、PDF 分析目录、生成笔记和本地 `docs/` scratch 必须被 `.gitignore` 忽略。
+- `docs/` 不是发布内容；不要重新引入 tracked `docs/` 规划文档或根文档 validator，除非用户明确要求恢复公开文档树。
 
 ## Zotero 边界
 
