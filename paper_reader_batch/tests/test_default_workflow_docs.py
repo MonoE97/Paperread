@@ -81,6 +81,26 @@ def test_root_docs_describe_two_installable_skill_sources() -> None:
             assert phrase in text
 
 
+def test_root_readmes_show_complete_batch_dispatch_loop() -> None:
+    if not (REPO_ROOT / "README.md").exists():
+        pytest.skip("root documentation is validated only in the source repository")
+
+    english = read(REPO_ROOT / "README.md")
+    chinese = read(REPO_ROOT / "README.zh-CN.md")
+
+    for text in [english, chinese]:
+        for phrase in [
+            "uv run paper_reader_batch validate <batch_run_dir> --paper-reader-root /path/to/paper_reader",
+            "uv run paper_reader_batch next <batch_run_dir> --limit 3",
+            "uv run paper_reader_batch worker-prompt <batch_run_dir> <item_id>",
+            "uv run paper_reader_batch record-result <batch_run_dir> <item_id> --result item-result.json",
+            "uv run paper_reader_batch next-write <batch_run_dir> --limit 1",
+            "uv run paper_reader_batch record-write <batch_run_dir> <item_id> --result write-result.json",
+            "uv run paper_reader_batch report <batch_run_dir>",
+        ]:
+            assert phrase in text
+
+
 def test_batch_validator_tracks_required_runtime_modules() -> None:
     validator = read(BATCH_ROOT / "scripts" / "validate-skill.py")
 

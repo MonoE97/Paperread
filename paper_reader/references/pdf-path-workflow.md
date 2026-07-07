@@ -16,7 +16,7 @@ If `uv sync --locked` cannot find Python `>=3.13`, run `uv python install 3.13` 
 
 ## Output Location
 
-`prepare-pdf` writes beside the PDF. The first run creates `<pdf_stem>_analysis/` for analysis artifacts and targets `<pdf_stem>_note.md` as the final Markdown note. Repeated runs preserve existing outputs with `_v2`, `_v3`, and later suffixes.
+`prepare-pdf` writes the analysis bundle beside the PDF. The first run creates `<pdf_stem>_analysis/` for analysis artifacts and records `<pdf_stem>_note.md` as the final Markdown note target. It does not write the final note by itself; the final note is written only after the agent creates `summary.json` / `review.json` and `prepare-local-note-candidate` passes the local gate. Repeated runs preserve existing outputs with `_v2`, `_v3`, and later suffixes.
 
 ## Network Boundary
 
@@ -26,13 +26,13 @@ If the user provides an existing local directory path instead of one PDF, delega
 
 ## Steps
 
-1. Prepare local artifacts beside the PDF:
+1. Prepare local analysis artifacts beside the PDF:
 
 ```bash
 uv run paper_reader prepare-pdf "/path/to/paper.pdf"
 ```
 
-The first run writes `<pdf_stem>_analysis/` and targets `<pdf_stem>_note.md`. Repeated runs use `_v2`, `_v3`, and so on without overwriting old notes or analysis directories.
+The first run writes `<pdf_stem>_analysis/` and records `<pdf_stem>_note.md` as the final-note target. Repeated runs use `_v2`, `_v3`, and so on without overwriting old notes or analysis directories.
 
 For automation, prefer the explicit machine-readable output file:
 
@@ -46,7 +46,7 @@ break result parsing.
 
 2. Read the generated `context.md`, `section_context.md`, and `figure_context.md` if available.
 
-3. Write `summary.json` and `review.json` in the analysis directory. Use `section_context.md` only as navigation. It is not a canonical evidence source. Evidence locators must use canonical forms: `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, and secondary context paths are invalid.
+3. The agent writes `summary.json` and `review.json` in the analysis directory. `prepare-pdf` does not summarize the paper or write the final note. Use `section_context.md` only as navigation. It is not a canonical evidence source. Evidence locators must use canonical forms: `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, and secondary context paths are invalid.
 
 4. Run the deterministic review chain:
 

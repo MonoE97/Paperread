@@ -24,7 +24,7 @@ For Zotero title workflows, Zotero Desktop and Zotero MCP must already be instal
 ## Typical Use
 
 - Zotero title or title fragment: use `$paper_reader` with the paper title. The agent searches Zotero via Zotero MCP, creates a run, prepares evidence artifacts, writes `summary.json` and `review.json`, renders `note.md` and `note.html`, previews the target, writes only through MCP `write_note` after explicit write intent, and verifies the created note.
-- Local PDF path: use `$paper_reader` with a `.pdf` path. The skill prepares `<pdf_stem>_analysis/` and `<pdf_stem>_note.md` beside the PDF, never searches Zotero for matching items, and never writes Zotero.
+- Local PDF path: use `$paper_reader` with a `.pdf` path. `prepare-pdf` prepares `<pdf_stem>_analysis/` beside the PDF and reserves `<pdf_stem>_note.md` as the final-note target. The agent must write `summary.json` and `review.json`, run the deterministic review/lint/trusted-summary chain, then run `prepare-local-note-candidate` to write the final local Markdown note. The workflow never searches Zotero for matching items and never writes Zotero.
 - Local directory path: route to `$paper_reader_batch` with the local PDF folder workflow. Directory input is not a Zotero title fragment.
 
 ## Entry Routing
@@ -35,7 +35,7 @@ For Zotero title workflows, Zotero Desktop and Zotero MCP must already be instal
 - Existing local paths are not Zotero title fragments.
 - Only non-path text should be treated as a Zotero title or title fragment and use `references/zotero-workflow.md`.
 - For both modes, use full-PDF extraction by default. Pass `--max-pages` only when the user explicitly asks for debugging or a shortened preview.
-- For both modes, the CLI creates deterministic evidence artifacts; the agent writes `summary.json` and `review.json` after reading `context.md`, `section_context.md`, and `figure_context.md` when available.
+- For both modes, the CLI creates deterministic evidence artifacts; it does not replace the agent's paper-reading step. The agent writes `summary.json` and `review.json` after reading `context.md`, `section_context.md`, and `figure_context.md` when available.
 
 ## Shared Rules
 

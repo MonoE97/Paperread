@@ -37,7 +37,7 @@ from paper_reader.zotero_live import (
 from paper_reader.zotero_sqlite import DEFAULT_ZOTERO_SQLITE_PATH
 from paper_reader.zotero_item_io import write_item_details_files
 
-app = typer.Typer(help="Zotero-first paper reading utilities.")
+app = typer.Typer(help="Paper reading utilities for Zotero titles and local PDF paths.")
 console = Console()
 
 

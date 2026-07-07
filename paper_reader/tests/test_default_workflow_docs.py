@@ -226,6 +226,9 @@ def test_summary_reference_documents_rendered_chinese_fields() -> None:
     text = read(SUMMARY_REFERENCE)
 
     for phrase in [
+        "gate-required",
+        "quality-recommended",
+        "missing quality-recommended fields",
         "paper_type",
         "trust_status",
         "review_status",
@@ -248,6 +251,18 @@ def test_summary_reference_documents_rendered_chinese_fields() -> None:
         '"context.md page 1 section Abstract"',
     ]:
         assert phrase in text
+
+    hard_required_section = text.split("## `quality-recommended`", maxsplit=1)[0]
+    for quality_field in [
+        "method_modules",
+        "workflow_steps",
+        "technical_details",
+        "key_figures",
+        "author_stated_limitations",
+        "inferred_limits",
+        "applicability_limits",
+    ]:
+        assert quality_field not in hard_required_section
 
 
 def test_capture_secondary_script_is_in_skill_bundle() -> None:

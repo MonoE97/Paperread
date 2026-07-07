@@ -2,12 +2,14 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-paper_reader is a self-contained skill repository for Codex or Claude. It contains two installable skill sources:
+paper_reader is a self-contained skill repository for Codex or Claude. It turns a Zotero paper title, a local PDF path, or a batch of papers into evidence-grounded Chinese reading notes through deterministic CLI tooling plus agent-written summaries.
+
+The repository root is only a maintenance shell; it is not the runtime Python project. Install and run one or both skill sources:
 
 - `paper_reader/` installs as `paper_reader` for single-paper deep reading.
 - `paper_reader_batch/` installs as `paper_reader_batch` for batch scheduling and lightweight reporting.
 
-Copy each source directory to its destination skill folder, run commands from that installed skill root, and keep the repository root for maintenance documentation.
+Copy each source directory to its destination skill folder and run commands from that installed skill root. The CLI prepares deterministic artifacts, validates gates, renders notes, and records batch state; the agent still reads the extracted context and writes `summary.json` / `review.json`.
 
 Do not put a `README.md` inside `paper_reader/` or `paper_reader_batch/`; skills should expose `SKILL.md`, directly linked `references/`, bundled scripts, code, tests, templates, dependency metadata, and fixtures.
 
@@ -100,10 +102,10 @@ The plugin includes the MCP server; no separate Zotero MCP server process is req
 
 ### Use `paper_reader`
 
-Use `paper_reader` for one paper at a time.
+Use `paper_reader` for one paper at a time. The CLI is deterministic tooling, not a standalone summarizer: it prepares extraction artifacts and gates note readiness, while the agent writes `summary.json` and `review.json` after reading the generated context files.
 
-- Zotero title or title fragment: ask the agent to use `$paper_reader` with the paper title. The agent searches Zotero through Zotero MCP, prepares evidence artifacts, renders `note.md` and `note.html`, previews the candidate, writes only through MCP `write_note` after explicit write intent, and verifies the created note.
-- Local PDF path: give an absolute or relative `.pdf` path. The skill writes `<pdf_stem>_analysis/` and `<pdf_stem>_note.md` beside the PDF, never searches Zotero for matching items, and never writes Zotero.
+- Zotero title or title fragment: ask the agent to use `$paper_reader` with the paper title. The agent searches Zotero through Zotero MCP, prepares evidence artifacts, writes the structured summary and review, renders `note.md` and `note.html`, previews the candidate, writes only through MCP `write_note` after explicit write intent, and verifies the created note.
+- Local PDF path: give an absolute or relative `.pdf` path. `prepare-pdf` creates `<pdf_stem>_analysis/` beside the PDF and targets `<pdf_stem>_note.md`; the final Markdown note is written only after the agent writes `summary.json` / `review.json` and runs `prepare-local-note-candidate`. This workflow never searches Zotero for matching items and never writes Zotero.
 - Local directory path: use `paper_reader_batch` with the local PDF folder workflow. Existing local paths are not Zotero title fragments.
 
 Useful installed-skill commands:
@@ -112,6 +114,11 @@ Useful installed-skill commands:
 uv run paper_reader --help
 uv run paper_reader prepare-pdf "/abs/path/to/paper.pdf"
 uv run paper_reader prepare-pdf "/abs/path/to/paper.pdf" --json-output /tmp/prepare-result.json
+uv run paper_reader validate-summary-json <analysis_dir>/summary.json
+uv run paper_reader apply-review <analysis_dir>/summary.json <analysis_dir>/review.json
+uv run paper_reader lint-summary <analysis_dir>/summary.json
+uv run paper_reader validate-trusted-summary <analysis_dir>/summary.json
+uv run paper_reader prepare-local-note-candidate <analysis_dir> --generated-date YYYY-MM-DD
 ```
 
 ### Use `paper_reader_batch`
@@ -123,11 +130,16 @@ Typical batch CLI shape:
 ```bash
 uv run paper_reader_batch manifest from-zotero-titles titles.txt --batch-title "my batch" --output manifest.json
 uv run paper_reader_batch init --manifest manifest.json
+uv run paper_reader_batch validate <batch_run_dir> --paper-reader-root /path/to/paper_reader
 uv run paper_reader_batch next <batch_run_dir> --limit 3
+uv run paper_reader_batch worker-prompt <batch_run_dir> <item_id>
+uv run paper_reader_batch record-result <batch_run_dir> <item_id> --result item-result.json
 uv run paper_reader_batch next-write <batch_run_dir> --limit 1
 uv run paper_reader_batch record-write <batch_run_dir> <item_id> --result write-result.json
 uv run paper_reader_batch report <batch_run_dir>
 ```
+
+Repeat `next -> worker-prompt -> record-result` until there are no pending items. `worker-prompt` is the handoff to an outer agent or subagent; the batch CLI does not read papers by itself.
 
 For local PDF batches when outer-agent parallelism is unavailable:
 
@@ -142,7 +154,7 @@ For Zotero-backed items, the default write policy is `zotero_write`. Pass `--wri
 paper_reader supports two inputs:
 
 - **Zotero title or title fragment**: use Zotero MCP to locate the paper, prepare deterministic evidence artifacts, render `note.md` and `note.html`, and create a new Zotero child note only after explicit write intent.
-- **Local PDF path**: run the same extraction, summary, review, lint, and render gates on a local PDF, then write local outputs beside the PDF without writing Zotero or checking whether Zotero already has the same paper.
+- **Local PDF path**: run extraction on a local PDF, have the agent write `summary.json` and `review.json` from the generated context, then run review, lint, trusted-summary validation, and local rendering gates. The final Markdown note is written beside the PDF without writing Zotero or checking whether Zotero already has the same paper.
 
 Local PDF path and directory path inputs skip Zotero lookup and duplicate checks. Existing local paths are not Zotero title fragments; directory paths belong to `paper_reader_batch manifest from-pdf-folder`, which is non-recursive unless `--recursive` is explicit.
 
@@ -153,7 +165,7 @@ paper_reader_batch supports four batch inputs: Zotero collection inventories, mu
 ## Output Locations
 
 - Zotero title workflow writes local run artifacts under `<skill_root>/runs/YYYY-MM-DD/<title-slug>/`. The write-candidate step adds `note.md`, `note.html`, `gate-report.json`, and `write-payload.json` there before any Zotero write.
-- Local PDF path workflow writes beside the PDF: `<pdf_stem>_analysis/` for analysis artifacts and `<pdf_stem>_note.md` for the final Markdown note. Existing outputs are preserved with `_v2`, `_v3`, and later suffixes.
+- Local PDF path workflow writes beside the PDF: `prepare-pdf` creates `<pdf_stem>_analysis/` for analysis artifacts and reserves `<pdf_stem>_note.md`; `prepare-local-note-candidate` writes the final Markdown note after the local gate passes. Existing outputs are preserved with `_v2`, `_v3`, and later suffixes.
 - Batch workflow writes batch run artifacts under `<paper_reader_batch_root>/runs/YYYY-MM-DD/<batch-slug>/`, including `manifest.json`, `state.json`, `items/*.json`, `items/*.prepare.json`, `items/*.write.json`, `batch-report.json`, and `batch-report.md`. Single-paper artifacts remain owned by `paper_reader`; batch stores indexes, local-only paths, Zotero note keys, and verify report paths.
 
 ## Runtime Requirements
