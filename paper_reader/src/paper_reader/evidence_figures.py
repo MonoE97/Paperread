@@ -130,6 +130,7 @@ def prepare_figure_artifacts(
     figure_limit: int,
     preview_pages: int | None,
     complete: bool,
+    allow_network_source: bool = False,
 ) -> PreparedFigures:
     if figure_limit == 0:
         return PreparedFigures(
@@ -153,7 +154,7 @@ def prepare_figure_artifacts(
             top_k=figure_limit,
             max_pages=preview_pages,
             item_details=None,
-            allow_network_source=False,
+            allow_network_source=allow_network_source,
             max_candidates=V2_RESOURCE_POLICY.figure_max_candidates,
         )
         selected = figures_payload.get("selected_figures", [])

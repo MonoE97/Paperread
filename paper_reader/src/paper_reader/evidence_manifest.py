@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from paper_reader.contracts import ArtifactRef
+from paper_reader.contracts import ArtifactRef, LocalSourceIdentity, ZoteroSourceIdentity
 from paper_reader.evidence import parse_trusted_locator
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.storage import canonical_json_bytes, resolve_artifact_path, rfc3339_utc
@@ -284,7 +284,13 @@ def load_bound_evidence(loaded: LoadedRun, evidence_digest: str) -> BoundEvidenc
             artifact_path=manifest_ref.path,
         )
     source = loaded.run.source
-    if manifest.run_id != loaded.run.run_id or manifest.source_sha256 != source.sha256:
+    if isinstance(source, LocalSourceIdentity):
+        source_sha256 = source.sha256
+    elif isinstance(source, ZoteroSourceIdentity):
+        source_sha256 = source.attachment.sha256
+    else:  # pragma: no cover - the strict run discriminator makes this unreachable
+        raise EvidenceManifestError("evidence_binding_mismatch", "unknown run source identity")
+    if manifest.run_id != loaded.run.run_id or manifest.source_sha256 != source_sha256:
         raise EvidenceManifestError("evidence_binding_mismatch", "evidence manifest run/source binding mismatch")
     if hashlib.sha256(manifest_bytes).hexdigest() != evidence_digest:
         raise EvidenceManifestError("evidence_binding_mismatch", "evidence digest mismatch")

@@ -165,6 +165,9 @@
           "title": "Parent Key",
           "type": "string"
         },
+        "parent_snapshot": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
         "preflight_id": {
           "maxLength": 160,
           "minLength": 1,
@@ -189,6 +192,7 @@
         "requested_note_title",
         "title_available",
         "matching_note_keys",
+        "parent_snapshot",
         "children_snapshot"
       ],
       "title": "LivePreflight",
@@ -320,6 +324,13 @@
       "title": "External Claim Id",
       "type": "string"
     },
+    "forbidden_headings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Forbidden Headings",
+      "type": "array"
+    },
     "gate": {
       "$ref": "#/$defs/GateState"
     },
@@ -329,6 +340,11 @@
     "mcp_envelope": {
       "$ref": "#/$defs/McpWriteEnvelope"
     },
+    "minimum_content_length": {
+      "minimum": 0,
+      "title": "Minimum Content Length",
+      "type": "integer"
+    },
     "nonce": {
       "title": "Nonce",
       "type": "string"
@@ -336,6 +352,13 @@
     "note_title": {
       "title": "Note Title",
       "type": "string"
+    },
+    "required_headings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Required Headings",
+      "type": "array"
     },
     "run_id": {
       "maxLength": 160,
@@ -359,8 +382,9 @@
     "target": {
       "$ref": "#/$defs/ZoteroPublicationTarget"
     },
-    "token": {
-      "title": "Token",
+    "token_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Token Sha256",
       "type": "string"
     },
     "ttl_seconds": {
@@ -392,8 +416,11 @@
     "content_html",
     "content_sha256",
     "content_length",
+    "minimum_content_length",
+    "required_headings",
+    "forbidden_headings",
     "nonce",
-    "token",
+    "token_sha256",
     "external_claim_id",
     "write_attempt_id",
     "mcp_envelope",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +13,9 @@ from paper_reader.contracts import (
     GateState,
     LocalSourceIdentity,
     PaperReaderRun,
+    ZoteroSourceIdentity,
 )
+from paper_reader.candidate_integrity import LocalPublicationError, verify_artifact_ref
 from paper_reader.evidence_figures import (
     IncompleteFigureEvidenceError,
     prepare_figure_artifacts,
@@ -41,9 +44,11 @@ from paper_reader.storage import (
     new_uuid,
     sha256_file,
 )
+from paper_reader.secondary_sources import build_secondary_sources
 from paper_reader.v2_loader import LoadedRun
 from paper_reader.workflow import (
     build_context_markdown,
+    build_metadata,
     build_section_context_markdown,
 )
 
@@ -63,25 +68,30 @@ class EvidenceBundleError(ValueError):
         self.data = data or {}
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedSource:
+    pdf: LocalSourceIdentity
+    metadata: dict
+    secondary_sources: dict
+    allow_network_figure_source: bool
+
+
 def _run_root(loaded: LoadedRun) -> Path:
     return loaded.manifest_path.resolve(strict=True).parent
 
 
-def _verify_local_source(loaded: LoadedRun) -> LocalSourceIdentity:
-    source = loaded.run.source
-    if not isinstance(source, LocalSourceIdentity):
-        raise EvidenceBundleError(
-            "not_implemented",
-            "run prepare is not implemented for Zotero-backed V2 runs",
-            data={"run_id": loaded.run.run_id},
-        )
+def _verify_pdf_identity(
+    source: LocalSourceIdentity,
+    *,
+    run_id: str,
+) -> LocalSourceIdentity:
     try:
         actual = fingerprint_resolved_source(Path(source.resolved_path))
     except (OSError, RuntimeError, ValueError) as exc:
         raise EvidenceBundleError(
             "source_changed",
             f"local PDF source cannot be revalidated: {source.resolved_path}: {exc}",
-            data={"run_id": loaded.run.run_id, "source_pdf": source.resolved_path},
+            data={"run_id": run_id, "source_pdf": source.resolved_path},
         ) from exc
     expected_identity = (
         source.resolved_path,
@@ -101,9 +111,84 @@ def _verify_local_source(loaded: LoadedRun) -> LocalSourceIdentity:
         raise EvidenceBundleError(
             "source_changed",
             f"local PDF source no longer matches the initialized fingerprint: {source.resolved_path}",
-            data={"run_id": loaded.run.run_id, "source_pdf": source.resolved_path},
+            data={"run_id": run_id, "source_pdf": source.resolved_path},
         )
     return source
+
+
+def _verify_source(loaded: LoadedRun) -> _PreparedSource:
+    source = loaded.run.source
+    if isinstance(source, LocalSourceIdentity):
+        pdf = _verify_pdf_identity(source, run_id=loaded.run.run_id)
+        metadata = build_pdf_metadata(Path(pdf.resolved_path))
+        return _PreparedSource(
+            pdf=pdf,
+            metadata=metadata,
+            secondary_sources=_secondary_sources(metadata),
+            allow_network_figure_source=False,
+        )
+    if not isinstance(source, ZoteroSourceIdentity):  # pragma: no cover - strict discriminator
+        raise EvidenceBundleError("invalid_source_identity", "unknown V2 source identity")
+    pdf = _verify_pdf_identity(source.attachment, run_id=loaded.run.run_id)
+    run_dir = _run_root(loaded)
+    try:
+        _snapshot_path, snapshot_bytes = verify_artifact_ref(run_dir, source.normalized_source)
+    except LocalPublicationError as exc:
+        raise EvidenceBundleError(
+            "source_snapshot_tampered",
+            f"normalized Zotero source snapshot failed integrity verification: {exc}",
+            data={"run_id": loaded.run.run_id},
+        ) from exc
+    try:
+        snapshot = json.loads(snapshot_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EvidenceBundleError(
+            "source_snapshot_tampered",
+            "normalized Zotero source snapshot is not valid UTF-8 JSON",
+            data={"run_id": loaded.run.run_id},
+        ) from exc
+    if (
+        not isinstance(snapshot, dict)
+        or snapshot.get("format") != "paper_reader.zotero-source.v2-internal"
+        or not isinstance(snapshot.get("selected_item"), dict)
+        or not isinstance(snapshot.get("selected_attachment"), dict)
+    ):
+        raise EvidenceBundleError(
+            "source_snapshot_tampered",
+            "normalized Zotero source snapshot has an invalid structure",
+            data={"run_id": loaded.run.run_id},
+        )
+    item = snapshot["selected_item"]
+    selected_attachment = snapshot["selected_attachment"]
+    if (
+        str(item.get("key", "")) != source.item_key
+        or str(item.get("title", "")) != source.title
+        or str(item.get("DOI", "")) != source.doi
+        or item.get("version") != source.parent_version
+        or str(selected_attachment.get("key", "")) != source.attachment_key
+        or str(selected_attachment.get("path", "")) != source.attachment.resolved_path
+    ):
+        raise EvidenceBundleError(
+            "source_snapshot_tampered",
+            "normalized Zotero source snapshot does not match run source identity",
+            data={"run_id": loaded.run.run_id},
+        )
+    metadata = build_metadata(item)
+    if (
+        metadata.get("pdf_attachment_key") != source.attachment_key
+        or metadata.get("pdf_path") != source.attachment.resolved_path
+    ):
+        raise EvidenceBundleError(
+            "source_snapshot_tampered",
+            "normalized Zotero metadata selects a different primary PDF",
+            data={"run_id": loaded.run.run_id},
+        )
+    return _PreparedSource(
+        pdf=pdf,
+        metadata=metadata,
+        secondary_sources=build_secondary_sources(item),
+        allow_network_figure_source=True,
+    )
 
 
 def _artifact_ref(run_dir: Path, path: Path, role: str, media_type: str) -> ArtifactRef:
@@ -173,7 +258,8 @@ def _prepare_local_evidence_locked(
     figure_limit: int | None,
 ) -> PreparedEvidence:
     run_dir = _run_root(loaded)
-    source = _verify_local_source(loaded)
+    prepared_source = _verify_source(loaded)
+    source = prepared_source.pdf
     resolved_figure_limit = (
         V2_RESOURCE_POLICY.figure_default_limit if figure_limit is None else figure_limit
     )
@@ -219,7 +305,7 @@ def _prepare_local_evidence_locked(
             },
         )
 
-    metadata = build_pdf_metadata(source_path)
+    metadata = prepared_source.metadata
     complete = preview_pages is None
     evidence_id = new_random_id("evidence")
     staging = run_dir / f".{evidence_id}.{new_uuid()}.staging"
@@ -230,7 +316,7 @@ def _prepare_local_evidence_locked(
             "extract.json": canonical_json_bytes(extraction),
             "context.md": build_context_markdown(metadata, extraction).encode("utf-8"),
             "section_context.md": build_section_context_markdown(metadata, extraction).encode("utf-8"),
-            "secondary_sources.json": canonical_json_bytes(_secondary_sources(metadata)),
+            "secondary_sources.json": canonical_json_bytes(prepared_source.secondary_sources),
         }
         for name, content in files_to_write.items():
             (staging / name).write_bytes(content)
@@ -262,6 +348,7 @@ def _prepare_local_evidence_locked(
                 figure_limit=resolved_figure_limit,
                 preview_pages=preview_pages,
                 complete=complete,
+                allow_network_source=prepared_source.allow_network_figure_source,
             )
         except IncompleteFigureEvidenceError as exc:
             raise EvidenceBundleError(

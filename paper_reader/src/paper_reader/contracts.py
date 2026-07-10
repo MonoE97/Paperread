@@ -78,10 +78,13 @@ class ZoteroSourceIdentity(StrictContractModel):
     source_type: Literal["zotero"] = "zotero"
     item_key: Identifier
     title: str
+    doi: str
+    parent_version: NonNegativeInt
     parent_fingerprint: Sha256
     raw_discovery_bundle: ArtifactRef
     normalized_source: ArtifactRef
-    attachment_key: Identifier | None = None
+    attachment_key: Identifier
+    attachment: LocalSourceIdentity
 
 
 SourceIdentity: TypeAlias = Annotated[
@@ -130,6 +133,7 @@ class LivePreflight(StrictContractModel):
     requested_note_title: str
     title_available: bool
     matching_note_keys: tuple[Identifier, ...]
+    parent_snapshot: ArtifactRef
     children_snapshot: ArtifactRef
 
 
@@ -333,8 +337,11 @@ class PaperReaderWriteAuthorization(StrictContractModel):
     content_html: str
     content_sha256: Sha256
     content_length: NonNegativeInt
+    minimum_content_length: NonNegativeInt
+    required_headings: tuple[str, ...]
+    forbidden_headings: tuple[str, ...]
     nonce: str
-    token: str
+    token_sha256: Sha256
     external_claim_id: Identifier
     write_attempt_id: Identifier
     mcp_envelope: McpWriteEnvelope
@@ -356,6 +363,8 @@ class PaperReaderVerification(StrictContractModel):
     content_sha256: Sha256
     content_length: NonNegativeInt
     checks: tuple[VerificationCheck, ...]
+    note_snapshot: ArtifactRef
+    checks_snapshot: ArtifactRef
     artifacts: tuple[ArtifactRef, ...]
     gate: GateState
 
@@ -371,6 +380,7 @@ class PaperReaderReconciliation(StrictContractModel):
     outcome: Literal["verified", "not_found", "ambiguous", "blocked"]
     match_count: NonNegativeInt
     matched_note_keys: tuple[Identifier, ...]
+    children_snapshot: ArtifactRef
     verification: ArtifactRef | None = None
     retry_confirmation_required: bool
     artifacts: tuple[ArtifactRef, ...]

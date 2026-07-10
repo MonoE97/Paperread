@@ -165,6 +165,9 @@
           "title": "Parent Key",
           "type": "string"
         },
+        "parent_snapshot": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
         "preflight_id": {
           "maxLength": 160,
           "minLength": 1,
@@ -189,6 +192,7 @@
         "requested_note_title",
         "title_available",
         "matching_note_keys",
+        "parent_snapshot",
         "children_snapshot"
       ],
       "title": "LivePreflight",
@@ -306,20 +310,19 @@
     "ZoteroSourceIdentity": {
       "additionalProperties": false,
       "properties": {
+        "attachment": {
+          "$ref": "#/$defs/LocalSourceIdentity"
+        },
         "attachment_key": {
-          "anyOf": [
-            {
-              "maxLength": 160,
-              "minLength": 1,
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Attachment Key"
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Attachment Key",
+          "type": "string"
+        },
+        "doi": {
+          "title": "Doi",
+          "type": "string"
         },
         "item_key": {
           "maxLength": 160,
@@ -335,6 +338,11 @@
           "pattern": "^[0-9a-f]{64}$",
           "title": "Parent Fingerprint",
           "type": "string"
+        },
+        "parent_version": {
+          "minimum": 0,
+          "title": "Parent Version",
+          "type": "integer"
         },
         "raw_discovery_bundle": {
           "$ref": "#/$defs/ArtifactRef"
@@ -353,9 +361,13 @@
       "required": [
         "item_key",
         "title",
+        "doi",
+        "parent_version",
         "parent_fingerprint",
         "raw_discovery_bundle",
-        "normalized_source"
+        "normalized_source",
+        "attachment_key",
+        "attachment"
       ],
       "title": "ZoteroSourceIdentity",
       "type": "object"

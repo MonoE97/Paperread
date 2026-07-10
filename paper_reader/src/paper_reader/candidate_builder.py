@@ -26,6 +26,7 @@ from paper_reader.contracts import (
     PaperReaderReviewPackage,
     PaperReaderRun,
     PaperReaderSummary,
+    ZoteroSourceIdentity,
 )
 from paper_reader.evidence_manifest import (
     EvidenceManifest,
@@ -46,7 +47,7 @@ from paper_reader.storage import (
     rfc3339_utc,
     sha256_file,
 )
-from paper_reader.v2_loader import LoadedRun
+from paper_reader.v2_loader import LoadedRun, load_v2_run
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +170,15 @@ def _updated_run(loaded: LoadedRun, candidate_ref: ArtifactRef, gate: GateState)
 def build_local_candidate(run_path: Path) -> BuiltLocalCandidate:
     with locked_v2_run(run_path) as loaded:
         return _build_local_candidate_locked(loaded)
+
+
+def build_candidate(run_path: Path, *, provider=None):
+    loaded = load_v2_run(run_path)
+    if isinstance(loaded.run.source, ZoteroSourceIdentity):
+        from paper_reader.zotero_candidate import build_zotero_candidate
+
+        return build_zotero_candidate(run_path, provider=provider)
+    return build_local_candidate(run_path)
 
 
 def _build_local_candidate_locked(loaded: LoadedRun) -> BuiltLocalCandidate:
@@ -303,4 +313,4 @@ def _build_local_candidate_locked(loaded: LoadedRun) -> BuiltLocalCandidate:
             shutil.rmtree(staging)
 
 
-__all__ = ["BuiltLocalCandidate", "build_local_candidate"]
+__all__ = ["BuiltLocalCandidate", "build_candidate", "build_local_candidate"]

@@ -248,6 +248,9 @@
       "title": "Checks",
       "type": "array"
     },
+    "checks_snapshot": {
+      "$ref": "#/$defs/ArtifactRef"
+    },
     "content_length": {
       "minimum": 0,
       "title": "Content Length",
@@ -272,6 +275,9 @@
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
       "title": "Note Key",
       "type": "string"
+    },
+    "note_snapshot": {
+      "$ref": "#/$defs/ArtifactRef"
     },
     "run_id": {
       "maxLength": 160,
@@ -313,6 +319,8 @@
     "content_sha256",
     "content_length",
     "checks",
+    "note_snapshot",
+    "checks_snapshot",
     "artifacts",
     "gate"
   ],

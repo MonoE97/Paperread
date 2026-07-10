@@ -25,7 +25,10 @@ from paper_reader.contracts import (
     LocalSourceIdentity,
     PaperReaderCandidate,
     PaperReaderRun,
+    ZoteroPublicationTarget,
+    ZoteroSourceIdentity,
 )
+from paper_reader.note_hash import canonicalize_note_html_for_hash, note_html_sha256
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
@@ -52,6 +55,7 @@ def _load_candidate(
     candidate_input: Path,
     *,
     loaded_run: LoadedRun | None = None,
+    require_local: bool = True,
 ) -> tuple[LoadedRun, Path, PaperReaderCandidate, str, dict[str, tuple[tuple[Path, bytes], ...]]]:
     requested = candidate_manifest_path(candidate_input)
     if requested.is_symlink() or requested.parent.is_symlink():
@@ -87,8 +91,9 @@ def _load_candidate(
         raise LocalPublicationError("candidate_tampered", "candidate source/target binding mismatch")
     if candidate.gate.status != "write_ready" or candidate.gate.blockers:
         raise LocalPublicationError("candidate_not_ready", "candidate gate is not write_ready")
-    if not isinstance(candidate.source, LocalSourceIdentity) or not isinstance(
-        candidate.target, LocalPublicationTarget
+    if require_local and (
+        not isinstance(candidate.source, LocalSourceIdentity)
+        or not isinstance(candidate.target, LocalPublicationTarget)
     ):
         raise LocalPublicationError("not_implemented", "local publish accepts only local candidates")
 
@@ -112,17 +117,44 @@ def _load_candidate(
         "note_markdown",
         "note_html",
     }
+    if isinstance(candidate.source, ZoteroSourceIdentity) and isinstance(
+        candidate.target, ZoteroPublicationTarget
+    ):
+        required.update(
+            {
+                "raw_discovery_bundle_snapshot",
+                "zotero_parent_snapshot",
+                "zotero_children_snapshot",
+            }
+        )
     if any(len(verified.get(role, [])) != 1 for role in required):
         raise LocalPublicationError("candidate_tampered", "candidate artifact membership is incomplete")
     if candidate.evidence_manifest not in candidate.artifacts or candidate.sealed_review not in candidate.artifacts:
         raise LocalPublicationError("candidate_tampered", "candidate gate refs are not artifact members")
-    _note_path, note_bytes = verified["note_markdown"][0]
-    if (
-        hashlib.sha256(note_bytes).hexdigest() != candidate.content_sha256
-        or len(note_bytes) != candidate.content_length
-        or markdown_note_title(note_bytes) != candidate.note_title
-    ):
-        raise LocalPublicationError("candidate_tampered", "candidate Markdown binding mismatch")
+    if isinstance(candidate.target, LocalPublicationTarget):
+        _note_path, note_bytes = verified["note_markdown"][0]
+        if (
+            hashlib.sha256(note_bytes).hexdigest() != candidate.content_sha256
+            or len(note_bytes) != candidate.content_length
+            or markdown_note_title(note_bytes) != candidate.note_title
+        ):
+            raise LocalPublicationError("candidate_tampered", "candidate Markdown binding mismatch")
+    elif isinstance(candidate.target, ZoteroPublicationTarget):
+        _html_path, html_bytes = verified["note_html"][0]
+        try:
+            html = html_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise LocalPublicationError("candidate_tampered", "candidate HTML is not UTF-8") from exc
+        if (
+            note_html_sha256(html) != candidate.content_sha256
+            or len(canonicalize_note_html_for_hash(html)) != candidate.content_length
+            or candidate.live_preflight is None
+            or candidate.live_preflight.parent_snapshot not in candidate.artifacts
+            or candidate.live_preflight.children_snapshot not in candidate.artifacts
+        ):
+            raise LocalPublicationError("candidate_tampered", "candidate HTML/live binding mismatch")
+    else:  # pragma: no cover - strict target discriminator makes this unreachable
+        raise LocalPublicationError("candidate_tampered", "candidate target type is invalid")
     return loaded, candidate_path, candidate, digest, {
         role: tuple(items) for role, items in verified.items()
     }

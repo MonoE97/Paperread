@@ -184,6 +184,9 @@
       "title": "Authorization Digest",
       "type": "string"
     },
+    "children_snapshot": {
+      "$ref": "#/$defs/ArtifactRef"
+    },
     "created_at": {
       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$",
       "title": "Created At",
@@ -266,6 +269,7 @@
     "outcome",
     "match_count",
     "matched_note_keys",
+    "children_snapshot",
     "retry_confirmation_required",
     "artifacts",
     "gate"

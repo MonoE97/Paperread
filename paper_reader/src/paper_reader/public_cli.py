@@ -232,10 +232,36 @@ def run_init_zotero(
     expected_item_key: str = typer.Option(..., "--expected-item-key"),
 ) -> None:
     """Initialize a Zotero V2 run from a saved raw discovery bundle."""
-    _not_implemented(
+    from paper_reader.zotero_lifecycle import (
+        ZoteroLifecycleError,
+        initialize_zotero_run,
+    )
+
+    try:
+        initialized = initialize_zotero_run(
+            raw_mcp_response,
+            expected_item_key=expected_item_key,
+        )
+    except ZoteroLifecycleError as exc:
+        _finish(
+            "run init-zotero",
+            ok=False,
+            code=exc.code,
+            data=exc.data,
+            message=str(exc),
+            diagnostic=str(exc),
+        )
+        return
+    _finish(
         "run init-zotero",
-        raw_mcp_response=str(raw_mcp_response),
-        expected_item_key=expected_item_key,
+        ok=True,
+        code="initialized",
+        data={
+            "run_dir": str(initialized.run_dir),
+            "run_id": initialized.run.run_id,
+            "item_key": initialized.run.source.item_key,
+            "title": initialized.run.source.title,
+        },
     )
 
 
@@ -432,11 +458,11 @@ def review_seal(run_path: Path) -> None:
 @candidate_app.command("build")
 def candidate_build(run_path: Path) -> None:
     """Build an immutable target-bound candidate."""
-    from paper_reader.candidate_builder import build_local_candidate
+    from paper_reader.candidate_builder import build_candidate
     from paper_reader.candidate_integrity import LocalPublicationError
 
     try:
-        built = build_local_candidate(run_path)
+        built = build_candidate(run_path)
     except RunLoadError as exc:
         _finish(
             "candidate build",
@@ -467,7 +493,7 @@ def candidate_build(run_path: Path) -> None:
             "candidate_dir": str(built.candidate_dir),
             "candidate_path": str(built.candidate_dir / "candidate.json"),
             "candidate_digest": built.candidate_digest,
-            "target_path": built.candidate.target.resolved_path,
+            "target": built.candidate.target.model_dump(mode="json"),
         },
     )
 
@@ -544,12 +570,57 @@ def zotero_authorize(
             diagnostic=message,
         )
         return
-    _not_implemented(
+    from paper_reader.zotero_authorization import (
+        ZoteroAuthorizationError,
+        authorize_zotero_candidate,
+    )
+
+    try:
+        authorized = authorize_zotero_candidate(
+            candidate,
+            external_claim_id=external_claim_id,
+            write_attempt_id=write_attempt_id,
+            ttl_seconds=ttl_seconds,
+        )
+    except RunLoadError as exc:
+        _finish(
+            "zotero authorize",
+            ok=False,
+            code=exc.code,
+            data={"manifest_path": str(exc.manifest_path)},
+            message=str(exc),
+            diagnostic=str(exc),
+        )
+        return
+    except ZoteroAuthorizationError as exc:
+        _finish(
+            "zotero authorize",
+            ok=False,
+            code=exc.code,
+            data=exc.data,
+            message=str(exc),
+            diagnostic=str(exc),
+        )
+        return
+    authorization = authorized.authorization
+    _finish(
         "zotero authorize",
-        candidate=str(candidate),
-        external_claim_id=external_claim_id,
-        write_attempt_id=write_attempt_id,
-        ttl_seconds=ttl_seconds,
+        ok=True,
+        code="authorized",
+        data={
+            "authorization_path": str(authorized.authorization_dir / "authorization.json"),
+            "authorization_id": authorization.authorization_id,
+            "authorization_digest": authorized.authorization_digest,
+            "candidate_digest": authorization.candidate_digest,
+            "external_claim_id": authorization.external_claim_id,
+            "write_attempt_id": authorization.write_attempt_id,
+            "nonce": authorization.nonce,
+            "write_token": authorized.write_token,
+            "token_sha256": authorization.token_sha256,
+            "expires_at": authorization.expires_at,
+            "ttl_seconds": authorization.ttl_seconds,
+            "mcp_envelope": authorization.mcp_envelope.model_dump(mode="json"),
+        },
     )
 
 
@@ -559,13 +630,118 @@ def zotero_verify(
     note_key: str = typer.Option(..., "--note-key"),
 ) -> None:
     """Verify one exact note readback against an immutable authorization."""
-    _not_implemented("zotero verify", authorization=str(authorization), note_key=note_key)
+    from paper_reader.zotero_verification import (
+        ZoteroVerificationError,
+        verify_zotero_authorization,
+    )
+
+    try:
+        verified = verify_zotero_authorization(
+            authorization,
+            note_key=note_key,
+        )
+    except RunLoadError as exc:
+        _finish(
+            "zotero verify",
+            ok=False,
+            code=exc.code,
+            data={"manifest_path": str(exc.manifest_path)},
+            message=str(exc),
+            diagnostic=str(exc),
+        )
+        return
+    except ZoteroVerificationError as exc:
+        _finish(
+            "zotero verify",
+            ok=False,
+            code=exc.code,
+            data=exc.data,
+            message=str(exc),
+            diagnostic=str(exc),
+        )
+        return
+    record = verified.verification
+    data = {
+        "verification_path": str(verified.verification_dir / "verification.json"),
+        "verification_id": record.verification_id,
+        "authorization_digest": verified.authorization_digest,
+        "note_key": record.note_key,
+        "verified": record.verified,
+        "replayed": verified.replayed,
+        "checks": [item.model_dump(mode="json") for item in record.checks],
+    }
+    if not record.verified:
+        _finish(
+            "zotero verify",
+            ok=False,
+            code="verification_blocked",
+            data=data,
+            message="Zotero note readback failed one or more exact verification checks",
+            diagnostic="Zotero note readback verification is blocked",
+        )
+        return
+    _finish("zotero verify", ok=True, code="verified", data=data)
 
 
 @zotero_app.command("reconcile")
 def zotero_reconcile(authorization: Path) -> None:
     """Locate and fully verify an uncertain external write read-only."""
-    _not_implemented("zotero reconcile", authorization=str(authorization))
+    from paper_reader.zotero_reconciliation import (
+        ZoteroReconciliationError,
+        reconcile_zotero_authorization,
+    )
+
+    try:
+        reconciled = reconcile_zotero_authorization(authorization)
+    except RunLoadError as exc:
+        _finish(
+            "zotero reconcile",
+            ok=False,
+            code=exc.code,
+            data={"manifest_path": str(exc.manifest_path)},
+            message=str(exc),
+            diagnostic=str(exc),
+        )
+        return
+    except ZoteroReconciliationError as exc:
+        _finish(
+            "zotero reconcile",
+            ok=False,
+            code=exc.code,
+            data=exc.data,
+            message=str(exc),
+            diagnostic=str(exc),
+        )
+        return
+    record = reconciled.reconciliation
+    data = {
+        "reconciliation_path": str(
+            reconciled.reconciliation_dir / "reconciliation.json"
+        ),
+        "reconciliation_id": record.reconciliation_id,
+        "authorization_digest": reconciled.authorization_digest,
+        "outcome": record.outcome,
+        "match_count": record.match_count,
+        "matched_note_keys": list(record.matched_note_keys),
+        "retry_confirmation_required": record.retry_confirmation_required,
+        "replayed": reconciled.replayed,
+        "verification_path": (
+            str(reconciled.run_dir / record.verification.path)
+            if record.verification is not None
+            else None
+        ),
+    }
+    if record.outcome != "verified":
+        _finish(
+            "zotero reconcile",
+            ok=False,
+            code=f"reconciliation_{record.outcome}",
+            data=data,
+            message=f"Zotero reconciliation ended as {record.outcome}",
+            diagnostic=f"Zotero reconciliation ended as {record.outcome}",
+        )
+        return
+    _finish("zotero reconcile", ok=True, code="reconciliation_verified", data=data)
 
 
 @maintenance_app.command("extract-pdf")

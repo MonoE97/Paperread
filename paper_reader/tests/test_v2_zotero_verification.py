@@ -1,0 +1,341 @@
+from __future__ import annotations
+
+import copy
+import importlib
+import importlib.util
+import json
+import re
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from paper_reader.contracts import (
+    PaperReaderCommandResult,
+    PaperReaderVerification,
+    PaperReaderWriteAuthorization,
+)
+from paper_reader.public_cli import app
+
+from test_v2_zotero_authorization import _authorize, _candidate
+from test_v2_zotero_candidate import InMemoryZoteroProvider
+
+
+def _module():
+    module_name = "paper_reader.zotero_verification"
+    assert importlib.util.find_spec(module_name) is not None, "Zotero verification module is missing"
+    return importlib.import_module(module_name)
+
+
+def _authorized(tmp_path: Path):
+    candidate_path, provider = _candidate(tmp_path)
+    authorized = _authorize(candidate_path, provider, ttl_seconds=1)
+    authorization_path = authorized.authorization_dir / "authorization.json"
+    return authorization_path, authorized.authorization
+
+
+def _note_snapshot(
+    authorization: PaperReaderWriteAuthorization,
+    *,
+    requested_key: str = "NOTE1",
+    snapshot_key: str | None = None,
+    parent: str | None = None,
+    content: str | None = None,
+    tags: list[str] | None = None,
+) -> dict[str, object]:
+    key = snapshot_key or requested_key
+    return {
+        "key": key,
+        "version": 1,
+        "library": {"type": "user", "id": 0, "name": "My Library"},
+        "links": {"self": {"href": f"http://127.0.0.1:23119/api/users/0/items/{key}"}},
+        "meta": {},
+        "data": {
+            "key": key,
+            "version": 1,
+            "itemType": "note",
+            "parentItem": parent or authorization.target.parent_key,
+            "note": authorization.content_html if content is None else content,
+            "tags": [
+                {"tag": tag, "type": 1}
+                for tag in (list(authorization.tags) if tags is None else tags)
+            ],
+            "collections": [],
+            "relations": {},
+            "dateAdded": "2026-07-10T12:05:01Z",
+            "dateModified": "2026-07-10T12:05:01Z",
+        },
+    }
+
+
+def _verify(authorization_path: Path, provider, *, note_key: str = "NOTE1"):
+    return _module().verify_zotero_authorization(
+        authorization_path,
+        note_key=note_key,
+        provider=provider,
+    )
+
+
+def test_verify_expired_authorization_saves_exact_passed_readback_and_publishes_run(
+    tmp_path: Path,
+) -> None:
+    authorization_path, authorization = _authorized(tmp_path)
+    snapshot = _note_snapshot(authorization)
+    provider = InMemoryZoteroProvider(notes={"NOTE1": snapshot})
+
+    verified = _verify(authorization_path, provider)
+
+    verification_path = verified.verification_dir / "verification.json"
+    verification = PaperReaderVerification.model_validate_json(
+        verification_path.read_bytes()
+    )
+    assert verification.verified is True
+    assert verification.note_key == "NOTE1"
+    assert verification.authorization_digest == verified.authorization_digest
+    assert verification.note_snapshot in verification.artifacts
+    assert verification.checks_snapshot in verification.artifacts
+    assert all(check.passed for check in verification.checks)
+    assert sorted(path.name for path in verified.verification_dir.iterdir()) == [
+        "authorization.json",
+        "checks.json",
+        "note.json",
+        "verification.json",
+    ]
+    assert json.loads((verified.verification_dir / "note.json").read_text()) == snapshot
+    run_dir = authorization_path.parent.parent.parent
+    run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert run["status"] == "published"
+    assert [item["role"] for item in run["artifacts"]].count("zotero_verification") == 1
+
+
+def _mutated_case(
+    authorization: PaperReaderWriteAuthorization,
+    case: str,
+) -> tuple[dict[str, object], str]:
+    snapshot = _note_snapshot(authorization)
+    data = snapshot["data"]
+    assert isinstance(data, dict)
+    if case == "key":
+        snapshot["key"] = "WRONGKEY"
+        data["key"] = "WRONGKEY"
+        return snapshot, "note_key"
+    if case == "parent":
+        data["parentItem"] = "WRONGPARENT"
+        return snapshot, "parent_key"
+    if case == "title":
+        data["note"] = re.sub(
+            r"<h1>.*?</h1>",
+            "<h1>Wrong Title</h1>",
+            str(data["note"]),
+            count=1,
+            flags=re.DOTALL,
+        )
+        return snapshot, "note_title"
+    if case == "missing_tag":
+        data["tags"] = [{"tag": authorization.tags[0], "type": 1}]
+        return snapshot, "tag_set"
+    if case == "extra_tag":
+        data["tags"] = [*data["tags"], {"tag": "unexpected", "type": 1}]
+        return snapshot, "tag_set"
+    if case == "missing_heading":
+        heading = authorization.required_headings[0]
+        data["note"] = str(data["note"]).replace(f"<h2>{heading}</h2>", "", 1)
+        return snapshot, "required_headings"
+    if case == "forbidden_heading":
+        data["note"] = str(data["note"]) + f"<h2>{authorization.forbidden_headings[0]}</h2>"
+        return snapshot, "forbidden_headings"
+    if case == "hash":
+        data["note"] = str(data["note"]).replace("Tags:", "Changed tags marker:", 1)
+        return snapshot, "content_sha256"
+    if case == "length":
+        data["note"] = "<h1>too short</h1>"
+        return snapshot, "minimum_content_length"
+    raise AssertionError(case)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "key",
+        "parent",
+        "title",
+        "missing_tag",
+        "extra_tag",
+        "missing_heading",
+        "forbidden_heading",
+        "hash",
+        "length",
+    ],
+)
+def test_verify_matrix_persists_only_blocked_verification(
+    case: str,
+    tmp_path: Path,
+) -> None:
+    authorization_path, authorization = _authorized(tmp_path)
+    snapshot, failed_check = _mutated_case(authorization, case)
+    provider = InMemoryZoteroProvider(notes={"NOTE1": snapshot})
+
+    verified = _verify(authorization_path, provider)
+
+    verification = verified.verification
+    checks = {check.name: check for check in verification.checks}
+    assert verification.verified is False
+    assert verification.gate.status == "blocked"
+    assert checks[failed_check].passed is False
+    run_dir = authorization_path.parent.parent.parent
+    run = json.loads((run_dir / "run.json").read_text())
+    bound_records = [item for item in run["artifacts"] if item["role"] == "zotero_verification"]
+    assert len(bound_records) == 1
+    bound_verification = PaperReaderVerification.model_validate_json(
+        (run_dir / bound_records[0]["path"]).read_bytes()
+    )
+    assert bound_verification.verified is False
+    assert json.loads((verified.verification_dir / "note.json").read_text()) == snapshot
+
+
+def test_verify_is_idempotent_for_same_authorization_and_note_key(tmp_path: Path) -> None:
+    authorization_path, authorization = _authorized(tmp_path)
+    first_snapshot = _note_snapshot(authorization)
+    provider = InMemoryZoteroProvider(notes={"NOTE1": first_snapshot})
+
+    first = _verify(authorization_path, provider)
+    provider.notes["NOTE1"] = _note_snapshot(
+        authorization,
+        content="<h1>changed after terminal verification</h1>",
+    )
+    second = _verify(authorization_path, provider)
+
+    assert second.verification_dir == first.verification_dir
+    assert second.verification == first.verification
+    assert second.replayed is True
+
+
+def test_verify_rejects_authorization_or_candidate_tamper_before_readback(tmp_path: Path) -> None:
+    authorization_path, authorization = _authorized(tmp_path)
+    candidate_snapshot = authorization_path.parent / "candidate.json"
+    candidate_snapshot.write_bytes(candidate_snapshot.read_bytes() + b"\n")
+    provider = InMemoryZoteroProvider(
+        notes={"NOTE1": _note_snapshot(authorization)}
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        _verify(authorization_path, provider)
+
+    assert getattr(exc_info.value, "code", None) == "authorization_tampered"
+    run_dir = authorization_path.parent.parent.parent
+    assert not (run_dir / "verifications").exists()
+
+
+def test_verify_cli_emits_one_structured_passed_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    authorization_path, authorization = _authorized(tmp_path)
+    provider = InMemoryZoteroProvider(
+        notes={"NOTE1": _note_snapshot(authorization)}
+    )
+    monkeypatch.setattr(module, "LocalApiZoteroReadProvider", lambda: provider)
+
+    result = CliRunner().invoke(
+        app,
+        ["zotero", "verify", str(authorization_path), "--note-key", "NOTE1"],
+    )
+
+    assert result.exit_code == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert len(lines) == 1, result.stdout
+    payload = json.loads(lines[0])
+    PaperReaderCommandResult.model_validate(payload)
+    assert payload["code"] == "verified"
+    assert payload["data"]["verified"] is True
+    assert Path(payload["data"]["verification_path"]).is_file()
+
+
+def test_concurrent_verify_converges_on_one_bound_terminal_tree(tmp_path: Path) -> None:
+    authorization_path, authorization = _authorized(tmp_path)
+    provider = InMemoryZoteroProvider(
+        notes={"NOTE1": _note_snapshot(authorization)}
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(
+            executor.map(
+                lambda _index: _verify(authorization_path, provider),
+                range(2),
+            )
+        )
+
+    assert outcomes[0].verification_dir == outcomes[1].verification_dir
+    assert {item.replayed for item in outcomes} == {False, True}
+    run_dir = authorization_path.parent.parent.parent
+    run = json.loads((run_dir / "run.json").read_text())
+    assert [item["role"] for item in run["artifacts"]].count("zotero_verification") == 1
+
+
+def test_verification_size_and_run_binding_faults_do_not_create_false_terminal_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    from paper_reader.resource_policy import V2_RESOURCE_POLICY
+
+    size_dir = tmp_path / "size"
+    size_dir.mkdir()
+    authorization_path, authorization = _authorized(size_dir)
+    provider = InMemoryZoteroProvider(
+        notes={"NOTE1": _note_snapshot(authorization)}
+    )
+    run_dir = authorization_path.parent.parent.parent
+    run_before = (run_dir / "run.json").read_bytes()
+    monkeypatch.setattr(
+        module,
+        "V2_RESOURCE_POLICY",
+        replace(V2_RESOURCE_POLICY, run_max_bytes=1),
+    )
+
+    with pytest.raises(Exception) as size_error:
+        _verify(authorization_path, provider)
+
+    assert getattr(size_error.value, "code", None) == "run_size_limit_exceeded"
+    assert (run_dir / "run.json").read_bytes() == run_before
+    assert not (run_dir / "verifications").exists()
+
+    monkeypatch.setattr(module, "V2_RESOURCE_POLICY", V2_RESOURCE_POLICY)
+    fault_dir = tmp_path / "fault"
+    fault_dir.mkdir()
+    authorization_path, authorization = _authorized(fault_dir)
+    provider = InMemoryZoteroProvider(
+        notes={"NOTE1": _note_snapshot(authorization)}
+    )
+    run_dir = authorization_path.parent.parent.parent
+    run_before = (run_dir / "run.json").read_bytes()
+    original_write = module.atomic_write_json
+    failed = False
+
+    def fail_once(path: Path, value):
+        nonlocal failed
+        if Path(path).name == "run.json" and not failed:
+            failed = True
+            raise OSError("injected verification run binding failure")
+        return original_write(path, value)
+
+    monkeypatch.setattr(module, "atomic_write_json", fail_once)
+
+    with pytest.raises(Exception) as fault_error:
+        _verify(authorization_path, provider)
+
+    assert getattr(fault_error.value, "code", None) == "verification_status_update_failed"
+    assert (run_dir / "run.json").read_bytes() == run_before
+    orphan_dirs = tuple((run_dir / "verifications").iterdir())
+    assert len(orphan_dirs) == 1
+
+    retry = _verify(authorization_path, provider)
+
+    assert retry.verification_dir not in orphan_dirs
+    run = json.loads((run_dir / "run.json").read_text())
+    bound = [item for item in run["artifacts"] if item["role"] == "zotero_verification"]
+    assert len(bound) == 1
+    assert run_dir / bound[0]["path"] == retry.verification_dir / "verification.json"
