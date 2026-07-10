@@ -608,7 +608,7 @@ def zotero_authorize(
         ok=True,
         code="authorized",
         data={
-            "authorization_path": str(authorized.authorization_dir / "authorization.json"),
+            "authorization_path": str(authorized.authorization_path),
             "authorization_id": authorization.authorization_id,
             "authorization_digest": authorized.authorization_digest,
             "candidate_digest": authorization.candidate_digest,
@@ -662,7 +662,7 @@ def zotero_verify(
         return
     record = verified.verification
     data = {
-        "verification_path": str(verified.verification_dir / "verification.json"),
+        "verification_path": str(verified.verification_path),
         "verification_id": record.verification_id,
         "authorization_digest": verified.authorization_digest,
         "note_key": record.note_key,
@@ -715,9 +715,7 @@ def zotero_reconcile(authorization: Path) -> None:
         return
     record = reconciled.reconciliation
     data = {
-        "reconciliation_path": str(
-            reconciled.reconciliation_dir / "reconciliation.json"
-        ),
+        "reconciliation_path": str(reconciled.reconciliation_path),
         "reconciliation_id": record.reconciliation_id,
         "authorization_digest": reconciled.authorization_digest,
         "outcome": record.outcome,

@@ -4,6 +4,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from pydantic import ValidationError
 
 from paper_reader.candidate_integrity import LocalPublicationError, verify_artifact_ref
@@ -23,6 +24,7 @@ from paper_reader.storage import (
     canonical_json_bytes,
     new_random_id,
     new_uuid,
+    publish_file_no_replace,
     rfc3339_utc,
 )
 from paper_reader.v2_loader import LoadedRun
@@ -39,7 +41,7 @@ from paper_reader.zotero_note_validation import NoteEvaluation, evaluate_note_sn
 from paper_reader.zotero_read import LocalApiZoteroReadProvider, ZoteroReadProvider
 
 
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
+_PORTABLE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$")
 
 
 class ZoteroVerificationError(LocalPublicationError):
@@ -49,6 +51,7 @@ class ZoteroVerificationError(LocalPublicationError):
 @dataclass(frozen=True, slots=True)
 class VerifiedZoteroNote:
     run_dir: Path
+    verification_path: Path
     verification_dir: Path
     verification: PaperReaderVerification
     authorization_digest: str
@@ -72,52 +75,168 @@ def _verification_gate(evaluation: NoteEvaluation) -> GateState:
     )
 
 
+def _validate_verification_record(
+    run_dir: Path,
+    path: Path,
+    raw: bytes,
+    *,
+    bound: LoadedAuthorization,
+    note_key: str,
+) -> PaperReaderVerification:
+    try:
+        verification = PaperReaderVerification.model_validate_json(raw)
+    except ValidationError as exc:
+        raise ZoteroVerificationError(
+            "verification_tampered",
+            f"verification failed strict validation: {exc}",
+        ) from exc
+    expected_path = (
+        run_dir
+        / "verifications"
+        / bound.authorization.authorization_id
+        / f"{note_key}.json"
+    )
+    if (
+        path.resolve(strict=False) != expected_path.resolve(strict=False)
+        or canonical_json_bytes(verification) != raw
+        or verification.run_id != bound.authorization.run_id
+        or verification.authorization_digest != bound.authorization_digest
+        or verification.target != bound.authorization.target
+        or verification.note_key != note_key
+    ):
+        raise ZoteroVerificationError(
+            "verification_tampered",
+            "verification main artifact identity or binding changed",
+        )
+    sidecar_dir = expected_path.with_suffix("")
+    roles: set[str] = set()
+    for artifact in verification.artifacts:
+        try:
+            artifact_path, _artifact_bytes = verify_artifact_ref(run_dir, artifact)
+        except LocalPublicationError as exc:
+            raise ZoteroVerificationError(
+                "verification_tampered",
+                f"verification member changed: {artifact.path}: {exc}",
+            ) from exc
+        if not artifact_path.is_relative_to(sidecar_dir) or artifact.role in roles:
+            raise ZoteroVerificationError(
+                "verification_tampered",
+                "verification sidecar membership is not closed and unique",
+            )
+        roles.add(artifact.role)
+    if roles != {"authorization_snapshot", "zotero_note_readback", "verification_checks"}:
+        raise ZoteroVerificationError(
+            "verification_tampered",
+            "verification sidecar artifact roles changed",
+        )
+    if (
+        verification.authorization not in verification.artifacts
+        or verification.note_snapshot not in verification.artifacts
+        or verification.checks_snapshot not in verification.artifacts
+    ):
+        raise ZoteroVerificationError(
+            "verification_tampered",
+            "verification refs are not members of the immutable sidecar",
+        )
+    return verification
+
+
 def _existing_verification(
     loaded: LoadedRun,
     *,
-    authorization_digest: str,
+    bound: LoadedAuthorization,
     note_key: str,
 ) -> VerifiedZoteroNote | None:
     run_dir = loaded.manifest_path.resolve(strict=True).parent
-    for ref in (item for item in loaded.run.artifacts if item.role == "zotero_verification"):
+    verification_path = (
+        run_dir
+        / "verifications"
+        / bound.authorization.authorization_id
+        / f"{note_key}.json"
+    )
+    verification_dir = verification_path.with_suffix("")
+    recovery_record = verification_dir / "record.json"
+    if not verification_path.exists() and not recovery_record.exists():
+        return None
+    try:
+        raw = (
+            verification_path.read_bytes()
+            if verification_path.exists()
+            else recovery_record.read_bytes()
+        )
+    except OSError as exc:
+        raise ZoteroVerificationError(
+            "verification_tampered",
+            f"verification commit candidate is unreadable: {exc}",
+        ) from exc
+    verification = _validate_verification_record(
+        run_dir,
+        verification_path,
+        raw,
+        bound=bound,
+        note_key=note_key,
+    )
+    if not verification_path.exists():
         try:
-            path, raw = verify_artifact_ref(run_dir, ref)
-            verification = PaperReaderVerification.model_validate_json(raw)
-        except (LocalPublicationError, ValidationError) as exc:
+            publish_file_no_replace(recovery_record, verification_path)
+        except Exception as exc:
             raise ZoteroVerificationError(
-                "verification_tampered",
-                f"bound verification failed integrity validation: {ref.path}: {exc}",
+                "verification_recovery_failed",
+                f"failed to restore exact verification commit marker: {exc}",
             ) from exc
-        if canonical_json_bytes(verification) != raw:
+    relative = verification_path.relative_to(run_dir).as_posix()
+    refs = [
+        item
+        for item in loaded.run.artifacts
+        if item.role == "zotero_verification" and item.path == relative
+    ]
+    if len(refs) > 1:
+        raise ZoteroVerificationError(
+            "verification_tampered",
+            "run binds the deterministic verification more than once",
+        )
+    if refs:
+        try:
+            path, bound_raw = verify_artifact_ref(run_dir, refs[0])
+        except LocalPublicationError as exc:
             raise ZoteroVerificationError(
                 "verification_tampered",
-                f"bound verification is not canonical: {ref.path}",
+                f"bound verification failed integrity validation: {exc}",
+            ) from exc
+        if path != verification_path.resolve(strict=True) or bound_raw != raw:
+            raise ZoteroVerificationError(
+                "verification_tampered",
+                "run-bound verification differs from the deterministic main artifact",
             )
-        if (
-            verification.authorization_digest == authorization_digest
-            and verification.note_key == note_key
-        ):
-            for artifact in verification.artifacts:
-                try:
-                    artifact_path, _artifact_bytes = verify_artifact_ref(run_dir, artifact)
-                except LocalPublicationError as exc:
-                    raise ZoteroVerificationError(
-                        "verification_tampered",
-                        f"bound verification member changed: {artifact.path}: {exc}",
-                    ) from exc
-                if not artifact_path.is_relative_to(path.parent):
-                    raise ZoteroVerificationError(
-                        "verification_tampered",
-                        "bound verification member escapes its immutable tree",
-                    )
-            return VerifiedZoteroNote(
-                run_dir=run_dir,
-                verification_dir=path.parent,
-                verification=verification,
-                authorization_digest=authorization_digest,
-                replayed=True,
-            )
-    return None
+    else:
+        verification_ref = _artifact_ref(
+            run_dir,
+            verification_path,
+            verification_path,
+            "zotero_verification",
+            "application/json",
+        )
+        updated_run = _updated_run(
+            loaded.run,
+            verification_ref=verification_ref,
+            gate=verification.gate,
+            verified=verification.verified,
+        )
+        try:
+            atomic_write_json(loaded.manifest_path, updated_run)
+        except Exception as exc:
+            raise ZoteroVerificationError(
+                "verification_status_update_failed",
+                f"verification main artifact is durable but run binding failed: {exc}",
+            ) from exc
+    return VerifiedZoteroNote(
+        run_dir=run_dir,
+        verification_path=verification_path,
+        verification_dir=verification_dir,
+        verification=verification,
+        authorization_digest=bound.authorization_digest,
+        replayed=True,
+    )
 
 
 def _updated_run(
@@ -156,10 +275,18 @@ def publish_verification_locked(
         note_key=note_key,
     )
     verification_id = new_random_id("verification")
-    verification_dir = run_dir / "verifications" / verification_id
+    verification_path = (
+        run_dir
+        / "verifications"
+        / bound.authorization.authorization_id
+        / f"{note_key}.json"
+    )
+    verification_dir = verification_path.with_suffix("")
     staging = run_dir / f".{verification_id}.{new_uuid()}.staging"
     staging.mkdir()
     try:
+        staged_sidecar = staging / "sidecar"
+        staged_sidecar.mkdir()
         checks_payload = {
             "format": "paper_reader.verification-checks.v2-internal",
             "authorization_digest": bound.authorization_digest,
@@ -172,7 +299,7 @@ def publish_verification_locked(
             "checks.json": canonical_json_bytes(checks_payload),
         }
         for name, content in files.items():
-            (staging / name).write_bytes(content)
+            (staged_sidecar / name).write_bytes(content)
         specs = {
             "authorization.json": ("authorization_snapshot", "application/json"),
             "note.json": ("zotero_note_readback", "application/json"),
@@ -181,7 +308,7 @@ def publish_verification_locked(
         refs = {
             name: _artifact_ref(
                 run_dir,
-                staging / name,
+                staged_sidecar / name,
                 verification_dir / name,
                 role,
                 media,
@@ -208,9 +335,9 @@ def publish_verification_locked(
             gate=gate,
         )
         verification_bytes = canonical_json_bytes(verification)
-        staged_verification_path = staging / "verification.json"
+        (staged_sidecar / "record.json").write_bytes(verification_bytes)
+        staged_verification_path = staging / f"{note_key}.json"
         staged_verification_path.write_bytes(verification_bytes)
-        verification_path = verification_dir / "verification.json"
         verification_ref = _artifact_ref(
             run_dir,
             staged_verification_path,
@@ -238,7 +365,8 @@ def publish_verification_locked(
                 data={"run_size_bytes": exc.actual_bytes, "max_bytes": exc.max_bytes},
             ) from exc
         try:
-            atomic_publish_tree(staging, verification_dir)
+            atomic_publish_tree(staged_sidecar, verification_dir)
+            publish_file_no_replace(staged_verification_path, verification_path)
         except Exception as exc:
             raise ZoteroVerificationError(
                 "verification_publication_failed",
@@ -253,6 +381,7 @@ def publish_verification_locked(
             ) from exc
         return VerifiedZoteroNote(
             run_dir=run_dir,
+            verification_path=verification_path,
             verification_dir=verification_dir,
             verification=verification,
             authorization_digest=bound.authorization_digest,
@@ -269,7 +398,7 @@ def verify_zotero_authorization(
     note_key: str,
     provider: ZoteroReadProvider | None = None,
 ) -> VerifiedZoteroNote:
-    if not _IDENTIFIER_RE.fullmatch(note_key):
+    if not _PORTABLE_IDENTIFIER_RE.fullmatch(note_key):
         raise ZoteroVerificationError("invalid_note_key", "note_key is not a valid identifier")
     try:
         authorization_path, inspected, run_dir = inspect_authorization_target(
@@ -286,7 +415,7 @@ def verify_zotero_authorization(
                 raise ZoteroVerificationError(exc.code, str(exc), data=exc.data) from exc
             replay = _existing_verification(
                 loaded,
-                authorization_digest=bound.authorization_digest,
+                bound=bound,
                 note_key=note_key,
             )
             if replay is not None:

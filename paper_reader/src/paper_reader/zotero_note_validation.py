@@ -48,7 +48,7 @@ def evaluate_note_snapshot(
     content_length = len(canonical_html)
     title, headings = _parse_headings(note_html)
     snapshot_key = str(snapshot.get("key", "")).strip()
-    data_key = str(data.get("key", snapshot_key)).strip()
+    data_key = str(data.get("key", "")).strip()
     parent_key = str(data.get("parentItem", "")).strip()
     tags = {
         str(item.get("tag", "")).strip()

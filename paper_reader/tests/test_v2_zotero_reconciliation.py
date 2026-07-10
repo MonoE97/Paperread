@@ -31,7 +31,7 @@ def _module():
 def _authorized(tmp_path: Path):
     candidate_path, provider = _candidate(tmp_path)
     authorized = _authorize(candidate_path, provider, ttl_seconds=1)
-    return authorized.authorization_dir / "authorization.json", authorized.authorization
+    return authorized.authorization_path, authorized.authorization
 
 
 def _reconcile(authorization_path: Path, provider):
@@ -50,7 +50,7 @@ def test_reconcile_zero_is_terminal_not_found_and_requires_retry_confirmation(
     reconciled = _reconcile(authorization_path, provider)
 
     record = PaperReaderReconciliation.model_validate_json(
-        (reconciled.reconciliation_dir / "reconciliation.json").read_bytes()
+        reconciled.reconciliation_path.read_bytes()
     )
     assert record.outcome == "not_found"
     assert record.match_count == 0
@@ -61,8 +61,26 @@ def test_reconcile_zero_is_terminal_not_found_and_requires_retry_confirmation(
     assert sorted(path.name for path in reconciled.reconciliation_dir.iterdir()) == [
         "authorization.json",
         "children.json",
-        "reconciliation.json",
+        "record.json",
     ]
+
+
+def test_reconciliation_main_artifact_uses_authorization_topology(tmp_path: Path) -> None:
+    authorization_path, authorization = _authorized(tmp_path)
+
+    reconciled = _reconcile(
+        authorization_path,
+        InMemoryZoteroProvider(children=[], notes={}),
+    )
+
+    expected = (
+        reconciled.run_dir
+        / "reconciliations"
+        / f"{authorization.authorization_id}.json"
+    )
+    assert reconciled.reconciliation_path == expected
+    assert expected.is_file()
+    assert reconciled.reconciliation_dir == expected.with_suffix("")
 
 
 def test_reconcile_many_exact_matches_is_ambiguous_and_blocked(tmp_path: Path) -> None:
@@ -112,7 +130,7 @@ def test_reconcile_one_exact_match_runs_full_verify_before_verified(tmp_path: Pa
         "checks.json",
         "children.json",
         "note.json",
-        "reconciliation.json",
+        "record.json",
         "verification.json",
     ]
     run = json.loads((reconciled.run_dir / "run.json").read_text(encoding="utf-8"))
@@ -129,7 +147,7 @@ def test_reconcile_expired_authorization_still_runs_full_readback_verification(
         now=NOW.replace(year=2000),
         ttl_seconds=1,
     )
-    authorization_path = authorized.authorization_dir / "authorization.json"
+    authorization_path = authorized.authorization_path
     note = _note_snapshot(authorized.authorization, requested_key="NOTE1")
     provider.children = [note]
     provider.notes = {"NOTE1": note}
@@ -252,7 +270,7 @@ def test_concurrent_reconcile_converges_on_one_fixed_terminal_tree(tmp_path: Pat
 
     assert outcomes[0].reconciliation_dir == outcomes[1].reconciliation_dir
     assert {item.replayed for item in outcomes} == {False, True}
-    run_dir = authorization_path.parent.parent.parent
+    run_dir = authorization_path.parent.parent
     run = json.loads((run_dir / "run.json").read_text())
     assert [item["role"] for item in run["artifacts"]].count("zotero_reconciliation") == 1
 
@@ -268,7 +286,7 @@ def test_reconciliation_size_and_run_binding_faults_ignore_unbound_orphans(
     size_dir.mkdir()
     authorization_path, _authorization = _authorized(size_dir)
     provider = InMemoryZoteroProvider(children=[], notes={})
-    run_dir = authorization_path.parent.parent.parent
+    run_dir = authorization_path.parent.parent
     run_before = (run_dir / "run.json").read_bytes()
     monkeypatch.setattr(
         module,
@@ -288,7 +306,7 @@ def test_reconciliation_size_and_run_binding_faults_ignore_unbound_orphans(
     fault_dir.mkdir()
     authorization_path, _authorization = _authorized(fault_dir)
     provider = InMemoryZoteroProvider(children=[], notes={})
-    run_dir = authorization_path.parent.parent.parent
+    run_dir = authorization_path.parent.parent
     run_before = (run_dir / "run.json").read_bytes()
     original_write = module.atomic_write_json
     failed = False
@@ -307,13 +325,18 @@ def test_reconciliation_size_and_run_binding_faults_ignore_unbound_orphans(
 
     assert getattr(fault_error.value, "code", None) == "reconciliation_status_update_failed"
     assert (run_dir / "run.json").read_bytes() == run_before
-    orphan_dirs = tuple((run_dir / "reconciliations").iterdir())
-    assert len(orphan_dirs) == 1
+    orphan_main = (
+        run_dir
+        / "reconciliations"
+        / f"{_authorization.authorization_id}.json"
+    )
+    assert orphan_main.is_file()
 
     retry = _reconcile(authorization_path, provider)
 
-    assert retry.reconciliation_dir not in orphan_dirs
+    assert retry.reconciliation_path == orphan_main
+    assert retry.replayed is True
     run = json.loads((run_dir / "run.json").read_text())
     bound = [item for item in run["artifacts"] if item["role"] == "zotero_reconciliation"]
     assert len(bound) == 1
-    assert run_dir / bound[0]["path"] == retry.reconciliation_dir / "reconciliation.json"
+    assert run_dir / bound[0]["path"] == retry.reconciliation_path

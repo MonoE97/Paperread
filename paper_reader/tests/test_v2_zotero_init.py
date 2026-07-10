@@ -94,6 +94,20 @@ def _result_payload(result) -> dict[str, object]:
     return payload
 
 
+def _tree_snapshot(root: Path) -> dict[str, tuple[str, int, int, str | None]]:
+    snapshot: dict[str, tuple[str, int, int, str | None]] = {}
+    for path in (root, *sorted(root.rglob("*"))):
+        stat = path.stat()
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        snapshot[relative] = (
+            "dir" if path.is_dir() else "file",
+            stat.st_mtime_ns,
+            stat.st_size,
+            hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None,
+        )
+    return snapshot
+
+
 def test_init_zotero_preserves_raw_bytes_and_binds_normalized_source_and_pdf(
     tmp_path: Path,
 ) -> None:
@@ -219,6 +233,84 @@ def test_init_zotero_blocks_invalid_selection_before_run_allocation(
 
     assert exc_info.value.code == expected_code
     assert not (skill_root / "runs").exists()
+
+
+@pytest.mark.parametrize("field", ["DOI", "version"])
+def test_init_zotero_requires_inventory_doi_and_version_to_match_selected_item(
+    field: str,
+    tmp_path: Path,
+) -> None:
+    pdf_path = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, pdf_path)
+    payload = _bundle(pdf_path)
+    inventory_item = payload["search_results"][0]
+    assert isinstance(inventory_item, dict)
+    inventory_item[field] = "10.1000/drifted" if field == "DOI" else 18
+    bundle_path = tmp_path / "discovery.json"
+    bundle_path.write_text(json.dumps(payload), encoding="utf-8")
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+
+    with pytest.raises(Exception) as exc_info:
+        _initialize(bundle_path, "PARENT1", skill_root)
+
+    assert getattr(exc_info.value, "code", None) == "selected_item_inventory_mismatch"
+    assert not (skill_root / "runs").exists()
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_code"),
+    [
+        ("nan", "invalid_discovery_bundle"),
+        ("infinity", "invalid_discovery_bundle"),
+        ("expected_identifier", "invalid_expected_item_key"),
+        ("selected_identifier", "invalid_discovery_bundle"),
+        ("inventory_identifier", "invalid_discovery_bundle"),
+        ("attachment_identifier", "invalid_discovery_bundle"),
+    ],
+)
+def test_init_zotero_rejects_noncanonical_or_invalid_identifiers_before_any_root_mutation(
+    case: str,
+    expected_code: str,
+    tmp_path: Path,
+) -> None:
+    pdf_path = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, pdf_path)
+    payload = _bundle(pdf_path)
+    expected_key = "PARENT1"
+    selected = payload["selected_item"]
+    inventory = payload["search_results"]
+    assert isinstance(selected, dict)
+    assert isinstance(inventory, list)
+    if case == "nan":
+        selected["abstractNote"] = float("nan")
+    elif case == "infinity":
+        selected["abstractNote"] = float("inf")
+    elif case == "expected_identifier":
+        expected_key = "../PARENT1"
+    elif case == "selected_identifier":
+        selected["key"] = "BAD/KEY"
+    elif case == "inventory_identifier":
+        inventory.append({"key": "BAD/KEY", "title": "Other", "DOI": "", "version": 0})
+    else:
+        attachments = selected["attachments"]
+        assert isinstance(attachments, list)
+        attachments[0]["key"] = "BAD/KEY"
+    bundle_path = tmp_path / "discovery.json"
+    bundle_path.write_text(json.dumps(payload), encoding="utf-8")
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+    sentinel = skill_root / "sentinel.txt"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    before = _tree_snapshot(skill_root)
+
+    import paper_reader.zotero_lifecycle as module
+
+    with pytest.raises(module.ZoteroLifecycleError) as exc_info:
+        _initialize(bundle_path, expected_key, skill_root)
+
+    assert exc_info.value.code == expected_code
+    assert _tree_snapshot(skill_root) == before
 
 
 def test_init_zotero_requires_readable_local_primary_pdf_before_allocation(tmp_path: Path) -> None:

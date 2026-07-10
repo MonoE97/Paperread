@@ -46,6 +46,10 @@ Identifier: TypeAlias = Annotated[
     str,
     StringConstraints(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$"),
 ]
+PortableIdentifier: TypeAlias = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"),
+]
 ArtifactPath: TypeAlias = Annotated[str, AfterValidator(safe_relative_artifact_path)]
 AbsolutePath: TypeAlias = Annotated[str, AfterValidator(_validate_absolute_path)]
 NonNegativeInt: TypeAlias = Annotated[int, Field(ge=0)]
@@ -358,7 +362,7 @@ class PaperReaderVerification(StrictContractModel):
     authorization: ArtifactRef
     authorization_digest: Sha256
     target: ZoteroPublicationTarget
-    note_key: Identifier
+    note_key: PortableIdentifier
     verified: bool
     content_sha256: Sha256
     content_length: NonNegativeInt
@@ -379,7 +383,7 @@ class PaperReaderReconciliation(StrictContractModel):
     target: ZoteroPublicationTarget
     outcome: Literal["verified", "not_found", "ambiguous", "blocked"]
     match_count: NonNegativeInt
-    matched_note_keys: tuple[Identifier, ...]
+    matched_note_keys: tuple[PortableIdentifier, ...]
     children_snapshot: ArtifactRef
     verification: ArtifactRef | None = None
     retry_confirmation_required: bool
@@ -452,6 +456,7 @@ __all__ = [
     "PaperReaderSummary",
     "PaperReaderVerification",
     "PaperReaderWriteAuthorization",
+    "PortableIdentifier",
     "V2_SCHEMA_MODELS",
     "V2_SUPPORT_MODELS",
     "ValidationError",

@@ -13,9 +13,12 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+from pydantic import TypeAdapter, ValidationError
+
 from paper_reader.contracts import (
     ArtifactRef,
     GateState,
+    Identifier,
     LocalSourceIdentity,
     PaperReaderRun,
     ZoteroSourceIdentity,
@@ -37,6 +40,7 @@ from paper_reader.zotero_item_io import normalize_item_details_payload
 
 
 DEFAULT_SKILL_ROOT = Path(__file__).resolve().parents[2]
+_IDENTIFIER_ADAPTER = TypeAdapter(Identifier)
 
 
 class ZoteroLifecycleError(ValueError):
@@ -65,6 +69,20 @@ class _VisibleTextParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         self.parts.append(data)
+
+
+def _validated_identifier(value: object, *, context: str, code: str) -> str:
+    try:
+        return _IDENTIFIER_ADAPTER.validate_python(value, strict=True)
+    except ValidationError as exc:
+        raise ZoteroLifecycleError(
+            code,
+            f"{context} must be a valid Identifier",
+        ) from exc
+
+
+def _reject_nonfinite_json(value: str) -> None:
+    raise ValueError(f"non-finite JSON number is forbidden: {value}")
 
 
 def display_title(value: object) -> str:
@@ -160,8 +178,8 @@ def _read_bundle(path: Path) -> tuple[bytes, dict[str, Any], dict[str, Any], lis
             f"saved Zotero discovery bundle is unreadable: {path}: {exc}",
         ) from exc
     try:
-        payload = json.loads(raw_bytes)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload = json.loads(raw_bytes, parse_constant=_reject_nonfinite_json)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ZoteroLifecycleError(
             "invalid_discovery_bundle",
             "saved Zotero discovery bundle must be valid UTF-8 JSON",
@@ -184,6 +202,7 @@ def _read_bundle(path: Path) -> tuple[bytes, dict[str, Any], dict[str, Any], lis
         )
     try:
         selected = normalize_item_details_payload(payload["selected_item"])
+        canonical_json_bytes(selected)
     except (ValueError, json.JSONDecodeError) as exc:
         raise ZoteroLifecycleError(
             "invalid_discovery_bundle",
@@ -198,7 +217,11 @@ def _validated_inventory(
     selected: dict[str, Any],
     expected_item_key: str,
 ) -> list[dict[str, Any]]:
-    selected_key = str(selected.get("key", "")).strip()
+    selected_key = _validated_identifier(
+        selected.get("key"),
+        context="selected_item key",
+        code="invalid_discovery_bundle",
+    )
     if selected_key != expected_item_key:
         raise ZoteroLifecycleError(
             "selected_item_key_mismatch",
@@ -207,7 +230,11 @@ def _validated_inventory(
     normalized_inventory: list[dict[str, Any]] = []
     keys: set[str] = set()
     for index, item in enumerate(inventory):
-        key = str(item.get("key", "")).strip()
+        key = _validated_identifier(
+            item.get("key"),
+            context=f"search_results[{index}] key",
+            code="invalid_discovery_bundle",
+        )
         title = display_title(item.get("title", ""))
         if not key or not title:
             raise ZoteroLifecycleError(
@@ -236,6 +263,11 @@ def _validated_inventory(
             f"selected item key {selected_key} is absent from search_results",
         )
     selected_normalized_title = normalized_title(selected.get("title", ""))
+    selected_doi = normalized_doi(selected.get("DOI", ""))
+    selected_version = _non_negative_version(
+        selected.get("version", 0),
+        context="selected_item",
+    )
     matches = [
         item for item in normalized_inventory if item["normalized_title"] == selected_normalized_title
     ]
@@ -246,10 +278,20 @@ def _validated_inventory(
             data={"match_count": len(matches)},
         )
     selected_inventory = next(item for item in normalized_inventory if item["key"] == selected_key)
-    if selected_inventory["normalized_title"] != selected_normalized_title:
+    selected_membership = {
+        "key": selected_key,
+        "normalized_title": selected_normalized_title,
+        "DOI": selected_doi,
+        "version": selected_version,
+    }
+    inventory_membership = {
+        key: selected_inventory[key]
+        for key in ("key", "normalized_title", "DOI", "version")
+    }
+    if inventory_membership != selected_membership:
         raise ZoteroLifecycleError(
             "selected_item_inventory_mismatch",
-            "selected item title does not match its search inventory entry",
+            "selected item key/title/DOI/version does not match its search inventory entry",
         )
     return normalized_inventory
 
@@ -266,12 +308,11 @@ def _attachment_identity(selected: dict[str, Any]) -> tuple[str, LocalSourceIden
             "zotero_pdf_unavailable",
             "selected Zotero item has no readable local primary PDF attachment",
         )
-    attachment_key = str(attachment.get("key", "")).strip()
-    if not attachment_key:
-        raise ZoteroLifecycleError(
-            "invalid_discovery_bundle",
-            "selected primary PDF attachment is missing its Zotero key",
-        )
+    attachment_key = _validated_identifier(
+        attachment.get("key"),
+        context="selected primary PDF attachment key",
+        code="invalid_discovery_bundle",
+    )
     attachment_path = Path(str(attachment.get("path", "")))
     try:
         identity = _local_source_identity(attachment_path)
@@ -297,20 +338,15 @@ def _artifact_ref(path: str, role: str, content: bytes) -> ArtifactRef:
     )
 
 
-def _stage_run(
-    staging: Path,
+def _build_validated_run(
     *,
     raw_bytes: bytes,
     normalized_snapshot: dict[str, Any],
     source_core: dict[str, Any],
-) -> PaperReaderRun:
-    source_dir = staging / "source"
-    source_dir.mkdir()
+) -> tuple[PaperReaderRun, bytes, bytes]:
     raw_path = "source/discovery.raw.json"
     normalized_path = "source/source.json"
     normalized_bytes = canonical_json_bytes(normalized_snapshot)
-    (staging / raw_path).write_bytes(raw_bytes)
-    (staging / normalized_path).write_bytes(normalized_bytes)
     raw_ref = _artifact_ref(raw_path, "raw_discovery_bundle", raw_bytes)
     normalized_ref = _artifact_ref(normalized_path, "normalized_source", normalized_bytes)
     source = ZoteroSourceIdentity(
@@ -329,8 +365,23 @@ def _stage_run(
         gate=GateState(status="not_evaluated"),
         live_preflight=None,
     )
-    (staging / "run.json").write_bytes(canonical_json_bytes(run))
-    return run
+    run_bytes = canonical_json_bytes(run)
+    PaperReaderRun.model_validate_json(run_bytes)
+    return run, normalized_bytes, run_bytes
+
+
+def _stage_run(
+    staging: Path,
+    *,
+    raw_bytes: bytes,
+    normalized_bytes: bytes,
+    run_bytes: bytes,
+) -> None:
+    source_dir = staging / "source"
+    source_dir.mkdir()
+    (source_dir / "discovery.raw.json").write_bytes(raw_bytes)
+    (source_dir / "source.json").write_bytes(normalized_bytes)
+    (staging / "run.json").write_bytes(run_bytes)
 
 
 def initialize_zotero_run(
@@ -340,6 +391,11 @@ def initialize_zotero_run(
     skill_root: Path | None = None,
     today: date | None = None,
 ) -> InitializedZoteroRun:
+    expected_item_key = _validated_identifier(
+        expected_item_key,
+        context="expected_item_key",
+        code="invalid_expected_item_key",
+    )
     raw_bytes, _bundle, selected, inventory = _read_bundle(Path(raw_mcp_response))
     normalized_inventory = _validated_inventory(
         inventory,
@@ -377,6 +433,30 @@ def initialize_zotero_run(
         "attachment_key": attachment_key,
         "attachment": attachment_identity,
     }
+    try:
+        run, normalized_bytes, run_bytes = _build_validated_run(
+            raw_bytes=raw_bytes,
+            normalized_snapshot=normalized_snapshot,
+            source_core=source_core,
+        )
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise ZoteroLifecycleError(
+            "invalid_discovery_bundle",
+            f"discovery bundle cannot form a strict canonical V2 run: {exc}",
+        ) from exc
+    projected_size = len(raw_bytes) + len(normalized_bytes) + len(run_bytes)
+    if projected_size > V2_RESOURCE_POLICY.run_max_bytes:
+        raise ZoteroLifecycleError(
+            "run_size_limit_exceeded",
+            (
+                f"projected Zotero run size {projected_size} exceeds "
+                f"{V2_RESOURCE_POLICY.run_max_bytes} bytes"
+            ),
+            data={
+                "run_size_bytes": projected_size,
+                "max_bytes": V2_RESOURCE_POLICY.run_max_bytes,
+            },
+        )
 
     resolved_root = Path(skill_root or DEFAULT_SKILL_ROOT).expanduser().resolve(strict=True)
     runs_day = resolved_root / "runs" / (today or date.today()).isoformat()
@@ -410,29 +490,12 @@ def initialize_zotero_run(
                 staging = runs_day / f".{destination.name}.{new_uuid()}.staging"
                 staging.mkdir()
                 try:
-                    run = _stage_run(
+                    _stage_run(
                         staging,
                         raw_bytes=raw_bytes,
-                        normalized_snapshot=normalized_snapshot,
-                        source_core=source_core,
+                        normalized_bytes=normalized_bytes,
+                        run_bytes=run_bytes,
                     )
-                    staged_size = sum(
-                        path.stat().st_size
-                        for path in staging.rglob("*")
-                        if path.is_file() and not path.is_symlink()
-                    )
-                    if staged_size > V2_RESOURCE_POLICY.run_max_bytes:
-                        raise ZoteroLifecycleError(
-                            "run_size_limit_exceeded",
-                            (
-                                f"projected Zotero run size {staged_size} exceeds "
-                                f"{V2_RESOURCE_POLICY.run_max_bytes} bytes"
-                            ),
-                            data={
-                                "run_size_bytes": staged_size,
-                                "max_bytes": V2_RESOURCE_POLICY.run_max_bytes,
-                            },
-                        )
                     try:
                         atomic_publish_tree(staging, destination)
                     except PublishConflictError:

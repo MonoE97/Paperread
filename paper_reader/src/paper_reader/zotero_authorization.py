@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from pydantic import TypeAdapter, ValidationError
+
 from paper_reader.candidate_integrity import (
     LocalPublicationError,
     candidate_manifest_path,
@@ -15,6 +17,7 @@ from paper_reader.candidate_integrity import (
 from paper_reader.contracts import (
     ArtifactRef,
     GateState,
+    Identifier,
     LivePreflight,
     McpWriteEnvelope,
     PaperReaderCandidate,
@@ -34,6 +37,7 @@ from paper_reader.storage import (
     canonical_json_bytes,
     new_random_id,
     new_uuid,
+    publish_file_no_replace,
     random_token,
     rfc3339_utc,
 )
@@ -41,15 +45,23 @@ from paper_reader.zotero_candidate import _artifact_ref, _captured_live_snapshot
 from paper_reader.zotero_lifecycle import parent_fingerprint
 from paper_reader.zotero_lock import locked_zotero_parent
 from paper_reader.zotero_read import LocalApiZoteroReadProvider, ZoteroReadProvider
+from paper_reader.zotero_authorization_loader import (
+    ZoteroAuthorizationBindingError,
+    load_authorization_artifact,
+)
 
 
 class ZoteroAuthorizationError(LocalPublicationError):
     pass
 
 
+_IDENTIFIER_ADAPTER = TypeAdapter(Identifier)
+
+
 @dataclass(frozen=True, slots=True)
 class AuthorizedZoteroWrite:
     run_dir: Path
+    authorization_path: Path
     authorization_dir: Path
     authorization: PaperReaderWriteAuthorization
     authorization_digest: str
@@ -196,6 +208,102 @@ def _updated_run(
     )
 
 
+def _recover_matching_orphan_authorization(
+    loaded,
+    *,
+    candidate_digest: str,
+) -> None:
+    run_dir = loaded.manifest_path.resolve(strict=True).parent
+    authorizations_dir = run_dir / "authorizations"
+    if not authorizations_dir.exists():
+        return
+    bound_paths = {
+        item.path
+        for item in loaded.run.artifacts
+        if item.role == "write_authorization"
+    }
+    candidates: list[tuple[Path, bytes]] = []
+    for main_path in sorted(authorizations_dir.glob("*.json")):
+        relative = main_path.relative_to(run_dir).as_posix()
+        if relative not in bound_paths:
+            candidates.append((main_path, main_path.read_bytes()))
+    for sidecar_dir in sorted(path for path in authorizations_dir.iterdir() if path.is_dir()):
+        main_path = authorizations_dir / f"{sidecar_dir.name}.json"
+        record_path = sidecar_dir / "record.json"
+        if not main_path.exists() and record_path.is_file():
+            candidates.append((main_path, record_path.read_bytes()))
+
+    matches = []
+    for main_path, raw in candidates:
+        try:
+            preview = PaperReaderWriteAuthorization.model_validate_json(raw)
+        except Exception as exc:
+            raise ZoteroAuthorizationError(
+                "authorization_orphan_invalid",
+                f"unbound authorization commit candidate is invalid: {main_path}: {exc}",
+            ) from exc
+        if preview.run_id != loaded.run.run_id or preview.candidate_digest != candidate_digest:
+            continue
+        try:
+            recovered = load_authorization_artifact(
+                loaded,
+                main_path,
+                require_bound=False,
+                raw_override=raw,
+            )
+        except ZoteroAuthorizationBindingError as exc:
+            raise ZoteroAuthorizationError(exc.code, str(exc), data=exc.data) from exc
+        matches.append(recovered)
+    if len(matches) > 1:
+        raise ZoteroAuthorizationError(
+            "authorization_recovery_conflict",
+            "multiple exact unbound authorizations match this candidate",
+        )
+    if not matches:
+        return
+
+    recovered = matches[0]
+    if not recovered.authorization_path.exists():
+        try:
+            publish_file_no_replace(
+                recovered.authorization_path.with_suffix("") / "record.json",
+                recovered.authorization_path,
+            )
+        except Exception as exc:
+            raise ZoteroAuthorizationError(
+                "authorization_recovery_failed",
+                f"failed to restore exact authorization commit marker: {exc}",
+            ) from exc
+    authorization_ref = _artifact_ref(
+        run_dir,
+        recovered.authorization_path,
+        recovered.authorization_path,
+        "write_authorization",
+        "application/json",
+    )
+    updated_run = _updated_run(
+        loaded.run,
+        authorization_ref=authorization_ref,
+        preflight=recovered.authorization.live_preflight,
+        gate=recovered.authorization.gate,
+    )
+    try:
+        atomic_write_json(loaded.manifest_path, updated_run)
+    except Exception as exc:
+        raise ZoteroAuthorizationError(
+            "authorization_status_update_failed",
+            f"authorization main artifact is durable but run binding failed: {exc}",
+        ) from exc
+    raise ZoteroAuthorizationError(
+        "authorization_recovered_token_unavailable",
+        (
+            "the exact orphan authorization was safely bound, but its plaintext write token "
+            "cannot be recovered; do not write with this authorization"
+        ),
+        data={"authorization_path": str(recovered.authorization_path)},
+    )
+
+
 def authorize_zotero_candidate(
     candidate_input: Path,
     *,
@@ -210,6 +318,21 @@ def authorize_zotero_candidate(
             "invalid_identity_options",
             "external_claim_id and write_attempt_id must appear together",
         )
+    if external_claim_id is not None and write_attempt_id is not None:
+        try:
+            external_claim_id = _IDENTIFIER_ADAPTER.validate_python(
+                external_claim_id,
+                strict=True,
+            )
+            write_attempt_id = _IDENTIFIER_ADAPTER.validate_python(
+                write_attempt_id,
+                strict=True,
+            )
+        except ValidationError as exc:
+            raise ZoteroAuthorizationError(
+                "invalid_external_identity",
+                "external_claim_id and write_attempt_id must both be valid Identifiers",
+            ) from exc
     if type(ttl_seconds) is not int or not 1 <= ttl_seconds <= 300:
         raise ZoteroAuthorizationError(
             "invalid_authorization_ttl",
@@ -244,6 +367,10 @@ def authorize_zotero_candidate(
                     "local candidates cannot produce Zotero write authorization",
                 )
             verify_local_source(candidate.source.attachment)
+            _recover_matching_orphan_authorization(
+                loaded,
+                candidate_digest=candidate_digest,
+            )
             _reject_active_authorization(
                 run_dir,
                 loaded.run,
@@ -268,9 +395,12 @@ def authorize_zotero_candidate(
             candidate_bytes = canonical_json_bytes(candidate)
             authorization_id = new_random_id("authorization")
             authorization_dir = run_dir / "authorizations" / authorization_id
+            authorization_path = authorization_dir.with_suffix(".json")
             staging = run_dir / f".{authorization_id}.{new_uuid()}.staging"
             staging.mkdir()
             try:
+                staged_sidecar = staging / "sidecar"
+                staged_sidecar.mkdir()
                 files = {
                     "candidate.json": candidate_bytes,
                     "content.html": html_bytes,
@@ -278,7 +408,7 @@ def authorize_zotero_candidate(
                     "children.json": children_bytes,
                 }
                 for name, content in files.items():
-                    (staging / name).write_bytes(content)
+                    (staged_sidecar / name).write_bytes(content)
                 specs = {
                     "candidate.json": ("candidate_snapshot", "application/json"),
                     "content.html": ("authorized_content_html", "text/html"),
@@ -288,7 +418,7 @@ def authorize_zotero_candidate(
                 refs = {
                     name: _authorization_ref(
                         run_dir,
-                        staging / name,
+                        staged_sidecar / name,
                         authorization_dir / name,
                         role,
                         media,
@@ -352,9 +482,9 @@ def authorize_zotero_candidate(
                     gate=gate,
                 )
                 authorization_bytes = canonical_json_bytes(authorization)
-                staged_authorization_path = staging / "authorization.json"
+                (staged_sidecar / "record.json").write_bytes(authorization_bytes)
+                staged_authorization_path = staging / f"{authorization_id}.json"
                 staged_authorization_path.write_bytes(authorization_bytes)
-                authorization_path = authorization_dir / "authorization.json"
                 authorization_ref = _authorization_ref(
                     run_dir,
                     staged_authorization_path,
@@ -382,7 +512,8 @@ def authorize_zotero_candidate(
                         data={"run_size_bytes": exc.actual_bytes, "max_bytes": exc.max_bytes},
                     ) from exc
                 try:
-                    atomic_publish_tree(staging, authorization_dir)
+                    atomic_publish_tree(staged_sidecar, authorization_dir)
+                    publish_file_no_replace(staged_authorization_path, authorization_path)
                 except Exception as exc:
                     raise ZoteroAuthorizationError(
                         "authorization_publication_failed",
@@ -397,6 +528,7 @@ def authorize_zotero_candidate(
                     ) from exc
                 return AuthorizedZoteroWrite(
                     run_dir=run_dir,
+                    authorization_path=authorization_path,
                     authorization_dir=authorization_dir,
                     authorization=authorization,
                     authorization_digest=authorization_ref.sha256,

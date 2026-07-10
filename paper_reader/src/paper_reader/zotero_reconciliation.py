@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,7 @@ from paper_reader.storage import (
     canonical_json_bytes,
     new_random_id,
     new_uuid,
+    publish_file_no_replace,
     rfc3339_utc,
 )
 from paper_reader.v2_loader import LoadedRun
@@ -43,6 +45,9 @@ from paper_reader.zotero_read import LocalApiZoteroReadProvider, ZoteroReadProvi
 from paper_reader.zotero_verification import _verification_gate
 
 
+_PORTABLE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$")
+
+
 class ZoteroReconciliationError(LocalPublicationError):
     pass
 
@@ -50,61 +55,177 @@ class ZoteroReconciliationError(LocalPublicationError):
 @dataclass(frozen=True, slots=True)
 class ReconciledZoteroWrite:
     run_dir: Path
+    reconciliation_path: Path
     reconciliation_dir: Path
     reconciliation: PaperReaderReconciliation
     authorization_digest: str
     replayed: bool = False
 
 
+def _validate_reconciliation_record(
+    run_dir: Path,
+    path: Path,
+    raw: bytes,
+    *,
+    bound: LoadedAuthorization,
+) -> PaperReaderReconciliation:
+    try:
+        reconciliation = PaperReaderReconciliation.model_validate_json(raw)
+    except ValidationError as exc:
+        raise ZoteroReconciliationError(
+            "reconciliation_tampered",
+            f"reconciliation failed strict validation: {exc}",
+        ) from exc
+    expected_path = (
+        run_dir
+        / "reconciliations"
+        / f"{bound.authorization.authorization_id}.json"
+    )
+    if (
+        path.resolve(strict=False) != expected_path.resolve(strict=False)
+        or canonical_json_bytes(reconciliation) != raw
+        or reconciliation.run_id != bound.authorization.run_id
+        or reconciliation.authorization_digest != bound.authorization_digest
+        or reconciliation.target != bound.authorization.target
+    ):
+        raise ZoteroReconciliationError(
+            "reconciliation_tampered",
+            "reconciliation main artifact identity or binding changed",
+        )
+    sidecar_dir = expected_path.with_suffix("")
+    roles: set[str] = set()
+    for artifact in reconciliation.artifacts:
+        try:
+            artifact_path, _artifact_bytes = verify_artifact_ref(run_dir, artifact)
+        except LocalPublicationError as exc:
+            raise ZoteroReconciliationError(
+                "reconciliation_tampered",
+                f"reconciliation member changed: {artifact.path}: {exc}",
+            ) from exc
+        if not artifact_path.is_relative_to(sidecar_dir) or artifact.role in roles:
+            raise ZoteroReconciliationError(
+                "reconciliation_tampered",
+                "reconciliation sidecar membership is not closed and unique",
+            )
+        roles.add(artifact.role)
+    required = {"authorization_snapshot", "zotero_children_snapshot"}
+    if reconciliation.verification is not None:
+        required |= {
+            "zotero_note_readback",
+            "verification_checks",
+            "reconciliation_verification",
+        }
+    if roles != required:
+        raise ZoteroReconciliationError(
+            "reconciliation_tampered",
+            "reconciliation sidecar artifact roles changed",
+        )
+    if (
+        reconciliation.authorization not in reconciliation.artifacts
+        or reconciliation.children_snapshot not in reconciliation.artifacts
+        or (
+            reconciliation.verification is not None
+            and reconciliation.verification not in reconciliation.artifacts
+        )
+    ):
+        raise ZoteroReconciliationError(
+            "reconciliation_tampered",
+            "reconciliation refs are not members of the immutable sidecar",
+        )
+    return reconciliation
+
+
 def _existing_reconciliation(
     loaded: LoadedRun,
     *,
-    authorization_digest: str,
+    bound: LoadedAuthorization,
 ) -> ReconciledZoteroWrite | None:
     run_dir = loaded.manifest_path.resolve(strict=True).parent
-    matches: list[tuple[Path, PaperReaderReconciliation]] = []
-    for ref in (item for item in loaded.run.artifacts if item.role == "zotero_reconciliation"):
-        try:
-            path, raw = verify_artifact_ref(run_dir, ref)
-            reconciliation = PaperReaderReconciliation.model_validate_json(raw)
-        except (LocalPublicationError, ValidationError) as exc:
-            raise ZoteroReconciliationError(
-                "reconciliation_tampered",
-                f"bound reconciliation failed strict validation: {ref.path}: {exc}",
-            ) from exc
-        if canonical_json_bytes(reconciliation) != raw:
-            raise ZoteroReconciliationError(
-                "reconciliation_tampered",
-                f"bound reconciliation is not canonical: {ref.path}",
-            )
-        for artifact in reconciliation.artifacts:
-            try:
-                artifact_path, _artifact_bytes = verify_artifact_ref(run_dir, artifact)
-            except LocalPublicationError as exc:
-                raise ZoteroReconciliationError(
-                    "reconciliation_tampered",
-                    f"bound reconciliation member changed: {artifact.path}: {exc}",
-                ) from exc
-            if not artifact_path.is_relative_to(path.parent):
-                raise ZoteroReconciliationError(
-                    "reconciliation_tampered",
-                    "bound reconciliation member escapes its immutable tree",
-                )
-        if reconciliation.authorization_digest == authorization_digest:
-            matches.append((path, reconciliation))
-    if len(matches) > 1:
-        raise ZoteroReconciliationError(
-            "reconciliation_conflict",
-            "authorization has multiple bound terminal reconciliations",
-        )
-    if not matches:
+    reconciliation_path = (
+        run_dir
+        / "reconciliations"
+        / f"{bound.authorization.authorization_id}.json"
+    )
+    reconciliation_dir = reconciliation_path.with_suffix("")
+    recovery_record = reconciliation_dir / "record.json"
+    if not reconciliation_path.exists() and not recovery_record.exists():
         return None
-    path, reconciliation = matches[0]
+    try:
+        raw = (
+            reconciliation_path.read_bytes()
+            if reconciliation_path.exists()
+            else recovery_record.read_bytes()
+        )
+    except OSError as exc:
+        raise ZoteroReconciliationError(
+            "reconciliation_tampered",
+            f"reconciliation commit candidate is unreadable: {exc}",
+        ) from exc
+    reconciliation = _validate_reconciliation_record(
+        run_dir,
+        reconciliation_path,
+        raw,
+        bound=bound,
+    )
+    if not reconciliation_path.exists():
+        try:
+            publish_file_no_replace(recovery_record, reconciliation_path)
+        except Exception as exc:
+            raise ZoteroReconciliationError(
+                "reconciliation_recovery_failed",
+                f"failed to restore exact reconciliation commit marker: {exc}",
+            ) from exc
+    relative = reconciliation_path.relative_to(run_dir).as_posix()
+    refs = [
+        item
+        for item in loaded.run.artifacts
+        if item.role == "zotero_reconciliation" and item.path == relative
+    ]
+    if len(refs) > 1:
+        raise ZoteroReconciliationError(
+            "reconciliation_tampered",
+            "run binds the deterministic reconciliation more than once",
+        )
+    if refs:
+        try:
+            path, bound_raw = verify_artifact_ref(run_dir, refs[0])
+        except LocalPublicationError as exc:
+            raise ZoteroReconciliationError(
+                "reconciliation_tampered",
+                f"bound reconciliation failed integrity validation: {exc}",
+            ) from exc
+        if path != reconciliation_path.resolve(strict=True) or bound_raw != raw:
+            raise ZoteroReconciliationError(
+                "reconciliation_tampered",
+                "run-bound reconciliation differs from the deterministic main artifact",
+            )
+    else:
+        reconciliation_ref = _artifact_ref(
+            run_dir,
+            reconciliation_path,
+            reconciliation_path,
+            "zotero_reconciliation",
+            "application/json",
+        )
+        updated_run = _updated_run(
+            loaded.run,
+            reconciliation_ref=reconciliation_ref,
+            gate=reconciliation.gate,
+            verified=reconciliation.outcome == "verified",
+        )
+        try:
+            atomic_write_json(loaded.manifest_path, updated_run)
+        except Exception as exc:
+            raise ZoteroReconciliationError(
+                "reconciliation_status_update_failed",
+                f"reconciliation main artifact is durable but run binding failed: {exc}",
+            ) from exc
     return ReconciledZoteroWrite(
         run_dir=run_dir,
-        reconciliation_dir=path.parent,
+        reconciliation_path=reconciliation_path,
+        reconciliation_dir=reconciliation_dir,
         reconciliation=reconciliation,
-        authorization_digest=authorization_digest,
+        authorization_digest=bound.authorization_digest,
         replayed=True,
     )
 
@@ -154,6 +275,11 @@ def _locate_exact_matches(
             and title == bound.authorization.note_title
             and note_html_sha256(note_html) == bound.authorization.content_sha256
         ):
+            if not _PORTABLE_IDENTIFIER_RE.fullmatch(key):
+                raise ZoteroReconciliationError(
+                    "invalid_live_snapshot",
+                    "matching Zotero note key is not a portable identifier",
+                )
             matches.append(key)
     return tuple(matches)
 
@@ -253,10 +379,17 @@ def _publish_reconciliation_locked(
         gate = _verification_gate(evaluation)
 
     reconciliation_id = new_random_id("reconciliation")
-    reconciliation_dir = run_dir / "reconciliations" / reconciliation_id
+    reconciliation_path = (
+        run_dir
+        / "reconciliations"
+        / f"{bound.authorization.authorization_id}.json"
+    )
+    reconciliation_dir = reconciliation_path.with_suffix("")
     staging = run_dir / f".{reconciliation_id}.{new_uuid()}.staging"
     staging.mkdir()
     try:
+        staged_sidecar = staging / "sidecar"
+        staged_sidecar.mkdir()
         files = {
             "authorization.json": bound.authorization_bytes,
             "children.json": children_bytes,
@@ -271,7 +404,7 @@ def _publish_reconciliation_locked(
             files["note.json"] = note_bytes
             files["checks.json"] = canonical_json_bytes(checks_payload)
         for name, content in files.items():
-            (staging / name).write_bytes(content)
+            (staged_sidecar / name).write_bytes(content)
         specs = {
             "authorization.json": ("authorization_snapshot", "application/json"),
             "children.json": ("zotero_children_snapshot", "application/json"),
@@ -282,7 +415,7 @@ def _publish_reconciliation_locked(
         refs = {
             name: _artifact_ref(
                 run_dir,
-                staging / name,
+                staged_sidecar / name,
                 reconciliation_dir / name,
                 role,
                 media,
@@ -315,7 +448,7 @@ def _publish_reconciliation_locked(
                 ),
                 gate=gate,
             )
-            staged_verification_path = staging / "verification.json"
+            staged_verification_path = staged_sidecar / "verification.json"
             staged_verification_path.write_bytes(canonical_json_bytes(verification))
             verification_ref = _artifact_ref(
                 run_dir,
@@ -343,9 +476,10 @@ def _publish_reconciliation_locked(
             artifacts=tuple(refs.values()),
             gate=gate,
         )
-        staged_reconciliation_path = staging / "reconciliation.json"
-        staged_reconciliation_path.write_bytes(canonical_json_bytes(reconciliation))
-        reconciliation_path = reconciliation_dir / "reconciliation.json"
+        reconciliation_bytes = canonical_json_bytes(reconciliation)
+        (staged_sidecar / "record.json").write_bytes(reconciliation_bytes)
+        staged_reconciliation_path = staging / f"{bound.authorization.authorization_id}.json"
+        staged_reconciliation_path.write_bytes(reconciliation_bytes)
         reconciliation_ref = _artifact_ref(
             run_dir,
             staged_reconciliation_path,
@@ -373,7 +507,8 @@ def _publish_reconciliation_locked(
                 data={"run_size_bytes": exc.actual_bytes, "max_bytes": exc.max_bytes},
             ) from exc
         try:
-            atomic_publish_tree(staging, reconciliation_dir)
+            atomic_publish_tree(staged_sidecar, reconciliation_dir)
+            publish_file_no_replace(staged_reconciliation_path, reconciliation_path)
         except Exception as exc:
             raise ZoteroReconciliationError(
                 "reconciliation_publication_failed",
@@ -388,6 +523,7 @@ def _publish_reconciliation_locked(
             ) from exc
         return ReconciledZoteroWrite(
             run_dir=run_dir,
+            reconciliation_path=reconciliation_path,
             reconciliation_dir=reconciliation_dir,
             reconciliation=reconciliation,
             authorization_digest=bound.authorization_digest,
@@ -418,7 +554,7 @@ def reconcile_zotero_authorization(
                 raise ZoteroReconciliationError(exc.code, str(exc), data=exc.data) from exc
             replay = _existing_reconciliation(
                 loaded,
-                authorization_digest=bound.authorization_digest,
+                bound=bound,
             )
             if replay is not None:
                 return replay

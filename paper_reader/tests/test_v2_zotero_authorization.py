@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -69,7 +70,7 @@ def test_direct_authorization_binds_exact_envelope_and_returns_token_only_once(
 
     authorized = _authorize(candidate_path, provider)
 
-    authorization_path = authorized.authorization_dir / "authorization.json"
+    authorization_path = authorized.authorization_path
     raw_payload = json.loads(authorization_path.read_text(encoding="utf-8"))
     authorization = PaperReaderWriteAuthorization.model_validate_json(
         authorization_path.read_bytes()
@@ -101,17 +102,32 @@ def test_direct_authorization_binds_exact_envelope_and_returns_token_only_once(
     assert authorization.live_preflight.parent_snapshot in authorization.artifacts
     assert authorization.live_preflight.children_snapshot in authorization.artifacts
     assert sorted(path.name for path in authorized.authorization_dir.iterdir()) == [
-        "authorization.json",
         "candidate.json",
         "children.json",
         "content.html",
         "parent.json",
+        "record.json",
     ]
     run_dir = candidate_path.parent.parent.parent
     run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     auth_refs = [item for item in run["artifacts"] if item["role"] == "write_authorization"]
     assert len(auth_refs) == 1
     assert (run_dir / auth_refs[0]["path"]).read_bytes() == authorization_path.read_bytes()
+
+
+def test_authorization_main_artifact_uses_required_topology(tmp_path: Path) -> None:
+    candidate_path, provider = _candidate(tmp_path)
+
+    authorized = _authorize(candidate_path, provider)
+
+    expected = (
+        authorized.run_dir
+        / "authorizations"
+        / f"{authorized.authorization.authorization_id}.json"
+    )
+    assert authorized.authorization_path == expected
+    assert expected.is_file()
+    assert authorized.authorization_dir == expected.with_suffix("")
 
 
 def test_batch_authorization_preserves_both_external_identities(tmp_path: Path) -> None:
@@ -130,6 +146,62 @@ def test_batch_authorization_preserves_both_external_identities(tmp_path: Path) 
     assert authorization.write_attempt_id == "attempt_batch_001"
     assert authorization.ttl_seconds == 90
     assert authorization.expires_at == "2026-07-10T12:01:30Z"
+
+
+@pytest.mark.parametrize(
+    ("external_claim_id", "write_attempt_id"),
+    [
+        ("bad/claim", "attempt_batch_001"),
+        ("claim_batch_001", "../bad-attempt"),
+    ],
+)
+def test_batch_authorization_rejects_invalid_identifiers_before_provider_or_parent_lock(
+    external_claim_id: str,
+    write_attempt_id: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, _provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    run_before = (run_dir / "run.json").read_bytes()
+
+    class ProviderSpy:
+        called = False
+
+        def get_parent(self, _item_key: str):
+            self.called = True
+            raise AssertionError("invalid identity reached provider")
+
+        def get_children(self, _parent_key: str):
+            self.called = True
+            raise AssertionError("invalid identity reached provider")
+
+    provider = ProviderSpy()
+    lock_entered = False
+
+    @contextmanager
+    def parent_lock_spy(_run_dir: Path, _parent_key: str):
+        nonlocal lock_entered
+        lock_entered = True
+        raise AssertionError("invalid identity reached parent lock")
+        yield
+
+    monkeypatch.setattr(module, "locked_zotero_parent", parent_lock_spy)
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(
+            candidate_path,
+            provider,
+            external_claim_id=external_claim_id,
+            write_attempt_id=write_attempt_id,
+        )
+
+    assert getattr(exc_info.value, "code", None) == "invalid_external_identity"
+    assert provider.called is False
+    assert lock_entered is False
+    assert (run_dir / "run.json").read_bytes() == run_before
+    assert not (run_dir / "authorizations").exists()
 
 
 @pytest.mark.parametrize(
@@ -365,13 +437,22 @@ def test_authorization_faults_and_size_gate_do_not_create_false_bound_state(
 
     assert getattr(fault_error.value, "code", None) == "authorization_status_update_failed"
     assert (run_dir / "run.json").read_bytes() == run_before
-    orphan_dirs = tuple((run_dir / "authorizations").iterdir())
-    assert len(orphan_dirs) == 1
+    orphan_mains = tuple((run_dir / "authorizations").glob("*.json"))
+    orphan_sidecars = tuple(
+        path for path in (run_dir / "authorizations").iterdir() if path.is_dir()
+    )
+    assert len(orphan_mains) == 1
+    assert len(orphan_sidecars) == 1
 
-    retry = _authorize(candidate_path, provider)
+    with pytest.raises(Exception) as recovery_error:
+        _authorize(candidate_path, provider)
 
-    assert retry.authorization_dir not in orphan_dirs
+    assert (
+        getattr(recovery_error.value, "code", None)
+        == "authorization_recovered_token_unavailable"
+    )
+    assert tuple((run_dir / "authorizations").glob("*.json")) == orphan_mains
     run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     bound = [item for item in run["artifacts"] if item["role"] == "write_authorization"]
     assert len(bound) == 1
-    assert run_dir / bound[0]["path"] == retry.authorization_dir / "authorization.json"
+    assert run_dir / bound[0]["path"] == orphan_mains[0]
