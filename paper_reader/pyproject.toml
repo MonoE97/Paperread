@@ -7,13 +7,14 @@ dependencies = [
     "beautifulsoup4>=4.14.3",
     "jinja2>=3.1.6",
     "markdown-it-py>=4.0.0",
+    "pydantic>=2.11,<3",
     "pymupdf>=1.26.0",
     "rich>=14.0.0",
     "typer>=0.16.0",
 ]
 
 [project.scripts]
-paper_reader = "paper_reader.cli:app"
+paper_reader = "paper_reader.public_cli:app"
 
 [dependency-groups]
 dev = [

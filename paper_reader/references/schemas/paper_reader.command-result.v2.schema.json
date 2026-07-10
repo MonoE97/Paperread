@@ -1,0 +1,62 @@
+{
+  "$defs": {
+    "JsonValue": {}
+  },
+  "additionalProperties": false,
+  "properties": {
+    "code": {
+      "maxLength": 160,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Code",
+      "type": "string"
+    },
+    "command": {
+      "title": "Command",
+      "type": "string"
+    },
+    "created_at": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$",
+      "title": "Created At",
+      "type": "string"
+    },
+    "data": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Data",
+      "type": "object"
+    },
+    "message": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Message"
+    },
+    "ok": {
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": "paper_reader.command-result.v2",
+      "default": "paper_reader.command-result.v2",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "command",
+    "ok",
+    "code",
+    "created_at",
+    "data"
+  ],
+  "title": "PaperReaderCommandResult",
+  "type": "object"
+}

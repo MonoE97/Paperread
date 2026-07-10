@@ -1,0 +1,671 @@
+{
+  "$defs": {
+    "AuthorStatedLimitation": {
+      "additionalProperties": false,
+      "properties": {
+        "locator": {
+          "title": "Locator",
+          "type": "string"
+        },
+        "source_type": {
+          "const": "author_stated",
+          "default": "author_stated",
+          "title": "Source Type",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "locator"
+      ],
+      "title": "AuthorStatedLimitation",
+      "type": "object"
+    },
+    "EvidenceClaim": {
+      "additionalProperties": false,
+      "properties": {
+        "claim": {
+          "title": "Claim",
+          "type": "string"
+        },
+        "confidence": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceItem"
+          },
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": [
+        "claim",
+        "evidence",
+        "confidence"
+      ],
+      "title": "EvidenceClaim",
+      "type": "object"
+    },
+    "EvidenceItem": {
+      "additionalProperties": false,
+      "properties": {
+        "locator": {
+          "title": "Locator",
+          "type": "string"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "locator",
+        "summary"
+      ],
+      "title": "EvidenceItem",
+      "type": "object"
+    },
+    "ImprovementNote": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "title": "Action",
+          "type": "string"
+        },
+        "issue": {
+          "title": "Issue",
+          "type": "string"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "issue",
+        "action",
+        "source"
+      ],
+      "title": "ImprovementNote",
+      "type": "object"
+    },
+    "InferredLimitation": {
+      "additionalProperties": false,
+      "properties": {
+        "basis": {
+          "title": "Basis",
+          "type": "string"
+        },
+        "locator": {
+          "title": "Locator",
+          "type": "string"
+        },
+        "source_type": {
+          "const": "inferred",
+          "default": "inferred",
+          "title": "Source Type",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "basis",
+        "locator"
+      ],
+      "title": "InferredLimitation",
+      "type": "object"
+    },
+    "KeyFigure": {
+      "additionalProperties": false,
+      "properties": {
+        "analysis": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Analysis"
+        },
+        "caption": {
+          "title": "Caption",
+          "type": "string"
+        },
+        "evidence_level": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Level"
+        },
+        "figure_id": {
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Figure Id",
+          "type": "string"
+        },
+        "figure_quality_note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Figure Quality Note"
+        },
+        "image_quality": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Image Quality"
+        },
+        "why_it_matters": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Why It Matters"
+        },
+        "why_it_matters_short": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Why It Matters Short"
+        }
+      },
+      "required": [
+        "figure_id",
+        "caption"
+      ],
+      "title": "KeyFigure",
+      "type": "object"
+    },
+    "MethodModule": {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "title": "Input",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "output": {
+          "title": "Output",
+          "type": "string"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "target": {
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "input",
+        "target",
+        "output",
+        "role"
+      ],
+      "title": "MethodModule",
+      "type": "object"
+    },
+    "ReviewIssue": {
+      "additionalProperties": false,
+      "properties": {
+        "issue": {
+          "title": "Issue",
+          "type": "string"
+        },
+        "severity": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "blocker"
+          ],
+          "title": "Severity",
+          "type": "string"
+        },
+        "suggested_fix": {
+          "title": "Suggested Fix",
+          "type": "string"
+        }
+      },
+      "required": [
+        "severity",
+        "issue",
+        "suggested_fix"
+      ],
+      "title": "ReviewIssue",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "abstract_translation": {
+      "title": "Abstract Translation",
+      "type": "string"
+    },
+    "ai4s_relevance": {
+      "title": "Ai4S Relevance",
+      "type": "string"
+    },
+    "applicability_limits": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Applicability Limits",
+      "type": "array"
+    },
+    "author_stated_limitations": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/AuthorStatedLimitation"
+      },
+      "title": "Author Stated Limitations",
+      "type": "array"
+    },
+    "background_problem": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Background Problem"
+    },
+    "contributions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Contributions",
+      "type": "array"
+    },
+    "core_method_short": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Core Method Short"
+    },
+    "core_result_short": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Core Result Short"
+    },
+    "created_at": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$",
+      "title": "Created At",
+      "type": "string"
+    },
+    "evidence_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Evidence Digest",
+      "type": "string"
+    },
+    "evidence_summary": {
+      "items": {
+        "$ref": "#/$defs/EvidenceClaim"
+      },
+      "title": "Evidence Summary",
+      "type": "array"
+    },
+    "existing_gap": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Existing Gap"
+    },
+    "experiments": {
+      "title": "Experiments",
+      "type": "string"
+    },
+    "follow_up_keywords": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Follow Up Keywords",
+      "type": "array"
+    },
+    "improvement_notes": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ImprovementNote"
+      },
+      "title": "Improvement Notes",
+      "type": "array"
+    },
+    "improvement_status": {
+      "enum": [
+        "not_needed",
+        "needed",
+        "completed"
+      ],
+      "title": "Improvement Status",
+      "type": "string"
+    },
+    "inferred_limits": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/InferredLimitation"
+      },
+      "title": "Inferred Limits",
+      "type": "array"
+    },
+    "key_figures": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/KeyFigure"
+      },
+      "title": "Key Figures",
+      "type": "array"
+    },
+    "key_points": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Key Points",
+      "type": "array"
+    },
+    "limitations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Limitations",
+      "type": "array"
+    },
+    "main_risk_short": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Main Risk Short"
+    },
+    "method": {
+      "title": "Method",
+      "type": "string"
+    },
+    "method_modules": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/MethodModule"
+      },
+      "title": "Method Modules",
+      "type": "array"
+    },
+    "method_overview": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Method Overview"
+    },
+    "note_labels": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Note Labels",
+      "type": "array"
+    },
+    "one_sentence_summary": {
+      "title": "One Sentence Summary",
+      "type": "string"
+    },
+    "paper_entry_point": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Paper Entry Point"
+    },
+    "paper_type": {
+      "enum": [
+        "research_article",
+        "review",
+        "perspective",
+        "benchmark",
+        "method_paper",
+        "dataset_paper",
+        "theory_paper"
+      ],
+      "title": "Paper Type",
+      "type": "string"
+    },
+    "reading_decision": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reading Decision"
+    },
+    "research_object": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Research Object"
+    },
+    "research_question": {
+      "title": "Research Question",
+      "type": "string"
+    },
+    "research_question_short": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Research Question Short"
+    },
+    "review_issues": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ReviewIssue"
+      },
+      "title": "Review Issues",
+      "type": "array"
+    },
+    "review_status": {
+      "enum": [
+        "not_reviewed",
+        "passed",
+        "passed_with_caveats",
+        "failed"
+      ],
+      "title": "Review Status",
+      "type": "string"
+    },
+    "run_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "paper_reader.summary.v2",
+      "default": "paper_reader.summary.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "summary_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Summary Id",
+      "type": "string"
+    },
+    "technical_details": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Technical Details",
+      "type": "array"
+    },
+    "tldr": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tldr"
+    },
+    "trust_rationale": {
+      "title": "Trust Rationale",
+      "type": "string"
+    },
+    "trust_status": {
+      "enum": [
+        "trusted",
+        "usable_with_caveats",
+        "needs_manual_review",
+        "rejected"
+      ],
+      "title": "Trust Status",
+      "type": "string"
+    },
+    "workflow_steps": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Workflow Steps",
+      "type": "array"
+    }
+  },
+  "required": [
+    "summary_id",
+    "run_id",
+    "created_at",
+    "evidence_digest",
+    "paper_type",
+    "trust_status",
+    "review_status",
+    "improvement_status",
+    "trust_rationale",
+    "one_sentence_summary",
+    "abstract_translation",
+    "research_question",
+    "method",
+    "experiments",
+    "ai4s_relevance",
+    "key_points",
+    "contributions",
+    "limitations",
+    "follow_up_keywords",
+    "evidence_summary"
+  ],
+  "title": "PaperReaderSummary",
+  "type": "object"
+}

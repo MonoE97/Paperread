@@ -171,7 +171,7 @@ def test_project_metadata_is_skill_root_relative() -> None:
 
     assert project["name"] == "paper_reader"
     assert "readme" not in project
-    assert project["scripts"] == {"paper_reader": "paper_reader.cli:app"}
+    assert project["scripts"] == {"paper_reader": "paper_reader.public_cli:app"}
     assert pyproject["tool"]["pytest"]["ini_options"]["testpaths"] == ["tests"]
     assert pyproject["tool"]["pytest"]["ini_options"]["pythonpath"] == ["src"]
 

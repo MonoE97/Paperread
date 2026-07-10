@@ -1,0 +1,406 @@
+{
+  "$defs": {
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "properties": {
+        "media_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Media Type"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "role": {
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Role",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "role",
+        "path",
+        "sha256",
+        "size_bytes"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    },
+    "GateBlocker": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artifact Path"
+        },
+        "code": {
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "GateBlocker",
+      "type": "object"
+    },
+    "GateState": {
+      "additionalProperties": false,
+      "properties": {
+        "blockers": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/GateBlocker"
+          },
+          "title": "Blockers",
+          "type": "array"
+        },
+        "checks": {
+          "default": [],
+          "items": {
+            "maxLength": 160,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "title": "Checks",
+          "type": "array"
+        },
+        "evaluated_at": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evaluated At"
+        },
+        "status": {
+          "enum": [
+            "not_evaluated",
+            "blocked",
+            "passed",
+            "write_ready"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "GateState",
+      "type": "object"
+    },
+    "LivePreflight": {
+      "additionalProperties": false,
+      "properties": {
+        "captured_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "children_snapshot": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "matching_note_keys": {
+          "items": {
+            "maxLength": 160,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "title": "Matching Note Keys",
+          "type": "array"
+        },
+        "parent_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Parent Fingerprint",
+          "type": "string"
+        },
+        "parent_key": {
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Parent Key",
+          "type": "string"
+        },
+        "preflight_id": {
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Preflight Id",
+          "type": "string"
+        },
+        "requested_note_title": {
+          "title": "Requested Note Title",
+          "type": "string"
+        },
+        "title_available": {
+          "title": "Title Available",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "preflight_id",
+        "captured_at",
+        "parent_key",
+        "parent_fingerprint",
+        "requested_note_title",
+        "title_available",
+        "matching_note_keys",
+        "children_snapshot"
+      ],
+      "title": "LivePreflight",
+      "type": "object"
+    },
+    "McpWriteEnvelope": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "create",
+          "default": "create",
+          "title": "Action",
+          "type": "string"
+        },
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "parentKey": {
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Parentkey",
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Tags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "parentKey",
+        "content",
+        "tags"
+      ],
+      "title": "McpWriteEnvelope",
+      "type": "object"
+    },
+    "ZoteroPublicationTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "note_title": {
+          "title": "Note Title",
+          "type": "string"
+        },
+        "parent_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Parent Fingerprint",
+          "type": "string"
+        },
+        "parent_key": {
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Parent Key",
+          "type": "string"
+        },
+        "target_type": {
+          "const": "zotero",
+          "default": "zotero",
+          "title": "Target Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "parent_key",
+        "parent_fingerprint",
+        "note_title"
+      ],
+      "title": "ZoteroPublicationTarget",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "items": {
+        "$ref": "#/$defs/ArtifactRef"
+      },
+      "title": "Artifacts",
+      "type": "array"
+    },
+    "authorization_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Authorization Id",
+      "type": "string"
+    },
+    "candidate": {
+      "$ref": "#/$defs/ArtifactRef"
+    },
+    "candidate_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Candidate Digest",
+      "type": "string"
+    },
+    "content_html": {
+      "title": "Content Html",
+      "type": "string"
+    },
+    "content_length": {
+      "minimum": 0,
+      "title": "Content Length",
+      "type": "integer"
+    },
+    "content_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Content Sha256",
+      "type": "string"
+    },
+    "created_at": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$",
+      "title": "Created At",
+      "type": "string"
+    },
+    "expires_at": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "external_claim_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "External Claim Id",
+      "type": "string"
+    },
+    "gate": {
+      "$ref": "#/$defs/GateState"
+    },
+    "live_preflight": {
+      "$ref": "#/$defs/LivePreflight"
+    },
+    "mcp_envelope": {
+      "$ref": "#/$defs/McpWriteEnvelope"
+    },
+    "nonce": {
+      "title": "Nonce",
+      "type": "string"
+    },
+    "note_title": {
+      "title": "Note Title",
+      "type": "string"
+    },
+    "run_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "paper_reader.write-authorization.v2",
+      "default": "paper_reader.write-authorization.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "tags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Tags",
+      "type": "array"
+    },
+    "target": {
+      "$ref": "#/$defs/ZoteroPublicationTarget"
+    },
+    "token": {
+      "title": "Token",
+      "type": "string"
+    },
+    "ttl_seconds": {
+      "exclusiveMinimum": 0,
+      "maximum": 300,
+      "title": "Ttl Seconds",
+      "type": "integer"
+    },
+    "write_attempt_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Write Attempt Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "authorization_id",
+    "run_id",
+    "created_at",
+    "expires_at",
+    "ttl_seconds",
+    "candidate",
+    "candidate_digest",
+    "target",
+    "note_title",
+    "tags",
+    "content_html",
+    "content_sha256",
+    "content_length",
+    "nonce",
+    "token",
+    "external_claim_id",
+    "write_attempt_id",
+    "mcp_envelope",
+    "artifacts",
+    "live_preflight",
+    "gate"
+  ],
+  "title": "PaperReaderWriteAuthorization",
+  "type": "object"
+}

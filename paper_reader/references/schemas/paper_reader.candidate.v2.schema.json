@@ -1,0 +1,493 @@
+{
+  "$defs": {
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "properties": {
+        "media_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Media Type"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "role": {
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Role",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "role",
+        "path",
+        "sha256",
+        "size_bytes"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    },
+    "GateBlocker": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artifact Path"
+        },
+        "code": {
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "GateBlocker",
+      "type": "object"
+    },
+    "GateState": {
+      "additionalProperties": false,
+      "properties": {
+        "blockers": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/GateBlocker"
+          },
+          "title": "Blockers",
+          "type": "array"
+        },
+        "checks": {
+          "default": [],
+          "items": {
+            "maxLength": 160,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "title": "Checks",
+          "type": "array"
+        },
+        "evaluated_at": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evaluated At"
+        },
+        "status": {
+          "enum": [
+            "not_evaluated",
+            "blocked",
+            "passed",
+            "write_ready"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "GateState",
+      "type": "object"
+    },
+    "LivePreflight": {
+      "additionalProperties": false,
+      "properties": {
+        "captured_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "children_snapshot": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "matching_note_keys": {
+          "items": {
+            "maxLength": 160,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "title": "Matching Note Keys",
+          "type": "array"
+        },
+        "parent_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Parent Fingerprint",
+          "type": "string"
+        },
+        "parent_key": {
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Parent Key",
+          "type": "string"
+        },
+        "preflight_id": {
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Preflight Id",
+          "type": "string"
+        },
+        "requested_note_title": {
+          "title": "Requested Note Title",
+          "type": "string"
+        },
+        "title_available": {
+          "title": "Title Available",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "preflight_id",
+        "captured_at",
+        "parent_key",
+        "parent_fingerprint",
+        "requested_note_title",
+        "title_available",
+        "matching_note_keys",
+        "children_snapshot"
+      ],
+      "title": "LivePreflight",
+      "type": "object"
+    },
+    "LocalPublicationTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "parent_device": {
+          "minimum": 0,
+          "title": "Parent Device",
+          "type": "integer"
+        },
+        "resolved_path": {
+          "title": "Resolved Path",
+          "type": "string"
+        },
+        "target_type": {
+          "const": "local",
+          "default": "local",
+          "title": "Target Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "resolved_path",
+        "parent_device"
+      ],
+      "title": "LocalPublicationTarget",
+      "type": "object"
+    },
+    "LocalSourceIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "device": {
+          "minimum": 0,
+          "title": "Device",
+          "type": "integer"
+        },
+        "inode": {
+          "minimum": 0,
+          "title": "Inode",
+          "type": "integer"
+        },
+        "requested_path": {
+          "title": "Requested Path",
+          "type": "string"
+        },
+        "resolved_path": {
+          "title": "Resolved Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "source_type": {
+          "const": "local_pdf",
+          "default": "local_pdf",
+          "title": "Source Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "requested_path",
+        "resolved_path",
+        "sha256",
+        "size_bytes",
+        "device",
+        "inode"
+      ],
+      "title": "LocalSourceIdentity",
+      "type": "object"
+    },
+    "ZoteroPublicationTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "note_title": {
+          "title": "Note Title",
+          "type": "string"
+        },
+        "parent_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Parent Fingerprint",
+          "type": "string"
+        },
+        "parent_key": {
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Parent Key",
+          "type": "string"
+        },
+        "target_type": {
+          "const": "zotero",
+          "default": "zotero",
+          "title": "Target Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "parent_key",
+        "parent_fingerprint",
+        "note_title"
+      ],
+      "title": "ZoteroPublicationTarget",
+      "type": "object"
+    },
+    "ZoteroSourceIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "attachment_key": {
+          "anyOf": [
+            {
+              "maxLength": 160,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attachment Key"
+        },
+        "item_key": {
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Item Key",
+          "type": "string"
+        },
+        "normalized_source": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "parent_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Parent Fingerprint",
+          "type": "string"
+        },
+        "raw_discovery_bundle": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "source_type": {
+          "const": "zotero",
+          "default": "zotero",
+          "title": "Source Type",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_key",
+        "title",
+        "parent_fingerprint",
+        "raw_discovery_bundle",
+        "normalized_source"
+      ],
+      "title": "ZoteroSourceIdentity",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "items": {
+        "$ref": "#/$defs/ArtifactRef"
+      },
+      "title": "Artifacts",
+      "type": "array"
+    },
+    "candidate_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Candidate Id",
+      "type": "string"
+    },
+    "content_length": {
+      "minimum": 0,
+      "title": "Content Length",
+      "type": "integer"
+    },
+    "content_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Content Sha256",
+      "type": "string"
+    },
+    "created_at": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$",
+      "title": "Created At",
+      "type": "string"
+    },
+    "evidence_manifest": {
+      "$ref": "#/$defs/ArtifactRef"
+    },
+    "gate": {
+      "$ref": "#/$defs/GateState"
+    },
+    "live_preflight": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LivePreflight"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "note_title": {
+      "title": "Note Title",
+      "type": "string"
+    },
+    "run_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "paper_reader.candidate.v2",
+      "default": "paper_reader.candidate.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "sealed_review": {
+      "$ref": "#/$defs/ArtifactRef"
+    },
+    "source": {
+      "discriminator": {
+        "mapping": {
+          "local_pdf": "#/$defs/LocalSourceIdentity",
+          "zotero": "#/$defs/ZoteroSourceIdentity"
+        },
+        "propertyName": "source_type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/LocalSourceIdentity"
+        },
+        {
+          "$ref": "#/$defs/ZoteroSourceIdentity"
+        }
+      ],
+      "title": "Source"
+    },
+    "tags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Tags",
+      "type": "array"
+    },
+    "target": {
+      "discriminator": {
+        "mapping": {
+          "local": "#/$defs/LocalPublicationTarget",
+          "zotero": "#/$defs/ZoteroPublicationTarget"
+        },
+        "propertyName": "target_type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/LocalPublicationTarget"
+        },
+        {
+          "$ref": "#/$defs/ZoteroPublicationTarget"
+        }
+      ],
+      "title": "Target"
+    }
+  },
+  "required": [
+    "candidate_id",
+    "run_id",
+    "created_at",
+    "source",
+    "target",
+    "evidence_manifest",
+    "sealed_review",
+    "note_title",
+    "tags",
+    "content_sha256",
+    "content_length",
+    "artifacts",
+    "gate"
+  ],
+  "title": "PaperReaderCandidate",
+  "type": "object"
+}

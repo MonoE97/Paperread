@@ -1,0 +1,123 @@
+{
+  "$defs": {
+    "ReviewIssue": {
+      "additionalProperties": false,
+      "properties": {
+        "issue": {
+          "title": "Issue",
+          "type": "string"
+        },
+        "severity": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "blocker"
+          ],
+          "title": "Severity",
+          "type": "string"
+        },
+        "suggested_fix": {
+          "title": "Suggested Fix",
+          "type": "string"
+        }
+      },
+      "required": [
+        "severity",
+        "issue",
+        "suggested_fix"
+      ],
+      "title": "ReviewIssue",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "created_at": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$",
+      "title": "Created At",
+      "type": "string"
+    },
+    "evidence_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Evidence Digest",
+      "type": "string"
+    },
+    "improvement_requests": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Improvement Requests",
+      "type": "array"
+    },
+    "needs_improvement": {
+      "title": "Needs Improvement",
+      "type": "boolean"
+    },
+    "review_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Review Id",
+      "type": "string"
+    },
+    "review_issues": {
+      "items": {
+        "$ref": "#/$defs/ReviewIssue"
+      },
+      "title": "Review Issues",
+      "type": "array"
+    },
+    "review_status": {
+      "enum": [
+        "passed",
+        "passed_with_caveats",
+        "failed"
+      ],
+      "title": "Review Status",
+      "type": "string"
+    },
+    "run_id": {
+      "maxLength": 160,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "paper_reader.review.v2",
+      "default": "paper_reader.review.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "summary_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Summary Sha256",
+      "type": "string"
+    },
+    "trust_status_recommendation": {
+      "enum": [
+        "trusted",
+        "usable_with_caveats",
+        "needs_manual_review",
+        "rejected"
+      ],
+      "title": "Trust Status Recommendation",
+      "type": "string"
+    }
+  },
+  "required": [
+    "review_id",
+    "run_id",
+    "created_at",
+    "summary_sha256",
+    "evidence_digest",
+    "review_status",
+    "needs_improvement",
+    "review_issues",
+    "trust_status_recommendation",
+    "improvement_requests"
+  ],
+  "title": "PaperReaderReview",
+  "type": "object"
+}
