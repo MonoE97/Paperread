@@ -346,7 +346,6 @@
     },
     "schema_version": {
       "const": "paper_reader.write-authorization.v2",
-      "default": "paper_reader.write-authorization.v2",
       "title": "Schema Version",
       "type": "string"
     },
@@ -379,6 +378,7 @@
     }
   },
   "required": [
+    "schema_version",
     "authorization_id",
     "run_id",
     "created_at",

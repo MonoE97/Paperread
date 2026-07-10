@@ -399,7 +399,6 @@
     },
     "schema_version": {
       "const": "paper_reader.run.v2",
-      "default": "paper_reader.run.v2",
       "title": "Schema Version",
       "type": "string"
     },
@@ -460,6 +459,7 @@
     }
   },
   "required": [
+    "schema_version",
     "run_id",
     "created_at",
     "source",

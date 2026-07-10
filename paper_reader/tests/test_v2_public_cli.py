@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,17 @@ def _public_cli_module():
 
 def _invoke(arguments: list[str]):
     return CliRunner().invoke(_public_cli_module().app, arguments)
+
+
+def _invoke_console(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+    console_script = Path(sys.executable).with_name("paper_reader")
+    assert console_script.is_file(), console_script
+    return subprocess.run(
+        [str(console_script), *arguments],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _result_payload(result) -> dict:
@@ -99,6 +112,23 @@ def test_top_level_help_shows_grouped_surface_and_hides_v1_flat_commands() -> No
         assert legacy_name not in result.stdout
 
 
+@pytest.mark.parametrize("arguments", [["--help"], ["run", "--help"], ["zotero", "--help"]])
+def test_help_has_no_shell_completion_installation_surface(arguments: list[str]) -> None:
+    result = _invoke(arguments)
+
+    assert result.exit_code == 0
+    assert "--install-completion" not in result.stdout
+    assert "--show-completion" not in result.stdout
+
+
+@pytest.mark.parametrize("arguments", [[], ["run"], ["zotero"]])
+def test_implicit_no_args_help_remains_human_only(arguments: list[str]) -> None:
+    result = _invoke(arguments)
+
+    assert "Usage:" in result.stdout
+    assert "paper_reader.command-result.v2" not in result.stdout
+
+
 def test_version_is_a_human_option_not_a_flat_command() -> None:
     result = _invoke(["--version"])
 
@@ -106,6 +136,50 @@ def test_version_is_a_human_option_not_a_flat_command() -> None:
     assert result.stdout.strip() == "0.1.0"
     flat = _invoke(["version"])
     assert flat.exit_code != 0
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_command"),
+    [
+        (["route"], "route"),
+        (["zotero", "authorize", "candidate.json", "--ttl-seconds", "not-an-integer"], "zotero authorize"),
+    ],
+)
+def test_clirunner_parse_errors_emit_one_structured_result(
+    arguments: list[str],
+    expected_command: str,
+) -> None:
+    result = _invoke(arguments)
+
+    assert result.exit_code != 0
+    payload = _result_payload(result)
+    assert payload["ok"] is False
+    assert payload["code"] == "invalid_command_usage"
+    assert payload["command"] == expected_command
+    assert result.stderr.strip()
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_command"),
+    [
+        (["route"], "route"),
+        (["zotero", "authorize", "candidate.json", "--ttl-seconds", "not-an-integer"], "zotero authorize"),
+    ],
+)
+def test_console_entrypoint_parse_errors_emit_one_structured_result(
+    arguments: list[str],
+    expected_command: str,
+) -> None:
+    result = _invoke_console(arguments)
+
+    assert result.returncode != 0
+    lines = result.stdout.splitlines()
+    assert len(lines) == 1, result.stdout
+    payload = json.loads(lines[0])
+    PaperReaderCommandResult.model_validate(payload)
+    assert payload["code"] == "invalid_command_usage"
+    assert payload["command"] == expected_command
+    assert result.stderr.strip()
 
 
 def test_route_is_path_first_for_pdf_directory_missing_path_and_title(tmp_path: Path) -> None:
@@ -206,6 +280,32 @@ def test_lifecycle_skeleton_returns_structured_not_implemented_without_mutation(
     assert payload["code"] == "not_implemented"
     after = {path.name: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()}
     assert after == before
+
+
+def test_run_prepare_accepts_explicit_preview_limits_without_mutation(tmp_path: Path) -> None:
+    run_path = tmp_path / "run"
+
+    result = _invoke(
+        [
+            "run",
+            "prepare",
+            str(run_path),
+            "--preview-pages",
+            "3",
+            "--figure-limit",
+            "4",
+        ]
+    )
+
+    assert result.exit_code == 1
+    payload = _result_payload(result)
+    assert payload["code"] == "not_implemented"
+    assert payload["data"] == {
+        "figure_limit": 4,
+        "preview_pages": 3,
+        "run_path": str(run_path),
+    }
+    assert not run_path.exists()
 
 
 def test_grouped_maintenance_extract_pdf_emits_one_v2_result() -> None:

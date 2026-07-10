@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -6,6 +7,8 @@ import tomllib
 from pathlib import Path
 
 import pytest
+
+from paper_reader.contracts import PaperReaderReview, PaperReaderSummary
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +25,13 @@ VALIDATE_SCRIPT = SKILL_ROOT / "scripts" / "validate-skill.py"
 
 def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def json_example_after_heading(text: str, heading: str) -> str:
+    section_start = text.index(heading)
+    fence_start = text.index("```json\n", section_start) + len("```json\n")
+    fence_end = text.index("\n```", fence_start)
+    return text[fence_start:fence_end]
 
 
 def parse_frontmatter(path: Path) -> tuple[dict[str, str], str]:
@@ -403,6 +413,22 @@ def test_summary_reference_documents_rendered_chinese_fields() -> None:
         "applicability_limits",
     ]:
         assert quality_field not in hard_required_section
+
+
+def test_summary_reference_required_fields_and_examples_match_v2_models() -> None:
+    text = read(SUMMARY_REFERENCE)
+    summary_section, review_and_examples = text.split("## `review.json`", maxsplit=1)
+    review_section = review_and_examples.split("## Minimal write-ready example", maxsplit=1)[0]
+
+    for field in PaperReaderSummary.model_json_schema(mode="validation")["required"]:
+        assert f"`{field}`" in summary_section, field
+    for field in PaperReaderReview.model_json_schema(mode="validation")["required"]:
+        assert f"`{field}`" in review_section, field
+
+    summary_example = json_example_after_heading(text, "## Minimal write-ready example")
+    PaperReaderSummary.model_validate_json(summary_example)
+    review_example = json_example_after_heading(text, "## Minimal review example")
+    PaperReaderReview.model_validate_json(review_example)
 
 
 def test_root_agents_defines_breaking_v2_public_contract() -> None:

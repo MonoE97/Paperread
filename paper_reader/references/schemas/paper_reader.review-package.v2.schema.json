@@ -182,7 +182,6 @@
     },
     "schema_version": {
       "const": "paper_reader.review-package.v2",
-      "default": "paper_reader.review-package.v2",
       "title": "Schema Version",
       "type": "string"
     },
@@ -196,6 +195,7 @@
     }
   },
   "required": [
+    "schema_version",
     "review_package_id",
     "run_id",
     "created_at",

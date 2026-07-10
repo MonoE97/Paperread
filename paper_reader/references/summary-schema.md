@@ -7,6 +7,10 @@ The summary separates fields that block review sealing from fields that improve 
 ## `summary.json`
 
 - `schema_version` must be exactly `paper_reader.summary.v2`.
+- `summary_id` is the immutable summary identity.
+- `run_id` binds the summary to one `paper_reader.run.v2`.
+- `created_at` is the RFC3339 UTC creation time.
+- `evidence_digest` is the canonical SHA-256 of the evidence manifest used by the summary.
 - The complete summary content is hashed canonically and bound into the sealed review package. Any post-review change invalidates sealing and requires a new review.
 
 ## `gate-required`
@@ -62,6 +66,12 @@ These fields are rendered prominently by the note template or make the review mo
 
 Minimum fields:
 
+- `schema_version`: exactly `paper_reader.review.v2`
+- `review_id`: immutable review identity
+- `run_id`: the reviewed V2 run identity
+- `created_at`: RFC3339 UTC creation time
+- `summary_sha256`: canonical SHA-256 of the exact reviewed summary
+- `evidence_digest`: canonical SHA-256 of the reviewed evidence manifest
 - `review_status`
 - `needs_improvement`
 - `review_issues`
@@ -77,6 +87,10 @@ Use this as a shape reference, then replace every prose field with paper-specifi
 ```json
 {
   "schema_version": "paper_reader.summary.v2",
+  "summary_id": "summary_example_001",
+  "run_id": "run_example_001",
+  "created_at": "2026-07-10T09:30:00Z",
+  "evidence_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "paper_type": "method_paper",
   "trust_status": "usable_with_caveats",
   "review_status": "passed_with_caveats",
@@ -146,5 +160,31 @@ Use this as a shape reference, then replace every prose field with paper-specifi
       "confidence": "medium"
     }
   ]
+}
+```
+
+## Minimal review example
+
+This example reviews the exact summary and evidence identities above:
+
+```json
+{
+  "schema_version": "paper_reader.review.v2",
+  "review_id": "review_example_001",
+  "run_id": "run_example_001",
+  "created_at": "2026-07-10T09:35:00Z",
+  "summary_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "evidence_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "review_status": "passed_with_caveats",
+  "needs_improvement": false,
+  "review_issues": [
+    {
+      "severity": "medium",
+      "issue": "图表证据仍需结合图注复核。",
+      "suggested_fix": "在候选构建前复核关键图表定位。"
+    }
+  ],
+  "trust_status_recommendation": "usable_with_caveats",
+  "improvement_requests": []
 }
 ```

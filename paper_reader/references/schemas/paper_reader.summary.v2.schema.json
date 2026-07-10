@@ -590,7 +590,6 @@
     },
     "schema_version": {
       "const": "paper_reader.summary.v2",
-      "default": "paper_reader.summary.v2",
       "title": "Schema Version",
       "type": "string"
     },
@@ -645,6 +644,7 @@
     }
   },
   "required": [
+    "schema_version",
     "summary_id",
     "run_id",
     "created_at",

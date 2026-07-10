@@ -205,7 +205,7 @@ class VerificationCheck(StrictContractModel):
 
 
 class PaperReaderRun(StrictContractModel):
-    schema_version: Literal["paper_reader.run.v2"] = "paper_reader.run.v2"
+    schema_version: Literal["paper_reader.run.v2"]
     run_id: Identifier
     created_at: Rfc3339Utc
     source: SourceIdentity
@@ -217,7 +217,7 @@ class PaperReaderRun(StrictContractModel):
 
 
 class PaperReaderSummary(StrictContractModel):
-    schema_version: Literal["paper_reader.summary.v2"] = "paper_reader.summary.v2"
+    schema_version: Literal["paper_reader.summary.v2"]
     summary_id: Identifier
     run_id: Identifier
     created_at: Rfc3339Utc
@@ -270,7 +270,7 @@ class PaperReaderSummary(StrictContractModel):
 
 
 class PaperReaderReview(StrictContractModel):
-    schema_version: Literal["paper_reader.review.v2"] = "paper_reader.review.v2"
+    schema_version: Literal["paper_reader.review.v2"]
     review_id: Identifier
     run_id: Identifier
     created_at: Rfc3339Utc
@@ -286,7 +286,7 @@ class PaperReaderReview(StrictContractModel):
 
 
 class PaperReaderReviewPackage(StrictContractModel):
-    schema_version: Literal["paper_reader.review-package.v2"] = "paper_reader.review-package.v2"
+    schema_version: Literal["paper_reader.review-package.v2"]
     review_package_id: Identifier
     run_id: Identifier
     created_at: Rfc3339Utc
@@ -301,7 +301,7 @@ class PaperReaderReviewPackage(StrictContractModel):
 
 
 class PaperReaderCandidate(StrictContractModel):
-    schema_version: Literal["paper_reader.candidate.v2"] = "paper_reader.candidate.v2"
+    schema_version: Literal["paper_reader.candidate.v2"]
     candidate_id: Identifier
     run_id: Identifier
     created_at: Rfc3339Utc
@@ -319,9 +319,7 @@ class PaperReaderCandidate(StrictContractModel):
 
 
 class PaperReaderWriteAuthorization(StrictContractModel):
-    schema_version: Literal["paper_reader.write-authorization.v2"] = (
-        "paper_reader.write-authorization.v2"
-    )
+    schema_version: Literal["paper_reader.write-authorization.v2"]
     authorization_id: Identifier
     run_id: Identifier
     created_at: Rfc3339Utc
@@ -346,7 +344,7 @@ class PaperReaderWriteAuthorization(StrictContractModel):
 
 
 class PaperReaderVerification(StrictContractModel):
-    schema_version: Literal["paper_reader.verification.v2"] = "paper_reader.verification.v2"
+    schema_version: Literal["paper_reader.verification.v2"]
     verification_id: Identifier
     run_id: Identifier
     created_at: Rfc3339Utc
@@ -363,7 +361,7 @@ class PaperReaderVerification(StrictContractModel):
 
 
 class PaperReaderReconciliation(StrictContractModel):
-    schema_version: Literal["paper_reader.reconciliation.v2"] = "paper_reader.reconciliation.v2"
+    schema_version: Literal["paper_reader.reconciliation.v2"]
     reconciliation_id: Identifier
     run_id: Identifier
     created_at: Rfc3339Utc
@@ -380,7 +378,7 @@ class PaperReaderReconciliation(StrictContractModel):
 
 
 class PaperReaderCommandResult(StrictContractModel):
-    schema_version: Literal["paper_reader.command-result.v2"] = "paper_reader.command-result.v2"
+    schema_version: Literal["paper_reader.command-result.v2"]
     command: str
     ok: bool
     code: Identifier

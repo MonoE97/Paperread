@@ -5,7 +5,10 @@ import importlib
 import importlib.util
 import json
 import os
+import sys
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -74,6 +77,26 @@ def test_resolve_artifact_path_rejects_symlink_escape(tmp_path: Path) -> None:
         storage.resolve_artifact_path(root, "escape/context.md")
 
 
+def test_resolved_artifact_path_cannot_be_retargeted_outside_root(tmp_path: Path) -> None:
+    storage = _storage_module()
+    root = tmp_path / "run"
+    inside = root / "inside"
+    outside = tmp_path / "outside"
+    inside.mkdir(parents=True)
+    outside.mkdir()
+    (inside / "context.md").write_text("inside", encoding="utf-8")
+    (outside / "context.md").write_text("outside", encoding="utf-8")
+    link = root / "current"
+    link.symlink_to(inside, target_is_directory=True)
+
+    resolved = storage.resolve_artifact_path(root, "current/context.md")
+    link.unlink()
+    link.symlink_to(outside, target_is_directory=True)
+
+    assert resolved == inside / "context.md"
+    assert resolved.read_text(encoding="utf-8") == "inside"
+
+
 def test_source_fingerprint_resolves_symlink_and_binds_bytes_and_inode(tmp_path: Path) -> None:
     storage = _storage_module()
     source = tmp_path / "paper.pdf"
@@ -140,6 +163,109 @@ def test_atomic_tree_publish_does_not_replace_an_existing_tree(tmp_path: Path) -
     with pytest.raises(FileExistsError):
         storage.atomic_publish_tree(second_staging, target)
     assert (target / "evidence.json").read_text() == "v2"
+
+
+def test_atomic_tree_publish_rejects_destination_created_after_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _storage_module()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "marker").write_text("candidate", encoding="utf-8")
+    target = tmp_path / "published"
+    original_fsync_tree = storage._fsync_tree
+
+    def fsync_then_create_competing_target(root: Path) -> None:
+        original_fsync_tree(root)
+        target.mkdir()
+
+    monkeypatch.setattr(storage, "_fsync_tree", fsync_then_create_competing_target)
+
+    with pytest.raises(FileExistsError) as exc_info:
+        storage.atomic_publish_tree(staging, target)
+
+    assert getattr(exc_info.value, "code", None) == "publish_conflict"
+    assert staging.is_dir()
+    assert (staging / "marker").read_text(encoding="utf-8") == "candidate"
+    assert target.is_dir()
+    assert not list(target.iterdir())
+
+
+def test_atomic_tree_publish_uses_native_no_replace_not_os_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _storage_module()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    target = tmp_path / "published"
+
+    def forbidden_replace_capable_rename(*_args) -> None:
+        pytest.fail("replace-capable os.rename fallback was called")
+
+    monkeypatch.setattr(storage.os, "rename", forbidden_replace_capable_rename)
+
+    storage.atomic_publish_tree(staging, target)
+
+    assert target.is_dir()
+    assert not staging.exists()
+
+
+def test_atomic_tree_publish_fails_closed_when_native_primitive_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _storage_module()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    target = tmp_path / "published"
+    monkeypatch.setattr(sys, "platform", "unsupported-test-platform")
+
+    with pytest.raises(NotImplementedError, match="atomic no-replace"):
+        storage.atomic_publish_tree(staging, target)
+
+    assert staging.is_dir()
+    assert not target.exists()
+
+
+def test_atomic_tree_publish_allows_exactly_one_real_concurrent_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _storage_module()
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "marker").write_text("first", encoding="utf-8")
+    (second / "marker").write_text("second", encoding="utf-8")
+    target = tmp_path / "published"
+    barrier = threading.Barrier(2)
+    original_fsync_tree = storage._fsync_tree
+
+    def fsync_then_wait(root: Path) -> None:
+        original_fsync_tree(root)
+        barrier.wait(timeout=5)
+
+    monkeypatch.setattr(storage, "_fsync_tree", fsync_then_wait)
+
+    def publish(staging: Path):
+        try:
+            storage.atomic_publish_tree(staging, target)
+            return None
+        except Exception as exc:  # asserted below, preserving the real exception
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(publish, (first, second)))
+
+    errors = [outcome for outcome in outcomes if outcome is not None]
+    assert len(errors) == 1
+    assert isinstance(errors[0], FileExistsError)
+    assert getattr(errors[0], "code", None) == "publish_conflict"
+    assert (target / "marker").read_text(encoding="utf-8") in {"first", "second"}
+    assert sum(path.exists() for path in (first, second)) == 1
 
 
 def test_file_publish_is_atomic_no_replace_and_does_not_hardlink_candidate(tmp_path: Path) -> None:

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Sequence
 
+import click
 import typer
+from typer.core import TyperGroup
 
 from paper_reader import __version__
 from paper_reader.contracts import PaperReaderCommandResult
@@ -11,16 +14,88 @@ from paper_reader.storage import canonical_json_bytes, rfc3339_utc
 from paper_reader.v2_loader import RunLoadError, load_v2_run
 
 
+class StructuredTyperGroup(TyperGroup):
+    def main(
+        self,
+        args: Sequence[str] | None = None,
+        prog_name: str | None = None,
+        complete_var: str | None = None,
+        standalone_mode: bool = True,
+        windows_expand_args: bool = True,
+        **extra: Any,
+    ) -> Any:
+        try:
+            outcome = super().main(
+                args=args,
+                prog_name=prog_name,
+                complete_var=complete_var,
+                standalone_mode=False,
+                windows_expand_args=windows_expand_args,
+                **extra,
+            )
+        except click.UsageError as exc:
+            if isinstance(exc, click.exceptions.NoArgsIsHelpError):
+                if standalone_mode:
+                    raise SystemExit(exc.exit_code) from None
+                return exc.exit_code
+            command_path = exc.ctx.command_path if exc.ctx is not None else "paper_reader"
+            path_parts = command_path.split()
+            command = " ".join(path_parts[1:]) if len(path_parts) > 1 else "paper_reader"
+            message = exc.format_message()
+            _write_result(
+                command=command,
+                ok=False,
+                code="invalid_command_usage",
+                data={"error_type": type(exc).__name__},
+                message=message,
+            )
+            typer.echo(f"{command}: {message}", err=True)
+            if standalone_mode:
+                raise SystemExit(exc.exit_code) from None
+            return exc.exit_code
+
+        if standalone_mode:
+            exit_code = outcome if isinstance(outcome, int) else 0
+            raise SystemExit(exit_code)
+        return outcome
+
+
 app = typer.Typer(
     help="Paper Reader V2 grouped CLI for local PDF and Zotero-title workflows.",
     no_args_is_help=True,
+    add_completion=False,
+    cls=StructuredTyperGroup,
 )
-run_app = typer.Typer(help="Initialize, prepare, inspect, and validate V2 runs.", no_args_is_help=True)
-review_app = typer.Typer(help="Validate and seal immutable review packages.", no_args_is_help=True)
-candidate_app = typer.Typer(help="Build immutable publication candidates.", no_args_is_help=True)
-local_app = typer.Typer(help="Publish fixed local candidates without replacement.", no_args_is_help=True)
-zotero_app = typer.Typer(help="Authorize and verify external Zotero writes.", no_args_is_help=True)
-maintenance_app = typer.Typer(help="Pure utilities outside the V2 lifecycle.", no_args_is_help=True)
+run_app = typer.Typer(
+    help="Initialize, prepare, inspect, and validate V2 runs.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+review_app = typer.Typer(
+    help="Validate and seal immutable review packages.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+candidate_app = typer.Typer(
+    help="Build immutable publication candidates.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+local_app = typer.Typer(
+    help="Publish fixed local candidates without replacement.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+zotero_app = typer.Typer(
+    help="Authorize and verify external Zotero writes.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+maintenance_app = typer.Typer(
+    help="Pure utilities outside the V2 lifecycle.",
+    no_args_is_help=True,
+    add_completion=False,
+)
 
 app.add_typer(run_app, name="run")
 app.add_typer(review_app, name="review")
@@ -59,7 +134,29 @@ def _finish(
     diagnostic: str | None = None,
     exit_code: int = 1,
 ) -> None:
+    _write_result(
+        command=command,
+        ok=ok,
+        code=code,
+        data=data,
+        message=message,
+    )
+    if diagnostic:
+        typer.echo(diagnostic, err=True)
+    if not ok:
+        raise typer.Exit(exit_code)
+
+
+def _write_result(
+    *,
+    command: str,
+    ok: bool,
+    code: str,
+    data: dict | None = None,
+    message: str | None = None,
+) -> None:
     result = PaperReaderCommandResult(
+        schema_version="paper_reader.command-result.v2",
         command=command,
         ok=ok,
         code=code,
@@ -68,10 +165,6 @@ def _finish(
         data=data or {},
     )
     typer.echo(canonical_json_bytes(result).decode("utf-8"))
-    if diagnostic:
-        typer.echo(diagnostic, err=True)
-    if not ok:
-        raise typer.Exit(exit_code)
 
 
 def _not_implemented(command: str, **data: str | int | None) -> None:
@@ -124,9 +217,18 @@ def run_init_zotero(
 
 
 @run_app.command("prepare")
-def run_prepare(run_path: Path) -> None:
+def run_prepare(
+    run_path: Path,
+    preview_pages: int | None = typer.Option(None, "--preview-pages", min=1),
+    figure_limit: int | None = typer.Option(None, "--figure-limit", min=0),
+) -> None:
     """Prepare immutable evidence for a V2 run."""
-    _not_implemented("run prepare", run_path=str(run_path))
+    _not_implemented(
+        "run prepare",
+        run_path=str(run_path),
+        preview_pages=preview_pages,
+        figure_limit=figure_limit,
+    )
 
 
 def _load_run_or_finish(command: str, run_path: Path):

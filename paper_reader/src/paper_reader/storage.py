@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import errno
 import hashlib
 import json
@@ -7,6 +8,7 @@ import os
 import secrets
 import shutil
 import stat
+import sys
 import uuid
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
@@ -25,6 +27,18 @@ class ResolvedSourceFingerprint:
 
     def as_dict(self) -> dict[str, str | int]:
         return asdict(self)
+
+
+class PublishConflictError(FileExistsError):
+    code = "publish_conflict"
+
+    def __init__(self, destination: Path) -> None:
+        super().__init__(errno.EEXIST, "atomic publication destination already exists", destination)
+
+
+class AtomicNoReplaceUnsupportedError(NotImplementedError):
+    def __init__(self, platform: str) -> None:
+        super().__init__(f"atomic no-replace tree rename is unavailable on platform: {platform}")
 
 
 def _jsonable(value: Any) -> Any:
@@ -104,7 +118,7 @@ def resolve_artifact_path(root: Path | str, relative_path: str | PurePosixPath) 
     resolved_candidate = candidate.resolve(strict=False)
     if not resolved_candidate.is_relative_to(resolved_root):
         raise ValueError(f"artifact path escapes its run root: {relative}")
-    return candidate
+    return resolved_candidate
 
 
 def fingerprint_source(path: Path | str) -> ResolvedSourceFingerprint:
@@ -191,6 +205,63 @@ def _fsync_tree(root: Path) -> None:
         fsync_directory(current)
 
 
+def _raise_native_rename_error(error_number: int, source: Path, destination: Path) -> None:
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise PublishConflictError(destination)
+    unsupported_errors = {errno.ENOSYS, errno.ENOTSUP}
+    if hasattr(errno, "EOPNOTSUPP"):
+        unsupported_errors.add(errno.EOPNOTSUPP)
+    if error_number in unsupported_errors:
+        raise AtomicNoReplaceUnsupportedError(sys.platform)
+    raise OSError(error_number, os.strerror(error_number), source, destination)
+
+
+def _native_rename_tree_no_replace(source: Path, destination: Path) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+
+    if sys.platform == "darwin":
+        try:
+            renamex_np = libc.renamex_np
+        except AttributeError as exc:
+            raise AtomicNoReplaceUnsupportedError(sys.platform) from exc
+        # Verified from the installed macOS SDK sys/stdio.h.
+        rename_excl = 0x00000004
+        renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        renamex_np.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        result = renamex_np(source_bytes, destination_bytes, rename_excl)
+    elif sys.platform.startswith("linux"):
+        try:
+            renameat2 = libc.renameat2
+        except AttributeError as exc:
+            raise AtomicNoReplaceUnsupportedError(sys.platform) from exc
+        at_fdcwd = -100
+        rename_noreplace = 1
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        result = renameat2(
+            at_fdcwd,
+            source_bytes,
+            at_fdcwd,
+            destination_bytes,
+            rename_noreplace,
+        )
+    else:
+        raise AtomicNoReplaceUnsupportedError(sys.platform)
+
+    if result != 0:
+        _raise_native_rename_error(ctypes.get_errno(), source, destination)
+
+
 def atomic_write_bytes(path: Path | str, content: bytes, *, mode: int = 0o644) -> Path:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -225,12 +296,10 @@ def atomic_publish_tree(staging: Path | str, destination: Path | str) -> Path:
     if not staging_path.is_dir() or staging_path.is_symlink():
         raise ValueError(f"staging tree must be a real directory: {staging_path}")
     destination_path.parent.mkdir(parents=True, exist_ok=True)
-    if os.path.lexists(destination_path):
-        raise FileExistsError(errno.EEXIST, "destination tree already exists", destination_path)
     if staging_path.stat().st_dev != destination_path.parent.stat().st_dev:
         raise OSError(errno.EXDEV, "tree publication requires the same filesystem")
     _fsync_tree(staging_path)
-    os.rename(staging_path, destination_path)
+    _native_rename_tree_no_replace(staging_path, destination_path)
     fsync_directory(destination_path.parent)
     return destination_path
 
@@ -267,6 +336,8 @@ def publish_file_no_replace(source: Path | str, destination: Path | str) -> Path
 
 
 __all__ = [
+    "AtomicNoReplaceUnsupportedError",
+    "PublishConflictError",
     "ResolvedSourceFingerprint",
     "assert_no_source_output_alias",
     "atomic_publish_tree",

@@ -45,12 +45,12 @@
     },
     "schema_version": {
       "const": "paper_reader.command-result.v2",
-      "default": "paper_reader.command-result.v2",
       "title": "Schema Version",
       "type": "string"
     }
   },
   "required": [
+    "schema_version",
     "command",
     "ok",
     "code",

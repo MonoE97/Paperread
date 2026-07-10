@@ -237,7 +237,6 @@
     },
     "schema_version": {
       "const": "paper_reader.reconciliation.v2",
-      "default": "paper_reader.reconciliation.v2",
       "title": "Schema Version",
       "type": "string"
     },
@@ -257,6 +256,7 @@
     }
   },
   "required": [
+    "schema_version",
     "reconciliation_id",
     "run_id",
     "created_at",

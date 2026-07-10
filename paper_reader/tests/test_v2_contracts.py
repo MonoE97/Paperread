@@ -74,6 +74,27 @@ def test_command_result_rejects_an_unknown_or_unversioned_schema() -> None:
     with pytest.raises(contracts.ValidationError):
         contracts.PaperReaderCommandResult.model_validate(payload)
 
+    payload.pop("schema_version")
+    with pytest.raises(contracts.ValidationError) as exc_info:
+        contracts.PaperReaderCommandResult.model_validate(payload)
+    assert ("schema_version",) in {error["loc"] for error in exc_info.value.errors()}
+
+
+def test_schema_version_is_required_by_every_v2_model_and_checked_in_schema() -> None:
+    contracts = _contracts_module()
+    schema_dir = Path(__file__).parents[1] / "references" / "schemas"
+
+    for version, model in contracts.V2_SCHEMA_MODELS.items():
+        assert model.model_fields["schema_version"].is_required(), version
+        with pytest.raises(contracts.ValidationError) as exc_info:
+            model.model_validate({})
+        assert ("schema_version",) in {error["loc"] for error in exc_info.value.errors()}, version
+
+        checked_in = json.loads(
+            (schema_dir / contracts.schema_filename(version)).read_text(encoding="utf-8")
+        )
+        assert "schema_version" in checked_in["required"], version
+
 
 def test_core_contracts_fix_identity_time_path_target_artifact_gate_and_preflight_fields() -> None:
     contracts = _contracts_module()

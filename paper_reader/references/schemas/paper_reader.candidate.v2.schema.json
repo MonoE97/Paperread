@@ -422,7 +422,6 @@
     },
     "schema_version": {
       "const": "paper_reader.candidate.v2",
-      "default": "paper_reader.candidate.v2",
       "title": "Schema Version",
       "type": "string"
     },
@@ -474,6 +473,7 @@
     }
   },
   "required": [
+    "schema_version",
     "candidate_id",
     "run_id",
     "created_at",

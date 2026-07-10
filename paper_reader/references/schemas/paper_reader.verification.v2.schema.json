@@ -282,7 +282,6 @@
     },
     "schema_version": {
       "const": "paper_reader.verification.v2",
-      "default": "paper_reader.verification.v2",
       "title": "Schema Version",
       "type": "string"
     },
@@ -302,6 +301,7 @@
     }
   },
   "required": [
+    "schema_version",
     "verification_id",
     "run_id",
     "created_at",
