@@ -1,8 +1,13 @@
-# Summary And Review Shape
+# Summary And Review Shape — Paper Reader 2.0 Target Contract
 
-This reference separates fields that block gates from fields that improve the rendered note. The agent should fill both layers for high-quality notes, but only `gate-required` fields are enforced by `validate-trusted-summary`.
+This reference defines the binding Paper Reader 2.0 target schemas `paper_reader.summary.v2`, `paper_reader.review.v2`, and immutable `paper_reader.review-package.v2`. All use strict Pydantic v2 models with `extra=forbid`; unknown fields, implicit coercion, V1/unversioned artifacts and schema guessing are rejected. V1 artifacts are historical-only and fail with `unsupported_run_schema` before locks or mutation.
+
+The summary separates fields that block review sealing from fields that improve the rendered note. The agent should fill both layers for high-quality notes, but only `gate-required` fields are mandatory for sealing. Review validation resolves every render fallback before Chinese-first prose lint, locator validation and sealing, so omitted optional fields cannot bypass checks.
 
 ## `summary.json`
+
+- `schema_version` must be exactly `paper_reader.summary.v2`.
+- The complete summary content is hashed canonically and bound into the sealed review package. Any post-review change invalidates sealing and requires a new review.
 
 ## `gate-required`
 
@@ -29,7 +34,7 @@ Rendered note prose is Chinese-first. Paper titles, author names, institution na
 
 ## `quality-recommended`
 
-These fields are rendered prominently by the note template or make the review more useful. In other words, missing quality-recommended fields do not block `validate-trusted-summary`, but they can render as `未知`, `无`, or weaker fallback text:
+These fields are rendered prominently by the note template or make the review more useful. In other words, missing quality-recommended fields do not by themselves block review sealing, but their resolved fallbacks can render as `未知`, `无`, or weaker text and are still subject to Chinese-first lint and evidence checks:
 
 - `tldr`: preferred source for the `30 秒结论` row; falls back to `one_sentence_summary`
 - `research_object`
@@ -53,6 +58,8 @@ These fields are rendered prominently by the note template or make the review mo
 
 ## `review.json`
 
+- `schema_version` must be exactly `paper_reader.review.v2`.
+
 Minimum fields:
 
 - `review_status`
@@ -61,7 +68,7 @@ Minimum fields:
 - `trust_status_recommendation`
 - `improvement_requests`
 
-After writing `review.json`, run `apply-review` before linting and trusted-summary validation.
+`uv run paper_reader review validate <run_dir>` validates summary, review, canonical evidence membership and fully resolved render prose. `uv run paper_reader review seal <run_dir>` may then publish one immutable `paper_reader.review-package.v2` that binds exact summary/review/evidence hashes. Failed review, changed summary hash, invalid locator or rendered English prose blocks sealing and candidate construction.
 
 ## Minimal write-ready example
 
@@ -69,6 +76,7 @@ Use this as a shape reference, then replace every prose field with paper-specifi
 
 ```json
 {
+  "schema_version": "paper_reader.summary.v2",
   "paper_type": "method_paper",
   "trust_status": "usable_with_caveats",
   "review_status": "passed_with_caveats",
@@ -90,7 +98,7 @@ Use this as a shape reference, then replace every prose field with paper-specifi
   "workflow_steps": [
     "抽取 PDF 正文和图表候选。",
     "基于 context.md 写 summary.json。",
-    "运行 review、lint 和 trusted-summary 门禁。"
+    "运行 review validate、中文 lint 和 review seal 门禁。"
   ],
   "technical_details": ["证据 locator 使用 canonical 格式。"],
   "experiments": "示例论文用正文页和图表候选验证笔记结构。",

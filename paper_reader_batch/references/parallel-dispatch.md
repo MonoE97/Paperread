@@ -1,41 +1,36 @@
-# Parallel Dispatch
+# Parallel Dispatch — Paper Reader Batch 2.0 Target Contract
 
-paper_reader_batch uses two execution modes.
+paper_reader_batch uses two execution modes under the journal-and-lease contract. Every mutation requires `--request-id UUID`, holds `.run.lock`, validates the append-only hash-chain and manifest binding, and commits an event before replacing the reconstructable `state.json` snapshot.
 
 ## Main Mode: Outer-Agent Parallel Dispatch
 
-1. Run `uv run paper_reader_batch validate <batch_run> --paper-reader-root <paper_reader_root>`.
-2. Run `uv run paper_reader_batch next <batch_run> --limit <N>`.
-3. For each returned assignment, generate a worker prompt with `uv run paper_reader_batch worker-prompt <batch_run> <item_id>`.
-4. Dispatch one worker per assignment in the outer agent environment.
-5. Each worker runs `$paper_reader` and writes an item result JSON.
-6. The controller records each result with `uv run paper_reader_batch record-result <batch_run> <item_id> --result <result_json>`.
-7. Repeat `next` until no pending items remain.
-8. Run `uv run paper_reader_batch report <batch_run>`.
+1. Run `uv run paper_reader_batch run validate <batch_run> --paper-reader-root <paper_reader_root>`.
+2. Claim up to the manifest concurrency through `uv run paper_reader_batch worker claim <batch_run> --request-id UUID`. Default Codex concurrency is 3.
+3. Dispatch one outer-agent worker per leased assignment. The assignment binds item, claim id, exact attempt, worker identity, lease token and expiry; worker leases default to 900 seconds.
+4. Renew long work with `uv run paper_reader_batch worker renew <batch_run> <item_id> --request-id UUID`.
+5. Each worker runs `$paper_reader` and produces a strict `paper_reader_batch.worker-result.v2` referring to immutable single-paper artifacts.
+6. Finish with `uv run paper_reader_batch worker finish <batch_run> <item_id> --result <result_json> --request-id UUID`.
+7. Use grouped `worker release` only before side effects; failed/blocked work requires explicit `worker retry`. Reject stale lease token, wrong attempt, source drift and same-PDF mutual exclusion violations.
+8. Repeat claims until no eligible work remains, then run `uv run paper_reader_batch run report <batch_run>`.
 
 ## Local PDF Worker Rule
 
-For `input_type=pdf_path`, the worker must use `$paper_reader` local PDF workflow. It must not search Zotero, inspect Zotero duplicates, call `refresh-live-notes`, create `write-payload.json`, run `next-write`, or write Zotero.
+For `input_type=pdf_path`, the worker must use `$paper_reader` local PDF workflow. It must not search Zotero, inspect Zotero duplicates, create Zotero authorization, enter the write lane, or write Zotero. The exact source absolute path/size/SHA-256 and claimed attempt must match the finished result.
 
 ## Zotero Worker Rule
 
-For `input_type=zotero_item` or `input_type=zotero_title`, the worker may prepare a Zotero note candidate. It must stop on exact duplicate normalized titles, run the single-paper write gate, and return a `write_payload` path only when the gate is `write_ready`. It must not call Zotero MCP `write_note`.
+For `input_type=zotero_item` or `input_type=zotero_title`, the worker may return an immutable `paper_reader.candidate.v2`. It must stop on duplicate normalized titles, bind a sealed review package whose resolved rendered note passed the Chinese-first gate, bind exact source/parent/title/content/tags/hashes, and must not create write authority by itself or call Zotero MCP `write_note`.
 
-## Serial Write Rule
+## Recoverable Serial Write Rule
 
-The controller must process Zotero writes with `uv run paper_reader_batch next-write <batch_run> --limit 1`. Before calling MCP, show the target Zotero item plus the `note.md` and `note.html` preview that will be written. Then call MCP `write_note`, run `$paper_reader verify-zotero-note`, and `record-write`. Parallel write is intentionally unsupported.
+The controller claims exactly one Zotero candidate with `uv run paper_reader_batch write claim <batch_run> --request-id UUID`; write leases default to 120 seconds and bind writer, item, claim id and lease token. `write preview` verifies that claim and shows only the immutable candidate target plus exact `note.md` / `note.html`; no authorization exists yet. Parallel write is unsupported.
 
-`next-write` intentionally rejects values other than `--limit 1`. Preparing Zotero candidates is parallel; writing Zotero notes is serial because each write has an external side effect and must be immediately verified before the next write.
+After candidate preview, the controller must obtain the user's explicit real-write intent. Only then may the external agent run `$paper_reader zotero authorize` for that candidate with the external claim id. Before `write begin`, that immutable authorization must have at least 30 seconds remaining and match the claim id, lease token and candidate digest. Begin atomically consumes its nonce and commits `write.started` before returning the exact MCP envelope. A same-request replay has `replayed=true` and must not be sent again; a new request id cannot create a second start.
 
-Before each MCP `write_note` call, show the target Zotero item title or key plus the `note.md` and `note.html` preview contents from the candidate run. The write call must use the `note.html` contents, not Markdown.
+Only the external agent may send that envelope through MCP `write_note` at most once. Then it runs `$paper_reader` read-only verification and commits `paper_reader_batch.write-result.v2`. Any crash/error/expiry after `write.started` becomes uncertain, never queued, and must use read-only `write reconcile` before retry. Exact parent + title + canonical hash gives one -> written, zero -> retry-confirmation-required, many -> blocked.
 
 ## Fallback Mode: Local PDF Pre-Extraction
 
-When outer-agent parallelism is unavailable, run `uv run paper_reader_batch prepare-local-pdfs <batch_run> --concurrency <N> --paper-reader-root <paper_reader_root>` to prepare local PDF analysis bundles in parallel. A single agent then runs `next` and `worker-prompt`; prompts for prepared PDF items must continue from `prepared_analysis_dir` and must not run `prepare-pdf` again unless the prepared bundle is missing or unreadable. Re-running `prepare-local-pdfs` only processes pending PDF items; use `retry-failed` before retrying failed or interrupted work.
+When outer-agent parallelism is unavailable, use `uv run paper_reader_batch local-prepare claim <batch_run> --request-id UUID` for fallback pre-extraction. Local-prepare leases default to 900 seconds and support grouped renew/finish/release/retry. A single reader later continues only from the exact V2 preparation attempt returned by `$paper_reader`.
 
-The fallback calls `$paper_reader prepare-pdf --json-output <temp-json>` and
-reads that file as the stable machine result. Stdout JSON and `run.json`
-recovery are compatibility fallbacks. `run.json` recovery is valid only when the
-manifest says `status=prepared` and the expected analysis artifacts are
-readable; an initialized but incomplete run must stay failed or pending for
-retry.
+Local preparation may delegate only to an explicitly configured `--paper-reader-root` grouped V2 command and must validate its returned identity/schema. Finish requires the exact attempt plus source absolute path/size/SHA-256; never recover by glob, filename stem, mtime, V1 manifest or stdout guessing. Worker and local-prepare lanes share same-PDF mutual exclusion.

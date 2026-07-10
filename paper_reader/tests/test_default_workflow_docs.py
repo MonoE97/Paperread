@@ -3,6 +3,7 @@ from pathlib import Path
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = SKILL_ROOT.parent
 SKILL = SKILL_ROOT / "SKILL.md"
 PYPROJECT = SKILL_ROOT / "pyproject.toml"
 OPENAI_YAML = SKILL_ROOT / "agents" / "openai.yaml"
@@ -82,11 +83,37 @@ def test_skill_body_routes_from_skill_root_and_preserves_boundaries() -> None:
     _metadata, body = parse_frontmatter(SKILL)
 
     for phrase in [
+        "Paper Reader 2.0 target contract",
+        "grouped CLI",
+        "paper_reader.run.v2",
+        "paper_reader.summary.v2",
+        "paper_reader.review.v2",
+        "paper_reader.review-package.v2",
+        "paper_reader.candidate.v2",
+        "paper_reader.write-authorization.v2",
+        "paper_reader.verification.v2",
+        "paper_reader.reconciliation.v2",
+        "paper_reader.command-result.v2",
+        "extra=forbid",
         "skill root",
         "uv --version",
         "uv sync --locked",
         "uv python install 3.13",
         "uv run paper_reader --help",
+        "uv run paper_reader route",
+        "uv run paper_reader run init-local",
+        "uv run paper_reader run init-zotero",
+        "uv run paper_reader run prepare",
+        "uv run paper_reader run status",
+        "uv run paper_reader run validate",
+        "uv run paper_reader review validate",
+        "uv run paper_reader review seal",
+        "uv run paper_reader candidate build",
+        "uv run paper_reader local publish",
+        "uv run paper_reader zotero authorize",
+        "uv run paper_reader zotero verify",
+        "uv run paper_reader zotero reconcile",
+        "uv run paper_reader maintenance",
         "Typical Use",
         "references/pdf-path-workflow.md",
         "references/zotero-workflow.md",
@@ -97,6 +124,10 @@ def test_skill_body_routes_from_skill_root_and_preserves_boundaries() -> None:
         "figure_context.md",
         "section_context.md",
         "Chinese-first",
+        "immutable candidate",
+        "immutable authorization",
+        "unsupported_run_schema",
+        "V1/unversioned artifacts are historical-only",
         "MCP `write_note`",
     ]:
         assert phrase in body
@@ -118,6 +149,9 @@ def test_openai_agent_metadata_matches_skill() -> None:
         "short_description:",
         "default_prompt:",
         "allow_implicit_invocation: true",
+        "Paper Reader 2.0",
+        "grouped CLI",
+        "historical-only",
     ]:
         assert phrase in text
 
@@ -137,35 +171,83 @@ def test_project_metadata_is_skill_root_relative() -> None:
 
 
 def test_references_use_skill_root_paths_and_workflow_terms() -> None:
-    combined = "\n".join(
-        read(path) for path in [SKILL, ZOTERO_REFERENCE, PDF_REFERENCE, SUMMARY_REFERENCE]
-    )
+    zotero = read(ZOTERO_REFERENCE)
+    pdf = read(PDF_REFERENCE)
+    summary = read(SUMMARY_REFERENCE)
+
+    for text in [zotero, pdf]:
+        for phrase in [
+            "uv --version",
+            "uv sync --locked",
+            "uv python install 3.13",
+            "uv run paper_reader --help",
+        ]:
+            assert phrase in text
+
+    for text in [zotero, pdf, summary]:
+        for phrase in [
+            "Paper Reader 2.0 Target Contract",
+            "historical-only",
+            "unsupported_run_schema",
+        ]:
+            assert phrase in text
 
     for phrase in [
-        "uv --version",
-        "uv sync --locked",
-        "uv python install 3.13",
-        "uv run paper_reader --help",
-        "uv run paper_reader",
         "scripts/capture-secondary-url.mjs",
-        "prepare-pdf",
-        "prepare-write-candidate",
-        "prepare-local-note-candidate",
+        "uv run paper_reader route",
+        "uv run paper_reader run init-zotero",
+        "uv run paper_reader run prepare",
+        "uv run paper_reader run validate",
+        "uv run paper_reader review validate",
+        "uv run paper_reader review seal",
+        "uv run paper_reader candidate build",
+        "uv run paper_reader zotero authorize",
+        "uv run paper_reader zotero verify",
+        "uv run paper_reader zotero reconcile",
         "Local PDF path and directory path inputs skip Zotero lookup and duplicate checks",
         "Existing local paths are not Zotero title fragments",
         "write_note",
-        "verify-zotero-note",
-        "refresh-live-notes",
-        "write-payload.json",
+        "canonical HTML hash",
         "context.md",
         "figure_context.md",
         "section_context.md",
         "secondary_context_unavailable",
+        "unsupported_run_schema",
     ]:
-        assert phrase in combined
+        assert phrase in zotero
 
-    for stale_phrase in ["repo root", "uv sync\n"]:
-        assert stale_phrase not in combined
+    for phrase in [
+        "uv run paper_reader route",
+        "uv run paper_reader run init-local",
+        "uv run paper_reader run prepare",
+        "uv run paper_reader run status",
+        "uv run paper_reader run validate",
+        "uv run paper_reader review validate",
+        "uv run paper_reader review seal",
+        "uv run paper_reader candidate build",
+        "uv run paper_reader local publish",
+        "Local PDF path and directory path inputs skip Zotero lookup and duplicate checks",
+        "Existing local paths are not Zotero title fragments",
+        "context.md",
+        "figure_context.md",
+        "section_context.md",
+        "unsupported_run_schema",
+    ]:
+        assert phrase in pdf
+
+    for path in [SKILL, ZOTERO_REFERENCE, PDF_REFERENCE, SUMMARY_REFERENCE]:
+        text = read(path)
+        for stale_phrase in [
+            "repo root",
+            "uv sync\n",
+            "uv run paper_reader create-run",
+            "uv run paper_reader prepare-pdf",
+            "uv run paper_reader prepare-write-candidate",
+            "uv run paper_reader prepare-local-note-candidate",
+            "trusted-summary",
+            "--max-pages",
+        ]:
+            assert stale_phrase not in text
 
 
 def test_zotero_reference_keeps_single_paper_write_safety_contract() -> None:
@@ -174,6 +256,9 @@ def test_zotero_reference_keeps_single_paper_write_safety_contract() -> None:
     for phrase in [
         "search_library",
         "get_item_details",
+        "raw discovery bundle",
+        "search_library response",
+        "selected item details",
         "write_note",
         "https://github.com/cookjohn/zotero-mcp#readme",
         "zotero-mcp-plugin",
@@ -181,16 +266,20 @@ def test_zotero_reference_keeps_single_paper_write_safety_contract() -> None:
         "runs/YYYY-MM-DD/<title-slug>/",
         "note.md",
         "note.html",
-        "write-payload.json",
         "same normalized title",
-        "stop before create-run",
-        "save-item-details",
-        "prepare-item",
+        "uv run paper_reader run init-zotero",
+        "uv run paper_reader run prepare",
         "section_context.md",
         "not a canonical evidence source",
-        "prepare-write-candidate",
+        "paper_reader.candidate.v2",
+        "paper_reader.write-authorization.v2",
+        "immutable candidate",
+        "TTL",
+        "300 seconds",
+        "at most once",
         'write_note(action="create"',
-        "verify-zotero-note",
+        "uv run paper_reader zotero verify",
+        "uv run paper_reader zotero reconcile",
         "HTTP JSON-RPC fallback",
         "http://127.0.0.1:23120/mcp",
         "NO_PROXY",
@@ -205,14 +294,19 @@ def test_pdf_path_reference_forbids_zotero_write_path() -> None:
     text = read(PDF_REFERENCE)
 
     for phrase in [
-        "prepare-pdf",
+        "uv run paper_reader run init-local",
+        "uv run paper_reader run prepare",
+        "uv run paper_reader review seal",
+        "uv run paper_reader candidate build",
+        "uv run paper_reader local publish",
         "<pdf_stem>_analysis/",
         "<pdf_stem>_note.md",
         "_v2",
-        "prepare-local-note-candidate",
+        "immutable candidate",
+        "no-replace",
+        "rebuild the candidate",
         "must not write Zotero",
-        "must not call refresh-live-notes",
-        "must not create write-payload.json",
+        "must not create a Zotero authorization",
         "context.md",
         "figure_context.md",
         "not a canonical evidence source",
@@ -226,6 +320,10 @@ def test_summary_reference_documents_rendered_chinese_fields() -> None:
     text = read(SUMMARY_REFERENCE)
 
     for phrase in [
+        "paper_reader.summary.v2",
+        "paper_reader.review.v2",
+        "paper_reader.review-package.v2",
+        "extra=forbid",
         "gate-required",
         "quality-recommended",
         "missing quality-recommended fields",
@@ -263,6 +361,36 @@ def test_summary_reference_documents_rendered_chinese_fields() -> None:
         "applicability_limits",
     ]:
         assert quality_field not in hard_required_section
+
+
+def test_root_agents_defines_breaking_v2_public_contract() -> None:
+    text = read(REPO_ROOT / "AGENTS.md")
+
+    for phrase in [
+        "Paper Reader 2.0",
+        "binding target contract",
+        "2.0.0",
+        "grouped CLI",
+        "paper_reader.run.v2",
+        "paper_reader.summary.v2",
+        "paper_reader.review.v2",
+        "paper_reader.review-package.v2",
+        "paper_reader.candidate.v2",
+        "paper_reader.write-authorization.v2",
+        "paper_reader.verification.v2",
+        "paper_reader.reconciliation.v2",
+        "paper_reader.command-result.v2",
+        "extra=forbid",
+        "unsupported_run_schema",
+        "no aliases",
+        "historical-only",
+        "second explicit deletion authorization",
+        "append-only hash-chain",
+        "lease",
+        "external agent",
+        "MCP `write_note`",
+    ]:
+        assert phrase in text
 
 
 def test_capture_secondary_script_is_in_skill_bundle() -> None:

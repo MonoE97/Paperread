@@ -1,6 +1,6 @@
-# Zotero Workflow
+# Zotero Workflow — Paper Reader 2.0 Target Contract
 
-Use this when the user provides a Zotero title or title fragment. Run commands from the skill root. Local PDF path and directory path inputs skip Zotero lookup and duplicate checks. Existing local paths are not Zotero title fragments.
+Use this when the user provides a Zotero title or title fragment. This is the binding grouped-CLI target contract for staged Paper Reader 2.0 implementation; it does not claim runtime completion before the 2.0 implementation and release tasks finish. Run commands from the skill root. Local PDF path and directory path inputs skip Zotero lookup and duplicate checks. Existing local paths are not Zotero title fragments.
 
 ## Setup
 
@@ -16,7 +16,7 @@ If `uv sync --locked` cannot find Python `>=3.13`, run `uv python install 3.13` 
 
 ## Output Location
 
-By default, `create-run` writes local artifacts under `<skill_root>/runs/YYYY-MM-DD/<title-slug>/`. Keep `mcp-response.json`, `item-details.json`, `metadata.json`, `context.md`, `section_context.md`, optional figure artifacts, `summary.json`, and `review.json` in that run directory. `prepare-write-candidate` adds `note.md`, `note.html`, previews, `note-tags.json`, `gate-report.json`, and `write-payload.json` in the same directory.
+By default, `uv run paper_reader run init-zotero` allocates a V2 run under `<skill_root>/runs/YYYY-MM-DD/<title-slug>/`. The run owns immutable raw and normalized source snapshots, `evidence/<evidence_id>/`, the sealed review package, immutable candidates, immutable authorizations, verification and reconciliation records. Candidate artifacts include `note.md` and `note.html`, but neither file is authority to write without a matching unexpired `paper_reader.write-authorization.v2`.
 
 ## Tool Discovery
 
@@ -31,23 +31,24 @@ If native MCP tools are not injected, use the local Zotero MCP endpoint `http://
 
 ## Steps
 
-1. Before searching Zotero, confirm the input is non-path text. Existing `.pdf` paths must use the local PDF path workflow, and existing directory paths must be delegated to `$paper_reader_batch`; neither path type should trigger Zotero lookup or duplicate checks.
-2. Search exact title first. If duplicate entries have the same normalized title, stop before create-run and ask the user to de-duplicate in Zotero.
-3. Create the run directory with `uv run paper_reader create-run --title "<title>" --item-key "<item_key>"`.
-4. Save the raw `get_item_details(mode="complete")` response as `<run_dir>/mcp-response.json`.
-5. Normalize item details:
+1. Run `uv run paper_reader route` before Zotero search. Existing `.pdf` paths must use the local PDF path workflow, existing directory paths must be delegated to `$paper_reader_batch`, and missing path-like input must fail as `unsupported_local_path`; none may trigger Zotero lookup or duplicate checks.
+2. Use `search_library` for exact-title resolution. Save the exact `search_library response` together with the selected item details from `get_item_details(mode="complete")` as one unmodified raw discovery bundle. The bundle must preserve every search candidate needed to prove whether multiple entries have the same normalized title and identify the exact selected item key. If duplicates exist, stop before run allocation/lock/mutation and ask the user to de-duplicate in Zotero.
+3. Initialize from the saved raw discovery bundle and exact expected item key:
 
 ```bash
-uv run paper_reader save-item-details <run_dir>/mcp-response.json --output <run_dir>/item-details.json --raw-output <run_dir>/item-details.raw.json
+uv run paper_reader run init-zotero --raw-mcp-response <raw-discovery.json> --expected-item-key <item_key>
 ```
 
-6. Prepare the bundle:
+The command must bind raw and normalized source snapshots. Item-key mismatch or ambiguous normalized-title matches are blockers.
+
+4. Prepare immutable full-PDF evidence by default:
 
 ```bash
-uv run paper_reader prepare-item <run_dir>/item-details.json --workdir <run_dir>
+uv run paper_reader run prepare <run_dir>
+uv run paper_reader run validate <run_dir>
 ```
 
-7. If `secondary_sources.json` lists Extra/web URLs, capture each source for cross-check only:
+5. If `secondary_sources.json` lists Extra/web URLs, capture each source for cross-check only:
 
 ```bash
 mkdir -p <run_dir>/secondary_contexts
@@ -56,26 +57,48 @@ node scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_cont
 
 Captured files use `source_status: secondary_context` when usable. Unavailable captures use `source_status: secondary_context_unavailable`, including warnings such as `navigation_timeout`. Secondary context must not cite secondary context in `evidence_summary`; it is only for cross-checking and background.
 
-8. Read `context.md`, `section_context.md`, and `figure_context.md` if available. `section_context.md` is not a canonical evidence source. Final locators must use canonical forms such as `context.md page 3 section Methods`, `context.md page 6 section Results table_candidate 1`, or `figure_context.md fig_p4_1`. Bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, and secondary context paths are invalid.
-9. Write `summary.json` and `review.json`.
-10. Run the deterministic review chain:
+6. Read `context.md`, `section_context.md`, and `figure_context.md` if available. `section_context.md` is not a canonical evidence source. Final locators must use canonical forms such as `context.md page 3 section Methods`, `context.md page 6 section Results table_candidate 1`, or `figure_context.md fig_p4_1`. Bare `context.md` / `figure_context.md`, prose locators, `section_context.md`, and secondary context paths are invalid.
+7. Create `paper_reader.summary.v2` and `paper_reader.review.v2`, then validate and seal an immutable `paper_reader.review-package.v2`:
 
 ```bash
-uv run paper_reader validate-summary-json <run_dir>/summary.json
-uv run paper_reader apply-review <run_dir>/summary.json <run_dir>/review.json
-uv run paper_reader lint-summary <run_dir>/summary.json
-uv run paper_reader validate-trusted-summary <run_dir>/summary.json
+uv run paper_reader review validate <run_dir>
+uv run paper_reader review seal <run_dir>
 ```
 
-11. Prepare a Zotero write candidate only when Zotero output is explicitly requested:
+Failed review, changed summary hash, unresolved locator or rendered English prose blocks sealing and candidate creation.
+
+8. Refresh the read-only parent/children snapshot and build `paper_reader.candidate.v2`:
 
 ```bash
-uv run paper_reader prepare-write-candidate <run_dir> --paper-title "<paper title>" --generated-date YYYY-MM-DD
+uv run paper_reader candidate build <run_dir>
 ```
 
-12. Preview the target Zotero title, `note.md`, and `note.html`.
-13. After explicit write intent, call only `zotero-mcp write_note(action="create", parentKey=<payload parentKey>, content=<contents of note.html>, tags=<payload tags>)`.
-14. Verify with `verify-zotero-note` using expected parent, title, headings, tags, and content hash from `write-payload.json`.
+The immutable candidate binds run/source/evidence/review identity, exact parent fingerprint, exact versioned title, tags, `note.md`, `note.html`, canonical HTML hash, file sizes and artifact hashes. Preview the target item, fixed title, tags, `note.md` and `note.html` before asking for write intent.
+
+9. Only after explicit real-write intent, create `paper_reader.write-authorization.v2`:
+
+```bash
+uv run paper_reader zotero authorize <candidate>
+```
+
+Authorization accepts no parent/title/content/tag overrides. It re-hashes all artifacts, refreshes the read-only parent/children snapshot, verifies title availability and parent fingerprint, takes a local parent lease, then binds the exact HTML, canonical HTML hash/length, tags, candidate digest, parent snapshot, external claim id, random nonce/token and TTL. TTL defaults to and may not exceed 300 seconds.
+
+10. The external agent is the only writer. It may send the authorization's exact MCP envelope at most once: `zotero-mcp write_note(action="create", parentKey=<authorization parentKey>, content=<exact authorization HTML>, tags=<authorization tags>)`. Neither the CLI nor batch runtime may call `write_note`.
+11. Verify immediately:
+
+```bash
+uv run paper_reader zotero verify <authorization> --note-key <created_note_key>
+```
+
+Verification checks exact parent, note key, title, complete tags, required headings, minimum length and canonical HTML hash.
+
+12. If the write outcome is uncertain, never resend automatically. Reconcile read-only:
+
+```bash
+uv run paper_reader zotero reconcile <authorization>
+```
+
+Exact parent + title + canonical HTML hash has three outcomes: one match -> verified; zero -> `not_found` and retry requires explicit confirmation; many -> ambiguous/blocked. Expired authorization remains evidence for verify/reconcile, not permission to write.
 
 ## Boundaries
 
@@ -83,5 +106,7 @@ uv run paper_reader prepare-write-candidate <run_dir> --paper-title "<paper titl
 - Zotero lookup and duplicate blocking apply only to non-path title/title-fragment inputs.
 - Zotero local API and SQLite are read-only in this project.
 - Do not update existing Zotero notes; create a new versioned child note instead.
-- Do not use the PDF local gate as proof of Zotero write readiness.
+- An immutable candidate is not write authority; only its exact current immutable authorization can authorize one external MCP create call.
+- Do not use local publish readiness as proof of Zotero write readiness.
 - Do not cite `section_context.md` or secondary context as canonical evidence.
+- V1/unversioned/unknown artifacts are historical-only and must fail before lock, network or mutation with `unsupported_run_schema`; no alias, migration or fallback is permitted.

@@ -1,6 +1,6 @@
 interface:
   display_name: "paper_reader"
-  short_description: "Evidence-grounded paper reading notes"
-  default_prompt: "Use $paper_reader to analyze this paper and prepare a Chinese structured reading note. If the input is a local PDF path, analyze it locally without Zotero lookup; if it is a local directory path, route it to $paper_reader_batch."
+  short_description: "Paper Reader 2.0 immutable evidence-to-note workflow"
+  default_prompt: "Use $paper_reader under the binding Paper Reader 2.0 target grouped CLI contract, without treating this metadata as proof that staged commands are already implemented. Route existing local PDF and directory paths before Zotero text, keep local PDF output local-only, create immutable review/candidate artifacts, and let only the external agent write an explicitly authorized Zotero note through MCP before strong read-only verification. Reject V1/unversioned inputs as historical-only; do not migrate or fall back."
 policy:
   allow_implicit_invocation: true

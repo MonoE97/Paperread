@@ -1,14 +1,14 @@
 ---
 name: paper_reader_batch
-description: Use when the user asks to analyze multiple papers from Zotero collections, Zotero titles, PDF folders, or PDF paths by dispatching each item to $paper_reader and producing a resumable batch report while keeping PDF items local-only.
+description: Use when the user asks to analyze multiple papers from Zotero collections, Zotero titles, PDF folders, or PDF paths under the Paper Reader Batch 2.0 journal-and-lease contract, dispatching each item to $paper_reader while keeping PDF items local-only.
 ---
 
 # paper_reader_batch
 
-paper_reader_batch orchestrates multiple paper reads. It does not perform deep
+paper_reader_batch orchestrates multiple paper reads. This file defines the Paper Reader Batch 2.0 target contract and grouped CLI. It is binding for staged implementation and does not claim every grouped command is already present before the 2.0 runtime and release tasks finish. It does not perform deep
 single-paper analysis itself. Each paper must be dispatched to `$paper_reader`,
 which remains the owner of extraction, evidence rules, summary schema, note
-rendering, and Zotero write gates.
+rendering, immutable candidates/authorizations, and Zotero verification.
 
 ## Setup
 
@@ -30,12 +30,44 @@ from Zotero preferences, normally `http://127.0.0.1:23120/mcp`.
 
 ## Typical Use
 
-- Zotero collection or multiple Zotero titles: use `$paper_reader_batch` to build a
-  manifest, dispatch each item to `$paper_reader`, then use `next-write` and
-  `record-write` for verified Zotero note creation.
+- Zotero collection or multiple Zotero titles: use `$paper_reader_batch` to build a strict V2 manifest, initialize the append-only journal, claim leased work, dispatch each item to `$paper_reader`, and process the recoverable serial write lane through immutable single-paper authorizations.
 - Local PDF folder or multiple PDF paths: use `$paper_reader_batch` to dispatch
   each PDF to `$paper_reader` local PDF workflow and generate a batch report; PDF
   items remain local-output only and skip Zotero lookup or duplicate checks.
+
+## Paper Reader Batch 2.0 Grouped CLI
+
+The public grouped CLI is:
+
+```text
+uv run paper_reader_batch manifest
+uv run paper_reader_batch run init
+uv run paper_reader_batch run validate
+uv run paper_reader_batch run status
+uv run paper_reader_batch run recover
+uv run paper_reader_batch run report
+uv run paper_reader_batch worker claim
+uv run paper_reader_batch worker renew
+uv run paper_reader_batch worker finish
+uv run paper_reader_batch worker release
+uv run paper_reader_batch worker retry
+uv run paper_reader_batch local-prepare claim
+uv run paper_reader_batch local-prepare renew
+uv run paper_reader_batch local-prepare finish
+uv run paper_reader_batch local-prepare release
+uv run paper_reader_batch local-prepare retry
+uv run paper_reader_batch write claim
+uv run paper_reader_batch write preview
+uv run paper_reader_batch write renew
+uv run paper_reader_batch write release
+uv run paper_reader_batch write begin
+uv run paper_reader_batch write commit
+uv run paper_reader_batch write mark-uncertain
+uv run paper_reader_batch write reconcile
+uv run paper_reader_batch write retry
+```
+
+All state mutation requires `--request-id UUID`. Operational commands emit exactly one `paper_reader_batch.command-result.v2` JSON object on stdout and diagnostics on stderr. V1/unversioned artifacts are historical-only and fail before lock or mutation with `unsupported_run_schema`; there are no aliases, migrations, schema guessing or hidden fallbacks.
 
 ## Routing
 
@@ -46,27 +78,17 @@ Use `references/batch-workflow.md` for all batch workflows:
 - Local PDF folder.
 - Multiple local PDF paths.
 
-Use `references/parallel-dispatch.md` for concurrency, worker prompt,
-fallback pre-extraction, and serial write rules. Use
-`references/worker-result-contract.md` when constructing or validating item
-result, local prepare result, or write result JSON.
+Use `references/parallel-dispatch.md` for concurrency, worker/local preparation leases, fallback pre-extraction, and recoverable serial write rules. Use `references/worker-result-contract.md` for strict V2 result and reconciliation schemas.
 
-PDF folder and PDF path items are local-only: do not run Zotero lookup, duplicate checks, next-write, or Zotero write-through for them. Manifest builders store these items as `pdf_path` with `expected_output=local_note`.
+PDF folder and PDF path items are local-only: do not run Zotero lookup, duplicate checks, or Zotero write-through for them. Manifest builders store these items as `pdf_path` with `expected_output=local_note`.
 An existing directory path passed through `$paper_reader` should be routed here
 instead of being treated as a Zotero title fragment.
 
 Default Codex concurrency is 3. When outer-agent parallelism is unavailable,
-use `prepare-local-pdfs` as the fallback pre-extraction path for local PDF
-items, then continue deep reading from the prepared bundles. `prepare-local-pdfs`
-uses `$paper_reader prepare-pdf --json-output` as the stable machine channel; if
-it must recover from `run.json`, accept only a manifest with `status=prepared`
-and readable core analysis artifacts. Initialized or partial local PDF bundles
-are not prepared bundles. The default write policy is `zotero_write`:
-Zotero-backed items must proceed from prepared candidates to MCP `write_note`,
-read-only verification, and `record-write`. Pass `--write-policy prepare_only`
-only for an explicit dry-run. PDF items remain local-output only; a pure local
-PDF batch report should be read as `effective_write_policy=local_only`. The
-batch CLI must not call Zotero MCP directly; the outer agent performs the write
-step from `next-write`. Per-paper 30-second report entries must be extracted
-from each single-paper note's `30 秒结论` row, with structured fallback only
-when that row is unavailable.
+claim local-prepare leases as the fallback pre-extraction path for local PDF items, then continue deep reading from the exact prepared attempt. Worker and local-prepare leases default to 900 seconds; stale lease tokens, changed source identity and same-PDF concurrent work are rejected.
+
+The append-only hash-chain at `events/<20-digit-seq>.json` is source of truth; `state.json` is only a reconstructable snapshot. `.run.lock`, manifest hash binding and request-id idempotency protect mutation. Journal gaps or hash failures return `journal_corrupt` and must not mutate.
+
+Every successful worker result must bind a sealed `$paper_reader` review package whose fully resolved rendered note passed the Chinese-first gate; batch must not accept a candidate as a substitute for that proof.
+
+The default write policy is `zotero_write`; pass `--write-policy prepare_only` only for explicit dry-run. PDF items remain local-output only and a pure local PDF report uses `effective_write_policy=local_only`. The write sequence is fixed: claim exactly one candidate and its claim/lease identity -> preview that candidate while no authorization exists -> obtain the user's explicit real-write intent -> let the external agent call `$paper_reader zotero authorize` with the external claim id -> pass the resulting immutable authorization to batch `write begin`. Begin needs at least 30 seconds of authorization lifetime, commits `write.started` before returning the exact envelope, and a started crash becomes uncertain, never queued. The batch CLI must not call Zotero MCP `write_note`; only the external agent may send the envelope and the lane must verify or reconcile before progress. Per-paper report entries come from the single note's `30 秒结论`, with fallback to `tldr` then `one_sentence_summary`, preserving `takeaway_source_sha256`.

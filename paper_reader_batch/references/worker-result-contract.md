@@ -1,100 +1,43 @@
-# Worker Result Contract
+# Worker Result Contract — Paper Reader Batch 2.0 Target Contract
 
-Worker result files are durable handoff artifacts between the outer agent and `paper_reader_batch`. They must use absolute paths and must describe artifacts created by `$paper_reader`, not synthesized batch-level conclusions.
+Worker, local-prepare, write and reconciliation results are durable handoff artifacts between the external agent, `$paper_reader`, and `paper_reader_batch`. This binding target contract requires strict Pydantic v2 models with `extra=forbid`, canonical JSON digests, absolute source/artifact paths and exact V2 identities. Results point to artifacts created by `$paper_reader`; batch never synthesizes single-paper conclusions.
+
+Active schemas are only:
+
+- `paper_reader_batch.manifest.v2`
+- `paper_reader_batch.state.v2`
+- `paper_reader_batch.event.v2`
+- `paper_reader_batch.worker-result.v2`
+- `paper_reader_batch.local-prepare-result.v2`
+- `paper_reader_batch.write-result.v2`
+- `paper_reader_batch.reconciliation.v2`
+- `paper_reader_batch.report.v2`
+- `paper_reader_batch.command-result.v2`
+
+V1/unversioned/unknown files are historical-only. Loaders reject them read-only with `unsupported_run_schema` before `.run.lock`, output allocation or journal mutation; no alias, migration, dual loader, schema guessing or fallback is permitted.
 
 ## Zotero Candidate Success
 
-```json
-{
-  "schema_version": "paper_reader_batch.item-result.v1",
-  "item_id": "001",
-  "worker_id": "worker-001",
-  "attempt_count": 1,
-  "status": "succeeded",
-  "paper_reader_run_dir": "/abs/path/to/paper_reader/run",
-  "summary_json": "/abs/path/to/summary.json",
-  "note_md": "/abs/path/to/note.md",
-  "note_html": "/abs/path/to/note.html",
-  "gate_report": "/abs/path/to/gate-report.json",
-  "write_payload": "/abs/path/to/write-payload.json",
-  "local_note_path": "",
-  "local_gate_report": "",
-  "failure_reason": ""
-}
-```
-
-`write_payload` must be present only when `gate_report` is `write_ready`. The batch CLI records the path and later emits it through `next-write`; it must not call Zotero MCP `write_note`.
+`paper_reader_batch.worker-result.v2` for a Zotero item binds manifest/item id, claim id, exact worker attempt, lease token, result status, content digest and the referenced `paper_reader.run.v2`, `paper_reader.review-package.v2` and `paper_reader.candidate.v2` identities. The sealed review package must prove that the fully resolved rendered note passed the Chinese-first gate. Candidate path/digest, source parent fingerprint, fixed note title and all referenced artifact hashes must agree. A worker result never contains mutable write authority and the batch CLI must not call Zotero MCP `write_note`.
 
 ## Local PDF Success
 
-```json
-{
-  "schema_version": "paper_reader_batch.item-result.v1",
-  "item_id": "003",
-  "worker_id": "worker-003",
-  "attempt_count": 1,
-  "status": "succeeded",
-  "paper_reader_run_dir": "/abs/path/to/Paper_analysis",
-  "summary_json": "/abs/path/to/Paper_analysis/summary.json",
-  "note_md": "",
-  "note_html": "",
-  "gate_report": "",
-  "write_payload": "",
-  "local_note_path": "/abs/path/to/Paper_note.md",
-  "local_gate_report": "/abs/path/to/Paper_analysis/local-gate-report.json",
-  "failure_reason": ""
-}
-```
-
-Local PDF results are local-output only. They must not contain a `write_payload`.
+`paper_reader_batch.worker-result.v2` for a local PDF binds the exact resolved source path/size/SHA-256, claim id, exact worker attempt, lease token, `paper_reader.run.v2`, sealed review package, immutable local candidate and no-replace publication result. The same Chinese-first resolved-render proof is mandatory. Local PDF results are local-output only and must not contain a Zotero candidate, authorization, write-lane claim or note key.
 
 ## Failure
 
-```json
-{
-  "schema_version": "paper_reader_batch.item-result.v1",
-  "item_id": "001",
-  "worker_id": "worker-001",
-  "attempt_count": 1,
-  "status": "failed",
-  "failure_reason": "duplicate Zotero title"
-}
-```
+Failed/blocked `paper_reader_batch.worker-result.v2` still binds manifest/item, exact attempt and lease token and supplies a structured error code plus safe message. Finish records it once in the hash-chain; retry is a separate explicit request id and creates a new attempt. A stale token or attempt is rejected rather than recorded as failure.
 
 ## Local Prepare Fallback Result
 
-```json
-{
-  "schema_version": "paper_reader_batch.local-prepare-result.v1",
-  "item_id": "003",
-  "status": "prepared",
-  "analysis_dir": "/abs/path/to/Paper_analysis",
-  "final_note_path": "/abs/path/to/Paper_note.md",
-  "manifest_path": "/abs/path/to/Paper_analysis/run.json",
-  "failure_reason": ""
-}
-```
-
-A `prepared` local prepare result means the underlying `$paper_reader
-prepare-pdf` bundle is complete, not merely initialized. When the result is
-recovered from `run.json`, that manifest must have `status: "prepared"` and
-readable `metadata_json`, `extract_json`, `section_context_md`,
-`secondary_sources_json`, plus `context.md` in the analysis directory. Recovery
-may include an optional `warning` field, for example when the machine JSON file
-was missing and `run.json` was used.
+`paper_reader_batch.local-prepare-result.v2` binds manifest/item, exact local-prepare attempt and lease token, source absolute path/size/SHA-256, returned `paper_reader.run.v2`, evidence id/digest and the explicit `--paper-reader-root` identity. `prepared` means the V2 run validates and the referenced evidence is complete. Recovery by glob, filename stem, mtime, stdout parsing or a historical manifest is forbidden.
 
 ## Verified Zotero Write Result
 
-```json
-{
-  "schema_version": "paper_reader_batch.write-result.v1",
-  "item_id": "001",
-  "status": "written",
-  "note_key": "ABC12345",
-  "parent_key": "PARENT1",
-  "contentSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "verify_report": "/abs/path/to/verify-report.json"
-}
-```
+`paper_reader_batch.write-result.v2` binds item, write claim/lease, `write.started` event, candidate digest, authorization digest/nonce, external claim id, exact note/parent keys, canonical HTML hash and `paper_reader.verification.v2`. Commit accepts only passed verification whose parent, title, complete tags, headings, length and hash match the immutable authorization.
 
-The `verify_report` JSON must have `status: "passed"` and matching `noteKey`, `parentKey`, and `contentSha256`.
+If the external outcome is unknown, record uncertain instead of fabricating a result. `paper_reader_batch.reconciliation.v2` binds the same candidate/authorization and read-only search evidence: one exact parent + title + hash match may become written; zero requires explicit no-match acknowledgement plus new authorization/request id; many remains blocked. Expired authorization is valid evidence for verification/reconciliation but never write authority.
+
+## Command Result
+
+Every operational invocation prints exactly one `paper_reader_batch.command-result.v2` JSON object on stdout. It includes command identity, request id when applicable, replay status, result or structured error; diagnostics go to stderr. A replayed `write begin` envelope must never be sent again.

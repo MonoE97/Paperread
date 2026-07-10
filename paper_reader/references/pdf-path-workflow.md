@@ -1,6 +1,6 @@
-# PDF Path Workflow
+# PDF Path Workflow — Paper Reader 2.0 Target Contract
 
-Use this when the user provides a local PDF path. Local PDF path and directory path inputs skip Zotero lookup and duplicate checks, including same-title or same-DOI checks. Existing local paths are not Zotero title fragments.
+Use this when the user provides a local PDF path. This is the binding grouped-CLI target contract for staged Paper Reader 2.0 implementation. Local PDF path and directory path inputs skip Zotero lookup and duplicate checks, including same-title or same-DOI checks. Existing local paths are not Zotero title fragments.
 
 ## Setup
 
@@ -16,7 +16,7 @@ If `uv sync --locked` cannot find Python `>=3.13`, run `uv python install 3.13` 
 
 ## Output Location
 
-`prepare-pdf` writes the analysis bundle beside the PDF. The first run creates `<pdf_stem>_analysis/` for analysis artifacts and records `<pdf_stem>_note.md` as the final Markdown note target. It does not write the final note by itself; the final note is written only after the agent creates `summary.json` / `review.json` and `prepare-local-note-candidate` passes the local gate. Repeated runs preserve existing outputs with `_v2`, `_v3`, and later suffixes.
+`uv run paper_reader run init-local` resolves and fingerprints the PDF exactly once, then atomically reserves `<pdf_stem>_analysis/` beside it and fixes `<pdf_stem>_note.md` as the candidate publication target. Repeated runs preserve every existing V1/V2 directory and note by reserving `_v2`, `_v3`, and later suffixes. Initialization does not summarize or publish the note.
 
 ## Network Boundary
 
@@ -26,50 +26,60 @@ If the user provides an existing local directory path instead of one PDF, delega
 
 ## Steps
 
-1. Prepare local analysis artifacts beside the PDF:
+1. Confirm path-first routing and initialize the local run:
 
 ```bash
-uv run paper_reader prepare-pdf "/path/to/paper.pdf"
+uv run paper_reader route "/path/to/paper.pdf"
+uv run paper_reader run init-local "/path/to/paper.pdf"
 ```
 
-The first run writes `<pdf_stem>_analysis/` and records `<pdf_stem>_note.md` as the final-note target. Repeated runs use `_v2`, `_v3`, and so on without overwriting old notes or analysis directories.
+The source contract binds resolved absolute path, size, SHA-256 and inode identity. Output must not alias the source through a relative path, symlink or hardlink. The first run reserves `<pdf_stem>_analysis/` and `<pdf_stem>_note.md`; later runs use `_v2`, `_v3` and so on without overwriting old notes or analysis directories.
 
-For automation, prefer the explicit machine-readable output file:
+2. Prepare immutable full-PDF evidence by default:
 
 ```bash
-uv run paper_reader prepare-pdf "/path/to/paper.pdf" --json-output /tmp/prepare-result.json
+uv run paper_reader run prepare <run_dir>
+uv run paper_reader run status <run_dir>
+uv run paper_reader run validate <run_dir>
 ```
 
-The command still prints the same JSON payload to stdout for interactive use,
-but batch orchestration should read `--json-output` so diagnostic stdout cannot
-break result parsing.
+Evidence is published under immutable `evidence/<evidence_id>/` with canonical hashes. Operational stdout is exactly one `paper_reader.command-result.v2` JSON object; diagnostics belong on stderr.
 
-2. Read the generated `context.md`, `section_context.md`, and `figure_context.md` if available.
+3. Read `context.md`, `section_context.md`, and `figure_context.md` if available.
 
-3. The agent writes `summary.json` and `review.json` in the analysis directory. `prepare-pdf` does not summarize the paper or write the final note. Use `section_context.md` only as navigation. It is not a canonical evidence source. Evidence locators must use canonical forms: `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, and secondary context paths are invalid.
+4. The agent creates `paper_reader.summary.v2` and `paper_reader.review.v2`. Use `section_context.md` only as navigation; it is not a canonical evidence source. Locators must resolve through `evidence.json` membership and use `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Bare names, prose locators, `section_context.md` and secondary context paths are blockers.
 
-4. Run the deterministic review chain:
+5. Validate and seal review:
 
 ```bash
-uv run paper_reader validate-summary-json <analysis_dir>/summary.json
-uv run paper_reader apply-review <analysis_dir>/summary.json <analysis_dir>/review.json
-uv run paper_reader lint-summary <analysis_dir>/summary.json
-uv run paper_reader validate-trusted-summary <analysis_dir>/summary.json
+uv run paper_reader review validate <run_dir>
+uv run paper_reader review seal <run_dir>
 ```
 
-5. Prepare the local note:
+Sealing emits immutable `paper_reader.review-package.v2`. Failed review, changed summary hash, invalid locators or Chinese-first lint failures after fallback resolution block sealing.
+
+6. Build and preview the immutable candidate:
 
 ```bash
-uv run paper_reader prepare-local-note-candidate <analysis_dir> --generated-date YYYY-MM-DD
+uv run paper_reader candidate build <run_dir>
 ```
 
-This writes `note.md`, `note.html`, previews, `note-tags.json`, `local-gate-report.json`, and the final Markdown note beside the PDF.
+The candidate binds source/evidence/review identities, all artifact hashes/sizes and the fixed final Markdown target. Changing any input or target requires rebuilding the candidate.
+
+7. Publish locally:
+
+```bash
+uv run paper_reader local publish <candidate>
+```
+
+Publication re-hashes all inputs and source identity, then uses same-filesystem atomic no-replace. If the fixed target is occupied, stop and rebuild the candidate against a newly reserved target; never overwrite or silently choose a different path.
 
 ## Hard Boundaries
 
 - The PDF path workflow must not write Zotero.
 - The PDF path workflow must not search Zotero or run duplicate checks.
-- The PDF path workflow must not call refresh-live-notes.
-- The PDF path workflow must not create write-payload.json.
+- The PDF path workflow must not refresh Zotero live notes.
+- The PDF path workflow must not create a Zotero authorization or enter a batch write lane.
 - The PDF path workflow must not treat `section_context.md` as a canonical evidence source.
-- The PDF path workflow is local-output only; if the user later wants Zotero write-through, rerun through the Zotero title workflow.
+- The PDF path workflow is local-output only. A later Zotero request is a new Zotero-title run; the local candidate cannot be converted or migrated.
+- V1/unversioned/unknown artifacts are immutable historical-only inputs and must fail before locks or mutation with `unsupported_run_schema`.

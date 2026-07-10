@@ -1,6 +1,6 @@
 interface:
   display_name: "paper_reader_batch"
-  short_description: "Parallel paper_reader orchestration with local PDF handling"
-  default_prompt: "Use $paper_reader_batch to orchestrate multiple $paper_reader paper analyses, keep PDF folder/path items local-only without Zotero lookup, write only Zotero-backed notes by default, verify them, and produce a batch report."
+  short_description: "Paper Reader Batch 2.0 journaled orchestration"
+  default_prompt: "Use $paper_reader_batch under the binding Paper Reader Batch 2.0 target grouped CLI contract, without treating this metadata as proof that staged commands are already implemented. Route PDF folder/path items to local-only $paper_reader work, require the single-paper Chinese-first sealed-review gate, mutate the batch only through request-id-bound journal events and claim/lease identities, preview the candidate before asking for explicit real-write intent, and only then let the external agent create a claim-bound authorization and call MCP write_note before verification or reconciliation. Reject V1/unversioned artifacts as historical-only; do not migrate or fall back."
 policy:
   allow_implicit_invocation: true

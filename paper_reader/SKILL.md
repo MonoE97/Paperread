@@ -1,11 +1,11 @@
 ---
 name: paper_reader
-description: Use when the user asks to analyze a paper either by Zotero title/title fragment, local PDF path, or local directory path, producing a Chinese structured reading note with evidence-grounded summary, review, and local or Zotero output gates.
+description: Use when the user asks to analyze a paper by Zotero title/title fragment, local PDF path, or local directory path under the Paper Reader 2.0 contract, producing a Chinese structured note with immutable review, candidate, publication, authorization, and verification boundaries.
 ---
 
 # paper_reader
 
-paper_reader is a self-contained paper reading skill. Run bundled CLI commands from the installed skill root with `uv run paper_reader ...` after the skill environment has been synchronized with `uv sync --locked`.
+paper_reader is a self-contained paper reading skill. This file defines the Paper Reader 2.0 target contract and its grouped CLI. It is a binding public contract for staged implementation, not a claim that every grouped command is already present before the 2.0 runtime and release tasks finish. Run bundled commands from the installed skill root with `uv run paper_reader ...` after synchronization with `uv sync --locked`.
 
 ## Environment Setup
 
@@ -23,9 +23,34 @@ For Zotero title workflows, Zotero Desktop and Zotero MCP must already be instal
 
 ## Typical Use
 
-- Zotero title or title fragment: use `$paper_reader` with the paper title. The agent searches Zotero via Zotero MCP, creates a run, prepares evidence artifacts, writes `summary.json` and `review.json`, renders `note.md` and `note.html`, previews the target, writes only through MCP `write_note` after explicit write intent, and verifies the created note.
-- Local PDF path: use `$paper_reader` with a `.pdf` path. `prepare-pdf` prepares `<pdf_stem>_analysis/` beside the PDF and reserves `<pdf_stem>_note.md` as the final-note target. The agent must write `summary.json` and `review.json`, run the deterministic review/lint/trusted-summary chain, then run `prepare-local-note-candidate` to write the final local Markdown note. The workflow never searches Zotero for matching items and never writes Zotero.
+- Zotero title or title fragment: use `$paper_reader` with the paper title. The agent searches through Zotero MCP, saves the exact search inventory plus selected item details as a raw discovery bundle, initializes a V2 run, prepares immutable evidence, validates and seals a review package, builds and previews an immutable candidate, creates a short-lived immutable authorization only after explicit write intent, lets the external agent call MCP `write_note` at most once, then verifies or reconciles read-only.
+- Local PDF path: use `$paper_reader` with a `.pdf` path. The grouped workflow reserves `<pdf_stem>_analysis/` and `<pdf_stem>_note.md`, prepares immutable evidence, seals review, builds an immutable candidate and publishes with no-replace semantics. It never searches Zotero and never creates a Zotero authorization.
 - Local directory path: route to `$paper_reader_batch` with the local PDF folder workflow. Directory input is not a Zotero title fragment.
+
+## Paper Reader 2.0 Grouped CLI
+
+The public grouped CLI is:
+
+```text
+uv run paper_reader route
+uv run paper_reader run init-local
+uv run paper_reader run init-zotero
+uv run paper_reader run prepare
+uv run paper_reader run status
+uv run paper_reader run validate
+uv run paper_reader review validate
+uv run paper_reader review seal
+uv run paper_reader candidate build
+uv run paper_reader local publish
+uv run paper_reader zotero authorize
+uv run paper_reader zotero verify
+uv run paper_reader zotero reconcile
+uv run paper_reader maintenance
+```
+
+Active V2 schema identifiers are `paper_reader.run.v2`, `paper_reader.summary.v2`, `paper_reader.review.v2`, `paper_reader.review-package.v2`, `paper_reader.candidate.v2`, `paper_reader.write-authorization.v2`, `paper_reader.verification.v2`, `paper_reader.reconciliation.v2`, and `paper_reader.command-result.v2`. Every model is strict and uses `extra=forbid`; V2 code must not coerce, guess or accept unknown fields.
+
+Operational commands emit exactly one `paper_reader.command-result.v2` JSON object on stdout and diagnostics on stderr. V1/unversioned artifacts are historical-only and must fail before locks, output allocation, network access or writes with `unsupported_run_schema`; there are no compatibility aliases, migration loaders, schema guessing or hidden V1 fallbacks.
 
 ## Entry Routing
 
@@ -34,14 +59,14 @@ For Zotero title workflows, Zotero Desktop and Zotero MCP must already be instal
 - Local PDF path and directory path inputs skip Zotero lookup and duplicate checks, including same-title or same-DOI checks.
 - Existing local paths are not Zotero title fragments.
 - Only non-path text should be treated as a Zotero title or title fragment and use `references/zotero-workflow.md`.
-- For both modes, use full-PDF extraction by default. Pass `--max-pages` only when the user explicitly asks for debugging or a shortened preview.
-- For both modes, the CLI creates deterministic evidence artifacts; it does not replace the agent's paper-reading step. The agent writes `summary.json` and `review.json` after reading `context.md`, `section_context.md`, and `figure_context.md` when available.
+- For both modes, use full-PDF extraction by default. Use the V2 `--preview-pages` option only when the user explicitly asks for debugging or a shortened preview; preview evidence can never produce a candidate.
+- For both modes, the CLI creates deterministic immutable evidence artifacts; it does not replace the agent's paper-reading step. The agent prepares `paper_reader.summary.v2` and `paper_reader.review.v2` after reading `context.md`, `section_context.md`, and `figure_context.md` when available, then seals `paper_reader.review-package.v2` before candidate construction.
 
 ## Shared Rules
 
 - Final evidence locators in `summary.json` must use canonical forms: `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Do not use bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, or secondary context paths.
 - Secondary context is cross-check material only and must not be cited in `evidence_summary`.
 - Rendered note prose should be Chinese-first while preserving titles, names, formulas, method names, units, evidence locators, and tag keys.
-- Always run the review and gate sequence before treating a note as ready.
-- Zotero writes are allowed only through Zotero MCP `write_note` after explicit user write intent.
+- Always seal review before candidate build; candidates and authorizations are immutable and hash-bound. Any source, evidence, review, target, note, tag or hash change requires rebuilding the successor artifact.
+- Zotero writes are allowed only through the external agent and Zotero MCP `write_note` after explicit user write intent and a valid immutable authorization. The CLI itself must not call MCP `write_note`.
 - Local PDF path analysis is local-output only; it must not call Zotero lookup, duplicate-check, write, or live-note refresh commands.
