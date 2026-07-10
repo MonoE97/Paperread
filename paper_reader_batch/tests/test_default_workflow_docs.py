@@ -159,6 +159,33 @@ def test_parallel_dispatch_declares_claim_bound_authorization_handoff() -> None:
         assert phrase in text
 
 
+def test_batch_authorization_requires_paired_external_identity() -> None:
+    for path in [SKILL, BATCH_WORKFLOW, PARALLEL_DISPATCH]:
+        text = read(path)
+        for phrase in [
+            "Batch authorization requires both --external-claim-id and --write-attempt-id",
+            "both options must appear together",
+            "must not generate `direct_<uuid>` identities",
+        ]:
+            assert phrase in text
+
+
+def test_started_write_lease_expiry_uses_idempotent_recover() -> None:
+    for path in [SKILL, BATCH_WORKFLOW, PARALLEL_DISPATCH]:
+        text = read(path)
+        for phrase in [
+            "write.lease_expired_uncertain",
+            "`run recover` holds `.run.lock`",
+            "expired lease token is neither required nor accepted",
+            "same recover request id replays idempotently",
+            "never returns queued and cannot begin again",
+            "`write mark-uncertain` accepts only an unexpired exact claim/token/write-attempt identity",
+        ]:
+            assert phrase in text
+
+    assert "Any crash/error/expiry after `write.started` uses" not in read(PARALLEL_DISPATCH)
+
+
 def test_batch_docs_exclude_active_v1_commands() -> None:
     for path in [SKILL, BATCH_WORKFLOW, PARALLEL_DISPATCH, WORKER_RESULT_CONTRACT, OPENAI_YAML]:
         text = read(path)

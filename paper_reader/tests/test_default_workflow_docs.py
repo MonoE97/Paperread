@@ -303,6 +303,35 @@ def test_zotero_reference_keeps_single_paper_write_safety_contract() -> None:
     assert "one match -> verified" not in text
 
 
+def test_zotero_reference_defines_direct_authorization_identity() -> None:
+    text = read(ZOTERO_REFERENCE)
+
+    for phrase in [
+        "Direct single-paper authorize",
+        "\nuv run paper_reader zotero authorize <candidate>\n",
+        "two distinct `direct_<uuid>` identities",
+        "same atomic authorization transaction",
+        "persisted in `paper_reader.write-authorization.v2`",
+        "returned in `paper_reader.command-result.v2`",
+        "caller must not synthesize or override",
+    ]:
+        assert phrase in text
+
+
+def test_zotero_reference_defines_batch_authorization_identity() -> None:
+    text = read(ZOTERO_REFERENCE)
+
+    for phrase in [
+        "Batch authorize",
+        "uv run paper_reader zotero authorize <candidate> --external-claim-id <claim_id> --write-attempt-id <write_attempt_id>",
+        "both options must appear together",
+        "partial input is rejected",
+        "batch claim and candidate digest",
+        "must not generate `direct_<uuid>` identities",
+    ]:
+        assert phrase in text
+
+
 def test_pdf_path_reference_forbids_zotero_write_path() -> None:
     text = read(PDF_REFERENCE)
 
@@ -407,6 +436,10 @@ def test_root_agents_defines_breaking_v2_public_contract() -> None:
         "external agent",
         "MCP `write_note`",
         "An exact parent + title + canonical HTML hash match locates one note but does not verify it",
+        "Direct single-paper authorize",
+        "direct_<uuid>",
+        "both batch identity options must appear together",
+        "write.lease_expired_uncertain",
     ]:
         assert phrase in text
 

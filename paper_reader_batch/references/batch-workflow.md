@@ -100,6 +100,8 @@ uv run paper_reader_batch run recover <batch_run_dir> --request-id UUID
 
 Recovery reconstructs state only from the validated manifest and event journal. It never imports orphan results by directory scan, stem or mtime and never treats a V1/unversioned file as recoverable state.
 
+For a started write lease expiry, `run recover` holds `.run.lock`, identifies the exact `write_attempt_id` whose `write.started` lease expired, and appends the unique `write.lease_expired_uncertain` event. The expired lease token is neither required nor accepted. The same recover request id replays idempotently; the attempt becomes uncertain, never queued; it never returns queued and cannot begin again. `write mark-uncertain` accepts only an unexpired exact claim/token/write-attempt identity for active error reporting.
+
 ## Zotero Write Stage
 
 The default write policy is `zotero_write`; explicit dry-run uses `prepare_only`. PDF items never enter this lane. After eligible Zotero-backed items have immutable single-paper candidates, claim exactly one write with a default 120 seconds lease:
@@ -112,6 +114,8 @@ uv run paper_reader_batch write renew <batch_run_dir> <item_id> --writer-id <wri
 
 Write claim returns and binds exactly one candidate plus writer id, `claim_id`, `lease_token`, `write_attempt_id` and expiry. The write preview shows only the immutable candidate: its target, fixed title/tags, `note.md`, `note.html` and hashes; no authorization exists yet. After preview, obtain the user's explicit real-write intent. Only then may the external agent run `$paper_reader zotero authorize <candidate> --external-claim-id <claim_id> --write-attempt-id <write_attempt_id>`. The authorization binds the external claim id, candidate digest, and `write_attempt_id`; it does not bind lease_token. Pass that authorization to batch begin; it must have at least 30 seconds remaining. Batch write begin independently validates the current claim_id, lease_token, and write_attempt_id plus writer, item, candidate digest and authorization bindings. It then atomically consumes the nonce and commits `write.started` before returning the exact MCP envelope:
 
+Batch authorization requires both --external-claim-id and --write-attempt-id, and both options must appear together. Partial input is rejected before mutation, both identities must match the batch claim/candidate, and batch authorization must not generate `direct_<uuid>` identities.
+
 ```bash
 uv run paper_reader_batch write begin <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id> --authorization <authorization.json> --request-id UUID
 ```
@@ -122,7 +126,7 @@ The batch CLI must not call `write_note`. The external agent may send the exact 
 uv run paper_reader_batch write commit <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id> --result <write-result.json> --request-id UUID
 ```
 
-Claim release/expiry may return queued work to the queue. Any crash, error or expiry after `write.started` must be recorded as uncertain, never queued:
+Claim release/expiry before `write.started` may return queued work to the queue. After start, an active writer with an unexpired exact identity may report a crash/error as uncertain:
 
 ```bash
 uv run paper_reader_batch write mark-uncertain <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id> --reason <reason> --request-id UUID

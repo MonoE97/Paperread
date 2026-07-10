@@ -75,13 +75,25 @@ uv run paper_reader candidate build <run_dir>
 
 The immutable candidate binds run/source/evidence/review identity, exact parent fingerprint, exact versioned title, tags, `note.md`, `note.html`, canonical HTML hash, file sizes and artifact hashes. Preview the target item, fixed title, tags, `note.md` and `note.html` before asking for write intent.
 
-9. Only after explicit real-write intent, create `paper_reader.write-authorization.v2`:
+9. Only after explicit real-write intent, create `paper_reader.write-authorization.v2` through exactly one identity mode.
+
+Direct single-paper authorize omits both batch identity options:
+
+```bash
+uv run paper_reader zotero authorize <candidate>
+```
+
+When both options are absent, `zotero authorize` generates two distinct `direct_<uuid>` identities for external claim and write attempt in the same atomic authorization transaction. Both identities are persisted in `paper_reader.write-authorization.v2` and returned in `paper_reader.command-result.v2`; the caller must not synthesize or override either direct identity.
+
+Batch authorize supplies both batch-owned identities:
 
 ```bash
 uv run paper_reader zotero authorize <candidate> --external-claim-id <claim_id> --write-attempt-id <write_attempt_id>
 ```
 
-Authorization accepts no parent/title/content/tag overrides. It re-hashes all artifacts, refreshes the read-only parent/children snapshot, verifies title availability and parent fingerprint, takes a local parent lease, then binds the exact HTML, canonical HTML hash/length, tags, candidate digest, parent snapshot, external claim id, `write_attempt_id`, random nonce/token and TTL. Authorization does not bind lease_token: a batch lease may be renewed independently, while batch `write begin` validates its current claim and lease. TTL defaults to and may not exceed 300 seconds.
+For batch authorize, both options must appear together; partial input is rejected before mutation. They must match the batch claim and candidate digest, and the command must not generate `direct_<uuid>` identities.
+
+In both modes, authorization accepts no parent/title/content/tag overrides. It re-hashes all artifacts, refreshes the read-only parent/children snapshot, verifies title availability and parent fingerprint, takes a local parent lease, then binds the exact HTML, canonical HTML hash/length, tags, candidate digest, parent snapshot, external claim id, `write_attempt_id`, random nonce/token and TTL. Authorization does not bind lease_token: a batch lease may be renewed independently, while batch `write begin` validates its current claim and lease. TTL defaults to and may not exceed 300 seconds.
 
 10. The external agent is the only writer. It may send the authorization's exact MCP envelope at most once: `zotero-mcp write_note(action="create", parentKey=<authorization parentKey>, content=<exact authorization HTML>, tags=<authorization tags>)`. Neither the CLI nor batch runtime may call `write_note`.
 11. Verify immediately:
