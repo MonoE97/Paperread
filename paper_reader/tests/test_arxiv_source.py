@@ -4,6 +4,7 @@ import io
 import tarfile
 import urllib.error
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 
 import fitz
@@ -16,6 +17,7 @@ from paper_reader.arxiv_source import (
     render_source_figure_pdfs,
     resolve_arxiv_id,
 )
+from paper_reader.resource_policy import V2_RESOURCE_POLICY
 
 
 def _make_tarball(path: Path, members: list[tuple[str, bytes, int]]) -> None:
@@ -75,12 +77,46 @@ def test_download_arxiv_source_uses_bounded_network_timeout(
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    result = download_arxiv_source("2401.00001", tmp_path)
+    result = download_arxiv_source("2401.00001", tmp_path, timeout_seconds=99.0)
 
     assert result is None
     assert observed["url"] == "https://arxiv.org/e-print/2401.00001"
-    assert isinstance(observed["timeout"], (int, float))
-    assert 0 < float(observed["timeout"]) <= 30
+    assert observed["timeout"] == V2_RESOURCE_POLICY.arxiv_timeout_seconds
+
+
+def test_download_arxiv_source_stops_at_compressed_byte_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import paper_reader.arxiv_source as arxiv_source
+
+    policy = replace(V2_RESOURCE_POLICY, arxiv_compressed_max_bytes=8)
+    monkeypatch.setattr(arxiv_source, "V2_RESOURCE_POLICY", policy)
+    extracted = False
+
+    class FakeResponse:
+        def __init__(self) -> None:
+            self._payload = io.BytesIO(b"123456789")
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def read(self, size: int = -1) -> bytes:
+            return self._payload.read(size)
+
+    def fake_extract(*args: object, **kwargs: object) -> None:
+        nonlocal extracted
+        extracted = True
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(arxiv_source, "extract_source_package", fake_extract)
+
+    assert download_arxiv_source("2401.00001", tmp_path) is None
+    assert extracted is False
+    assert not (tmp_path / "2401.00001.tar.gz").exists()
 
 
 def test_extract_source_package_rejects_path_traversal(tmp_path: Path) -> None:
@@ -139,6 +175,72 @@ def test_extract_source_package_cleans_up_partial_files_on_failure(tmp_path: Pat
         extract_source_package(archive_path, output_dir)
 
     assert not (output_dir / "figures" / "good.txt").exists()
+
+
+def test_extract_source_package_rejects_member_count_over_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import paper_reader.arxiv_source as arxiv_source
+
+    monkeypatch.setattr(
+        arxiv_source,
+        "V2_RESOURCE_POLICY",
+        replace(V2_RESOURCE_POLICY, arxiv_max_members=1),
+    )
+    archive_path = tmp_path / "source.tar.gz"
+    _make_tarball(
+        archive_path,
+        [
+            ("one.txt", b"1", tarfile.REGTYPE),
+            ("two.txt", b"2", tarfile.REGTYPE),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="member count"):
+        extract_source_package(archive_path, tmp_path / "out")
+
+
+def test_extract_source_package_rejects_declared_expanded_size_over_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import paper_reader.arxiv_source as arxiv_source
+
+    monkeypatch.setattr(
+        arxiv_source,
+        "V2_RESOURCE_POLICY",
+        replace(V2_RESOURCE_POLICY, arxiv_expanded_max_bytes=3),
+    )
+    archive_path = tmp_path / "source.tar.gz"
+    _make_tarball(archive_path, [("paper.tex", b"1234", tarfile.REGTYPE)])
+
+    with pytest.raises(ValueError, match="expanded size"):
+        extract_source_package(archive_path, tmp_path / "out")
+
+
+def test_extract_source_package_rejects_figure_count_over_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import paper_reader.arxiv_source as arxiv_source
+
+    monkeypatch.setattr(
+        arxiv_source,
+        "V2_RESOURCE_POLICY",
+        replace(V2_RESOURCE_POLICY, arxiv_max_figure_files=1),
+    )
+    archive_path = tmp_path / "source.tar.gz"
+    _make_tarball(
+        archive_path,
+        [
+            ("figures/one.png", b"1", tarfile.REGTYPE),
+            ("figures/two.pdf", b"2", tarfile.REGTYPE),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="figure count"):
+        extract_source_package(archive_path, tmp_path / "out")
 
 
 def test_collect_source_figures_reads_root_and_common_figure_directories(

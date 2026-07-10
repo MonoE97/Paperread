@@ -10,6 +10,8 @@ from typing import Any
 
 import fitz
 
+from paper_reader.resource_policy import V2_RESOURCE_POLICY
+
 ARXIV_ID_PATTERN = re.compile(
     r"(?<!\d)(?:arxiv:)?(?P<id>(?:\d{4}\.\d{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7}))(?:v\d+)?(?!\d)",
     re.IGNORECASE,
@@ -17,7 +19,8 @@ ARXIV_ID_PATTERN = re.compile(
 SOURCE_DIR_NAMES = ("pics", "figures", "fig", "images", "img")
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".webp"}
 PDF_SUFFIXES = {".pdf"}
-DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 20.0
+DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = V2_RESOURCE_POLICY.arxiv_timeout_seconds
+DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 def resolve_arxiv_id(details: dict[str, Any], pdf_path: Path | None = None) -> str | None:
@@ -56,13 +59,18 @@ def download_arxiv_source(
     archive_path = destination_root / f"{cache_name}.tar.gz"
     temp_root = destination_root / f".{cache_name}.tmp"
     url = f"https://arxiv.org/e-print/{arxiv_id}"
+    effective_timeout = min(float(timeout_seconds), V2_RESOURCE_POLICY.arxiv_timeout_seconds)
 
     if temp_root.exists():
         shutil.rmtree(temp_root)
 
     try:
-        with urllib.request.urlopen(url, timeout=timeout_seconds) as response:
-            archive_path.write_bytes(response.read())
+        with urllib.request.urlopen(url, timeout=effective_timeout) as response:
+            _write_bounded_response(
+                response,
+                archive_path,
+                max_bytes=V2_RESOURCE_POLICY.arxiv_compressed_max_bytes,
+            )
         extract_source_package(archive_path, temp_root)
         temp_root.replace(source_root)
         return source_root
@@ -75,13 +83,18 @@ def download_arxiv_source(
 
 def extract_source_package(archive_path: Path, output_dir: Path) -> Path:
     archive = Path(archive_path).expanduser().resolve()
+    if archive.stat().st_size > V2_RESOURCE_POLICY.arxiv_compressed_max_bytes:
+        raise ValueError("arXiv source compressed size exceeds the V2 cap")
     destination = Path(output_dir).expanduser()
     destination.mkdir(parents=True, exist_ok=True)
 
     written_paths: list[Path] = []
     try:
         with tarfile.open(archive) as package:
-            for member in package.getmembers():
+            members = package.getmembers()
+            _validate_archive_members(members)
+            expanded_bytes = 0
+            for member in members:
                 relative_path = _safe_member_path(member)
                 target_path = destination / relative_path
                 if member.isdir():
@@ -92,9 +105,13 @@ def extract_source_package(archive_path: Path, output_dir: Path) -> Path:
                 extracted = package.extractfile(member)
                 if extracted is None:
                     raise ValueError(f"unsafe tar member: {member.name}")
-                with target_path.open("wb") as handle:
-                    shutil.copyfileobj(extracted, handle)
                 written_paths.append(target_path)
+                with target_path.open("wb") as handle:
+                    while chunk := extracted.read(DOWNLOAD_CHUNK_BYTES):
+                        expanded_bytes += len(chunk)
+                        if expanded_bytes > V2_RESOURCE_POLICY.arxiv_expanded_max_bytes:
+                            raise ValueError("arXiv source expanded size exceeds the V2 cap")
+                        handle.write(chunk)
     except Exception:
         for path in reversed(written_paths):
             path.unlink(missing_ok=True)
@@ -120,6 +137,9 @@ def collect_source_figures(source_root: Path, output_dir: Path) -> list[dict[str
             continue
         rel_path = child.relative_to(root).as_posix()
         candidates[rel_path] = child
+
+    if len(candidates) > V2_RESOURCE_POLICY.arxiv_max_figure_files:
+        raise ValueError("arXiv source figure count exceeds the V2 cap")
 
     figures: list[dict[str, Any]] = []
     for rel_path, source_path in sorted(candidates.items()):
@@ -178,6 +198,50 @@ def _extract_arxiv_id(value: Any) -> str | None:
     if match is None:
         return None
     return match.group("id").lower()
+
+
+def _write_bounded_response(response: Any, destination: Path, *, max_bytes: int) -> None:
+    written = 0
+    with destination.open("wb") as handle:
+        while True:
+            try:
+                chunk = response.read(min(DOWNLOAD_CHUNK_BYTES, max_bytes - written + 1))
+            except TypeError:
+                # Compatibility with small response doubles that only expose read().
+                chunk = response.read()
+                if len(chunk) > max_bytes:
+                    raise ValueError("arXiv source compressed size exceeds the V2 cap")
+                handle.write(chunk)
+                return
+            if not chunk:
+                return
+            written += len(chunk)
+            if written > max_bytes:
+                raise ValueError("arXiv source compressed size exceeds the V2 cap")
+            handle.write(chunk)
+
+
+def _validate_archive_members(members: list[tarfile.TarInfo]) -> None:
+    if len(members) > V2_RESOURCE_POLICY.arxiv_max_members:
+        raise ValueError("arXiv source member count exceeds the V2 cap")
+
+    expanded_bytes = 0
+    figure_count = 0
+    for member in members:
+        relative_path = _safe_member_path(member)
+        if not member.isdir() and not member.isfile():
+            raise ValueError(f"unsafe tar member type: {member.name}")
+        if not member.isfile():
+            continue
+        if member.size < 0:
+            raise ValueError(f"unsafe tar member size: {member.name}")
+        expanded_bytes += member.size
+        if expanded_bytes > V2_RESOURCE_POLICY.arxiv_expanded_max_bytes:
+            raise ValueError("arXiv source expanded size exceeds the V2 cap")
+        if _is_supported_figure(relative_path):
+            figure_count += 1
+            if figure_count > V2_RESOURCE_POLICY.arxiv_max_figure_files:
+                raise ValueError("arXiv source figure count exceeds the V2 cap")
 
 
 def _cache_name_for_arxiv_id(arxiv_id: str) -> str:

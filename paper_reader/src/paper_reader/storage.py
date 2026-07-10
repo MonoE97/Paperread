@@ -121,9 +121,10 @@ def resolve_artifact_path(root: Path | str, relative_path: str | PurePosixPath) 
     return resolved_candidate
 
 
-def fingerprint_source(path: Path | str) -> ResolvedSourceFingerprint:
-    requested = Path(path).expanduser()
-    resolved = requested.resolve(strict=True)
+def fingerprint_resolved_source(path: Path | str) -> ResolvedSourceFingerprint:
+    resolved = Path(path)
+    if not resolved.is_absolute():
+        raise ValueError(f"resolved source path must be absolute: {resolved}")
     with resolved.open("rb") as handle:
         before = os.fstat(handle.fileno())
         if not stat.S_ISREG(before.st_mode):
@@ -144,6 +145,12 @@ def fingerprint_source(path: Path | str) -> ResolvedSourceFingerprint:
         inode=after.st_ino,
         mtime_ns=after.st_mtime_ns,
     )
+
+
+def fingerprint_source(path: Path | str) -> ResolvedSourceFingerprint:
+    requested = Path(path).expanduser()
+    resolved = requested.resolve(strict=True)
+    return fingerprint_resolved_source(resolved)
 
 
 source_fingerprint = fingerprint_source
@@ -346,6 +353,7 @@ __all__ = [
     "canonical_json_bytes",
     "canonical_json_sha256",
     "fingerprint_source",
+    "fingerprint_resolved_source",
     "fsync_directory",
     "new_random_id",
     "new_uuid",

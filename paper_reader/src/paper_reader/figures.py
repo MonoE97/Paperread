@@ -172,6 +172,7 @@ def extract_figures(
     arxiv_id: str | None = None,
     item_details: dict[str, Any] | None = None,
     enable_ocr_fallback: bool = False,
+    allow_network_source: bool = True,
 ) -> dict[str, Any]:
     resolved = Path(pdf_path).expanduser()
     if not resolved.exists():
@@ -189,12 +190,18 @@ def extract_figures(
         pdf_path=resolved,
     )
 
-    source_candidates = _collect_source_candidates(
-        resolved_arxiv_id,
-        output_root,
-        source_attempts,
-        warnings,
-    )
+    if allow_network_source:
+        source_candidates = _collect_source_candidates(
+            resolved_arxiv_id,
+            output_root,
+            source_attempts,
+            warnings,
+        )
+    else:
+        source_attempts.append(
+            {"stage": "resolve", "status": "skipped", "reason": "network_disabled"}
+        )
+        source_candidates = []
     pdf_candidates = _extract_pdf_candidates(
         pdf_path=resolved,
         output_root=output_root,

@@ -313,3 +313,34 @@ def lint_summary(summary: dict[str, Any]) -> list[dict[str, str]]:
             )
 
     return issues
+
+
+def lint_rendered_markdown(note: str) -> list[dict[str, str]]:
+    """Lint prose that actually survives renderer fallbacks into Markdown."""
+    issues: list[dict[str, str]] = []
+    for line_number, raw_line in enumerate(note.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line == "---" or line.startswith("Tags:"):
+            continue
+        values: list[str]
+        if line.startswith("|") and line.endswith("|"):
+            values = [cell.strip() for cell in line.strip("|").split("|")]
+            if values and all(re.fullmatch(r":?-{3,}:?", value) for value in values):
+                continue
+        else:
+            values = [re.sub(r"^(?:[-*]|\d+\.)\s+", "", line)]
+        for value in values:
+            if _looks_like_english_prose(value):
+                issues.append(
+                    {
+                        "code": "rendered_note_english_prose",
+                        "message": (
+                            f"rendered Markdown line {line_number} contains English prose: "
+                            f"{_preview(value)}"
+                        ),
+                    }
+                )
+    return issues
+
+
+__all__ = ["lint_rendered_markdown", "lint_summary"]

@@ -268,7 +268,7 @@ def test_v2_loader_rejects_historical_or_unknown_runs_before_mutation(
     assert sorted(path.name for path in run_dir.iterdir()) == ["run.json"]
 
 
-def test_lifecycle_skeleton_returns_structured_not_implemented_without_mutation(tmp_path: Path) -> None:
+def test_init_local_invalid_pdf_returns_structured_failure_without_mutation(tmp_path: Path) -> None:
     source = tmp_path / "paper.pdf"
     source.write_bytes(b"source")
     before = {path.name: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()}
@@ -277,12 +277,12 @@ def test_lifecycle_skeleton_returns_structured_not_implemented_without_mutation(
 
     assert result.exit_code == 1
     payload = _result_payload(result)
-    assert payload["code"] == "not_implemented"
+    assert payload["code"] == "invalid_local_pdf"
     after = {path.name: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()}
     assert after == before
 
 
-def test_run_prepare_accepts_explicit_preview_limits_without_mutation(tmp_path: Path) -> None:
+def test_run_prepare_parses_preview_limits_before_missing_run_failure(tmp_path: Path) -> None:
     run_path = tmp_path / "run"
 
     result = _invoke(
@@ -299,12 +299,8 @@ def test_run_prepare_accepts_explicit_preview_limits_without_mutation(tmp_path: 
 
     assert result.exit_code == 1
     payload = _result_payload(result)
-    assert payload["code"] == "not_implemented"
-    assert payload["data"] == {
-        "figure_limit": 4,
-        "preview_pages": 3,
-        "run_path": str(run_path),
-    }
+    assert payload["code"] == "run_manifest_missing"
+    assert payload["data"] == {"manifest_path": str(run_path / "run.json")}
     assert not run_path.exists()
 
 

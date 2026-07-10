@@ -168,7 +168,7 @@ def _write_result(
 
 
 def _not_implemented(command: str, **data: str | int | None) -> None:
-    message = f"{command} is reserved by the V2 public contract but is not implemented in Task 2"
+    message = f"{command} is reserved by the V2 public contract but is not implemented yet"
     _finish(
         command,
         ok=False,
@@ -199,8 +199,31 @@ def route_command(input_value: str = typer.Argument(..., metavar="INPUT")) -> No
 
 @run_app.command("init-local")
 def run_init_local(source_pdf: Path) -> None:
-    """Initialize a local-PDF V2 run (implemented in the next lifecycle task)."""
-    _not_implemented("run init-local", source_pdf=str(source_pdf))
+    """Initialize a local-PDF V2 run beside its resolved source."""
+    from paper_reader.local_lifecycle import LocalLifecycleError, initialize_local_run
+
+    try:
+        initialized = initialize_local_run(source_pdf)
+    except LocalLifecycleError as exc:
+        _finish(
+            "run init-local",
+            ok=False,
+            code=exc.code,
+            data=exc.data,
+            message=str(exc),
+            diagnostic=str(exc),
+        )
+        return
+    _finish(
+        "run init-local",
+        ok=True,
+        code="initialized",
+        data={
+            "run_dir": str(initialized.run_dir),
+            "run_id": initialized.run.run_id,
+            "target_path": str(initialized.target_path),
+        },
+    )
 
 
 @run_app.command("init-zotero")
@@ -223,11 +246,46 @@ def run_prepare(
     figure_limit: int | None = typer.Option(None, "--figure-limit", min=0),
 ) -> None:
     """Prepare immutable evidence for a V2 run."""
-    _not_implemented(
+    from paper_reader.evidence_bundle import EvidenceBundleError, prepare_local_evidence
+
+    try:
+        prepared = prepare_local_evidence(
+            run_path,
+            preview_pages=preview_pages,
+            figure_limit=figure_limit,
+        )
+    except RunLoadError as exc:
+        _finish(
+            "run prepare",
+            ok=False,
+            code=exc.code,
+            data={"manifest_path": str(exc.manifest_path)},
+            message=str(exc),
+            diagnostic=str(exc),
+        )
+        return
+    except EvidenceBundleError as exc:
+        _finish(
+            "run prepare",
+            ok=False,
+            code=exc.code,
+            data=exc.data,
+            message=str(exc),
+            diagnostic=str(exc),
+        )
+        return
+    _finish(
         "run prepare",
-        run_path=str(run_path),
-        preview_pages=preview_pages,
-        figure_limit=figure_limit,
+        ok=True,
+        code="prepared_preview" if not prepared.evidence_manifest.complete else "prepared",
+        data={
+            "run_dir": str(prepared.run_dir),
+            "evidence_dir": str(prepared.evidence_dir),
+            "evidence_id": prepared.evidence_manifest.evidence_id,
+            "evidence_digest": prepared.evidence_digest,
+            "complete": prepared.evidence_manifest.complete,
+            "degraded": prepared.evidence_manifest.degraded,
+        },
     )
 
 
@@ -291,25 +349,169 @@ def run_validate(run_path: Path) -> None:
 @review_app.command("validate")
 def review_validate(run_path: Path) -> None:
     """Validate summary, review, evidence, and resolved render context."""
-    _not_implemented("review validate", run_path=str(run_path))
+    from paper_reader.review_package import validate_review_run
+
+    try:
+        validation = validate_review_run(run_path)
+    except RunLoadError as exc:
+        _finish(
+            "review validate",
+            ok=False,
+            code=exc.code,
+            data={"manifest_path": str(exc.manifest_path)},
+            message=str(exc),
+            diagnostic=str(exc),
+        )
+        return
+    blocker_data = [item.model_dump(mode="json") for item in validation.blockers]
+    data = {
+        "run_id": validation.loaded_run.run.run_id,
+        "summary_sha256": validation.summary_sha256,
+        "review_sha256": validation.review_sha256,
+        "evidence_digest": validation.evidence.digest if validation.evidence else None,
+        "rendered_note_sha256": validation.rendered_note_sha256,
+        "blockers": blocker_data,
+    }
+    if validation.blockers:
+        _finish(
+            "review validate",
+            ok=False,
+            code="review_blocked",
+            data=data,
+            message="review validation is blocked",
+            diagnostic="review validation is blocked",
+        )
+        return
+    _finish("review validate", ok=True, code="review_valid", data=data)
 
 
 @review_app.command("seal")
 def review_seal(run_path: Path) -> None:
     """Seal an immutable V2 review package."""
-    _not_implemented("review seal", run_path=str(run_path))
+    from paper_reader.review_package import ReviewSealError, seal_review_run
+
+    try:
+        sealed = seal_review_run(run_path)
+    except RunLoadError as exc:
+        _finish(
+            "review seal",
+            ok=False,
+            code=exc.code,
+            data={"manifest_path": str(exc.manifest_path)},
+            message=str(exc),
+            diagnostic=str(exc),
+        )
+        return
+    except ReviewSealError as exc:
+        data = {
+            **exc.data,
+            "blockers": [item.model_dump(mode="json") for item in exc.blockers],
+        }
+        _finish(
+            "review seal",
+            ok=False,
+            code=exc.code,
+            data=data,
+            message=str(exc),
+            diagnostic=str(exc),
+        )
+        return
+    _finish(
+        "review seal",
+        ok=True,
+        code="review_sealed",
+        data={
+            "run_id": sealed.review_package.run_id,
+            "review_package_dir": str(sealed.package_dir),
+            "review_package_id": sealed.review_package.review_package_id,
+            "review_package_digest": sealed.package_digest,
+        },
+    )
 
 
 @candidate_app.command("build")
 def candidate_build(run_path: Path) -> None:
     """Build an immutable target-bound candidate."""
-    _not_implemented("candidate build", run_path=str(run_path))
+    from paper_reader.candidate_builder import build_local_candidate
+    from paper_reader.candidate_integrity import LocalPublicationError
+
+    try:
+        built = build_local_candidate(run_path)
+    except RunLoadError as exc:
+        _finish(
+            "candidate build",
+            ok=False,
+            code=exc.code,
+            data={"manifest_path": str(exc.manifest_path)},
+            message=str(exc),
+            diagnostic=str(exc),
+        )
+        return
+    except LocalPublicationError as exc:
+        _finish(
+            "candidate build",
+            ok=False,
+            code=exc.code,
+            data=exc.data,
+            message=str(exc),
+            diagnostic=str(exc),
+        )
+        return
+    _finish(
+        "candidate build",
+        ok=True,
+        code="candidate_built",
+        data={
+            "run_id": built.candidate.run_id,
+            "candidate_id": built.candidate.candidate_id,
+            "candidate_dir": str(built.candidate_dir),
+            "candidate_path": str(built.candidate_dir / "candidate.json"),
+            "candidate_digest": built.candidate_digest,
+            "target_path": built.candidate.target.resolved_path,
+        },
+    )
 
 
 @local_app.command("publish")
 def local_publish(candidate: Path) -> None:
     """Publish a fixed local candidate using atomic no-replace."""
-    _not_implemented("local publish", candidate=str(candidate))
+    from paper_reader.candidate_integrity import LocalPublicationError
+    from paper_reader.local_publish import publish_local_candidate
+
+    try:
+        published = publish_local_candidate(candidate)
+    except RunLoadError as exc:
+        _finish(
+            "local publish",
+            ok=False,
+            code=exc.code,
+            data={"manifest_path": str(exc.manifest_path)},
+            message=str(exc),
+            diagnostic=str(exc),
+        )
+        return
+    except LocalPublicationError as exc:
+        _finish(
+            "local publish",
+            ok=False,
+            code=exc.code,
+            data=exc.data,
+            message=str(exc),
+            diagnostic=str(exc),
+        )
+        return
+    _finish(
+        "local publish",
+        ok=True,
+        code="published",
+        data={
+            "candidate_path": str(published.candidate_path),
+            "candidate_digest": published.candidate_digest,
+            "target_path": str(published.target_path),
+            "content_sha256": published.content_sha256,
+            "receipt_path": str(published.receipt_path),
+        },
+    )
 
 
 @zotero_app.command("authorize")
