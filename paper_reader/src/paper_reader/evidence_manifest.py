@@ -157,7 +157,13 @@ def _verify_artifact(run_dir: Path, artifact: ArtifactRef) -> tuple[Path, bytes]
     return path, raw
 
 
-def _validate_manifest_membership(manifest: EvidenceManifest) -> None:
+def validate_evidence_manifest_membership(
+    manifest: EvidenceManifest,
+    *,
+    run_dir: Path,
+    bundle_dir: Path,
+    manifest_bundle_dir: Path,
+) -> None:
     pages = set(manifest.pages)
     if len(pages) != len(manifest.pages) or any(page <= 0 for page in pages):
         raise EvidenceManifestError("invalid_evidence_membership", "evidence pages must be unique positive integers")
@@ -186,6 +192,67 @@ def _validate_manifest_membership(manifest: EvidenceManifest) -> None:
         if item.figure_id in figure_ids or item.page not in pages or item.artifact_path not in image_paths:
             raise EvidenceManifestError("invalid_evidence_membership", "figure membership is invalid")
         figure_ids.add(item.figure_id)
+
+    try:
+        bundle_prefix = PurePosixPath(
+            manifest_bundle_dir.relative_to(run_dir).as_posix()
+        )
+    except ValueError as exc:
+        raise EvidenceManifestError(
+            "evidence_artifact_outside_bundle",
+            "evidence bundle is outside its run directory",
+        ) from exc
+    expected_members: list[PurePosixPath] = []
+    for artifact in manifest.files:
+        try:
+            relative = PurePosixPath(artifact.path).relative_to(bundle_prefix)
+        except ValueError as exc:
+            raise EvidenceManifestError(
+                "evidence_artifact_outside_bundle",
+                f"evidence member is outside its immutable bundle: {artifact.path}",
+                artifact_path=artifact.path,
+            ) from exc
+        if relative == PurePosixPath(".") or relative.as_posix() == "evidence.json":
+            raise EvidenceManifestError(
+                "invalid_evidence_manifest",
+                f"evidence manifest file cannot be a bundle member: {artifact.path}",
+                artifact_path=artifact.path,
+            )
+        expected_members.append(relative)
+    if len(set(expected_members)) != len(expected_members):
+        raise EvidenceManifestError(
+            "evidence_closed_world_mismatch",
+            "evidence manifest contains duplicate artifact paths",
+        )
+
+    actual_members: set[PurePosixPath] = set()
+    try:
+        entries = tuple(bundle_dir.rglob("*"))
+    except OSError as exc:
+        raise EvidenceManifestError(
+            "evidence_closed_world_mismatch",
+            f"evidence bundle cannot be enumerated: {bundle_dir}: {exc}",
+        ) from exc
+    for path in entries:
+        relative = PurePosixPath(path.relative_to(bundle_dir).as_posix())
+        if relative.as_posix() == "evidence.json":
+            continue
+        if path.is_symlink():
+            raise EvidenceManifestError(
+                "evidence_closed_world_mismatch",
+                f"evidence bundle contains an untrusted symlink: {relative.as_posix()}",
+                artifact_path=relative.as_posix(),
+            )
+        if path.is_file():
+            actual_members.add(relative)
+    expected_set = set(expected_members)
+    if actual_members != expected_set:
+        missing = sorted(path.as_posix() for path in expected_set - actual_members)
+        extra = sorted(path.as_posix() for path in actual_members - expected_set)
+        raise EvidenceManifestError(
+            "evidence_closed_world_mismatch",
+            f"evidence bundle membership differs from manifest: missing={missing}, extra={extra}",
+        )
 
 
 def load_bound_evidence(loaded: LoadedRun, evidence_digest: str) -> BoundEvidence:
@@ -243,7 +310,12 @@ def load_bound_evidence(loaded: LoadedRun, evidence_digest: str) -> BoundEvidenc
         artifacts_by_role.setdefault(artifact.role, []).append(
             VerifiedEvidenceArtifact(ref=artifact, path=path, raw_bytes=raw)
         )
-    _validate_manifest_membership(manifest)
+    validate_evidence_manifest_membership(
+        manifest,
+        run_dir=run_dir,
+        bundle_dir=manifest_dir,
+        manifest_bundle_dir=manifest_dir,
+    )
     return BoundEvidence(
         manifest=manifest,
         manifest_ref=manifest_ref,
@@ -347,4 +419,5 @@ __all__ = [
     "build_evidence_manifest",
     "locator_membership_error",
     "load_bound_evidence",
+    "validate_evidence_manifest_membership",
 ]

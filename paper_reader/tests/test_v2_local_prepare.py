@@ -12,6 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import fitz
 from typer.testing import CliRunner
 
 from paper_reader.contracts import PaperReaderCommandResult
@@ -105,6 +106,60 @@ def test_prepare_builds_one_immutable_complete_pdf_evidence_bundle(tmp_path: Pat
         if path.is_file() and not path.is_symlink()
     )
     assert resource_checks["run_size_bytes"]["actual"] == final_run_size
+
+
+def test_prepare_succeeds_with_no_table_members_when_numeric_signals_have_no_section(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "paper.pdf"
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text(
+        (72, 72),
+        "Table 1 Baseline RMSE 0.25 MAE 0.13 R2 0.91 speedup 10x.",
+    )
+    document.save(source)
+    document.close()
+    initialized = _invoke(["run", "init-local", str(source)])
+    run_dir = Path(_result_payload(initialized)["data"]["run_dir"])
+
+    result = _invoke(["run", "prepare", str(run_dir), "--figure-limit", "0"])
+
+    assert result.exit_code == 0, result.stderr
+    evidence_dir = Path(_result_payload(result)["data"]["evidence_dir"])
+    extraction = json.loads((evidence_dir / "extract.json").read_text(encoding="utf-8"))
+    manifest = json.loads((evidence_dir / "evidence.json").read_text(encoding="utf-8"))
+    assert extraction["sections"] == []
+    assert extraction["table_candidates"] == []
+    assert manifest["table_candidates"] == []
+
+
+def test_prepare_rejects_invalid_manifest_membership_before_tree_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.evidence_bundle as evidence_bundle
+
+    source = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, source)
+    initialized = _invoke(["run", "init-local", str(source)])
+    run_dir = Path(_result_payload(initialized)["data"]["run_dir"])
+    run_before = (run_dir / "run.json").read_bytes()
+    original_build = evidence_bundle.build_evidence_manifest
+
+    def build_invalid_manifest(**kwargs):
+        manifest = original_build(**kwargs)
+        return manifest.model_copy(update={"files": (*manifest.files, manifest.files[0])})
+
+    monkeypatch.setattr(evidence_bundle, "build_evidence_manifest", build_invalid_manifest)
+
+    result = _invoke(["run", "prepare", str(run_dir), "--figure-limit", "0"])
+
+    assert result.exit_code == 1
+    assert _result_payload(result)["code"] == "evidence_closed_world_mismatch"
+    assert (run_dir / "run.json").read_bytes() == run_before
+    assert not (run_dir / "evidence").exists()
+    assert not list(run_dir.glob(".*.staging"))
 
 
 def test_prepare_reloads_inside_the_shared_run_advisory_lock(tmp_path: Path) -> None:

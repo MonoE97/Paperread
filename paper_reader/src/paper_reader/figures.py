@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
 
@@ -147,6 +148,12 @@ class FigureCandidateLimitError(ValueError):
         self.limit = limit
 
 
+@dataclass(frozen=True, slots=True)
+class FigureCandidateSelection:
+    selected: tuple[FigureExtraction, ...]
+    candidate_count: int
+
+
 class TextLine(TypedDict):
     text: str
     rect: fitz.Rect
@@ -225,18 +232,16 @@ def extract_figures(
             actual=len(source_candidates),
             limit=max_candidates,
         )
-    pdf_candidates = _extract_pdf_candidates(
+    candidate_selection = _extract_pdf_candidates(
         pdf_path=resolved,
         output_root=output_root,
         max_pages=max_pages,
         max_candidates=max_candidates,
         existing_candidates=len(source_candidates),
+        competing_candidates=source_candidates,
+        top_k=top_k,
     )
-
-    ranking_pool = _dedupe_candidates(source_candidates + pdf_candidates)
-    ranking_pool.sort(key=_ranking_key)
-
-    selected = ranking_pool[: max(top_k, 0)]
+    selected = list(candidate_selection.selected)
     for item in selected:
         quality = assess_image_quality(Path(item["image_path"]))
         item["visual_quality"] = quality
@@ -255,7 +260,7 @@ def extract_figures(
     return {
         "arxiv_id": resolved_arxiv_id,
         "pdf_path": str(resolved),
-        "candidate_count": len(ranking_pool),
+        "candidate_count": candidate_selection.candidate_count,
         "selected_figures": selected,
         "source_attempts": source_attempts,
         "warnings": _dedupe_strings(warnings),
@@ -605,7 +610,9 @@ def _extract_pdf_candidates(
     max_pages: int | None,
     max_candidates: int | None = None,
     existing_candidates: int = 0,
-) -> list[FigureExtraction]:
+    competing_candidates: list[FigureExtraction] | None = None,
+    top_k: int | None = None,
+) -> FigureCandidateSelection:
     with fitz.open(pdf_path) as doc:
         page_limit = doc.page_count if max_pages is None else min(doc.page_count, max_pages)
         pending: list[PendingFigure] = []
@@ -657,19 +664,85 @@ def _extract_pdf_candidates(
                 actual=actual_candidates,
                 limit=max_candidates,
             )
-        return [
-            _rasterize_figure(
-                page=item["page"],
-                page_number=item["page_number"],
-                figure_index=item["figure_index"],
-                caption=item["caption"],
-                bbox=item["bbox"],
-                output_root=output_root,
-                source=item["source"],
-                caption_confidence=item["caption_confidence"],
-            )
-            for item in pending
+        entries: list[
+            tuple[FigureExtraction, PendingFigure | None, FigureExtraction | None]
+        ] = [
+            (candidate, None, candidate)
+            for candidate in (competing_candidates or [])
         ]
+        entries.extend(
+            (_pending_figure_metadata(item, output_root), item, None)
+            for item in pending
+        )
+        deduped: dict[
+            tuple[Any, ...],
+            tuple[FigureExtraction, PendingFigure | None, FigureExtraction | None],
+        ] = {}
+        for entry in entries:
+            metadata = entry[0]
+            key = _candidate_identity_key(metadata)
+            current = deduped.get(key)
+            if current is None or _prefer_candidate(metadata, current[0]):
+                deduped[key] = entry
+        ranked = sorted(deduped.values(), key=lambda entry: _ranking_key(entry[0]))
+        selected_count = len(ranked) if top_k is None else max(top_k, 0)
+        selected: list[FigureExtraction] = []
+        for _metadata, pending_item, existing_item in ranked[:selected_count]:
+            if existing_item is not None:
+                selected.append(existing_item)
+                continue
+            assert pending_item is not None
+            selected.append(
+                _rasterize_figure(
+                    page=pending_item["page"],
+                    page_number=pending_item["page_number"],
+                    figure_index=pending_item["figure_index"],
+                    caption=pending_item["caption"],
+                    bbox=pending_item["bbox"],
+                    output_root=output_root,
+                    source=pending_item["source"],
+                    caption_confidence=pending_item["caption_confidence"],
+                )
+            )
+        return FigureCandidateSelection(
+            selected=tuple(selected),
+            candidate_count=actual_candidates,
+        )
+
+
+def _pending_figure_metadata(
+    item: PendingFigure,
+    output_root: Path,
+) -> FigureExtraction:
+    bbox = item["bbox"]
+    caption = item["caption"]
+    source = item["source"]
+    confidence, fallback_reason = _geometry_confidence(bbox)
+    priority_score = _priority_score(caption["caption"], bbox)
+    if source == "embedded-image" and caption["caption"] == "":
+        priority_score = 0.05
+    page_number = item["page_number"]
+    figure_index = item["figure_index"]
+    return FigureExtraction(
+        figure_id=f"p{page_number}-f{figure_index}",
+        caption=caption["caption"],
+        caption_confidence=_caption_confidence(
+            source,
+            caption,
+            item["caption_confidence"],
+        ),
+        caption_bbox=_rect_to_list(caption["rect"]),
+        bbox=_rect_to_list(bbox),
+        page=max(page_number, 1),
+        area=round(float(bbox.get_area()), 2),
+        image_path=str(output_root / f"figure-p{page_number}-{figure_index}.png"),
+        priority_score=round(priority_score, 4),
+        source=_normalize_source(source),
+        extraction_strategy="deterministic",
+        extraction_confidence=confidence,
+        fallback_reason=fallback_reason,
+        needs_fallback=confidence < LOW_CONFIDENCE_THRESHOLD,
+    )
 
 
 def _supplement_embedded_images(

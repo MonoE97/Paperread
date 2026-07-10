@@ -19,7 +19,9 @@ from paper_reader.evidence_figures import (
 )
 from paper_reader.evidence_manifest import (
     EvidenceManifest,
+    EvidenceManifestError,
     build_evidence_manifest,
+    validate_evidence_manifest_membership,
 )
 from paper_reader.pdf_extract import ExtractedTextLimitError, extract_pdf
 from paper_reader.pdf_workflow import build_pdf_metadata
@@ -332,6 +334,19 @@ def _prepare_local_evidence_locked(
                 "prepared run size accounting did not converge",
                 data={"run_id": loaded.run.run_id},
             )
+        try:
+            validate_evidence_manifest_membership(
+                manifest,
+                run_dir=run_dir,
+                bundle_dir=staging,
+                manifest_bundle_dir=future_dir,
+            )
+        except EvidenceManifestError as exc:
+            raise EvidenceBundleError(
+                exc.code,
+                str(exc),
+                data={"run_id": loaded.run.run_id},
+            ) from exc
         try:
             enforce_projected_run_size(
                 run_dir,

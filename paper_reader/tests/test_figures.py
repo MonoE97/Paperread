@@ -1682,3 +1682,93 @@ def test_pdf_candidate_cap_is_checked_before_any_rasterization(
 
     assert exc_info.value.actual == 201
     assert exc_info.value.limit == 200
+
+
+def test_pdf_geometry_ranking_rasterizes_only_selected_top_k(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.figures as figures
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"placeholder")
+    page = type("FakePage", (), {"rect": fitz.Rect(0, 0, 400, 600)})()
+
+    class FakeDocument:
+        page_count = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def load_page(self, index: int):
+            assert index == 0
+            return page
+
+    captions = [
+        {"caption": "Figure 1. Minor example.", "rect": fitz.Rect(10, 10, 180, 30)},
+        {
+            "caption": "Figure 2. Proposed pipeline workflow and quantitative results.",
+            "rect": fitz.Rect(10, 210, 300, 230),
+        },
+        {"caption": "Figure 3. Qualitative example.", "rect": fitz.Rect(10, 410, 180, 430)},
+    ]
+    monkeypatch.setattr(figures.fitz, "open", lambda _path: FakeDocument())
+    monkeypatch.setattr(figures, "_detect_captions", lambda _page: captions)
+    monkeypatch.setattr(
+        figures,
+        "_detect_graphic_regions",
+        lambda _page: [fitz.Rect(10, 40, 300, 180)],
+    )
+    monkeypatch.setattr(figures, "_detect_embedded_image_regions", lambda _page: [])
+    monkeypatch.setattr(
+        figures,
+        "_select_owned_bbox",
+        lambda _regions, _captions, index, _page_rect: fitz.Rect(
+            10,
+            40 + (index * 200),
+            300,
+            180 + (index * 200),
+        ),
+    )
+    rasterized: list[str] = []
+
+    def record_raster(*, caption, output_root: Path, page_number: int, figure_index: int, **kwargs):
+        rasterized.append(caption["caption"])
+        image_path = output_root / f"figure-p{page_number}-{figure_index}.png"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(b"selected")
+        bbox = kwargs["bbox"]
+        return {
+            "figure_id": f"p{page_number}-f{figure_index}",
+            "caption": caption["caption"],
+            "caption_confidence": 0.95,
+            "caption_bbox": [0.0, 0.0, 1.0, 1.0],
+            "bbox": [bbox.x0, bbox.y0, bbox.x1, bbox.y1],
+            "page": page_number,
+            "area": bbox.get_area(),
+            "image_path": str(image_path),
+            "priority_score": figures._priority_score(caption["caption"], bbox),
+            "source": "deterministic-pdf",
+            "extraction_strategy": "deterministic",
+            "extraction_confidence": 0.9,
+            "fallback_reason": None,
+            "needs_fallback": False,
+        }
+
+    monkeypatch.setattr(figures, "_rasterize_figure", record_raster)
+
+    selection = figures._extract_pdf_candidates(
+        pdf_path,
+        tmp_path / "figures",
+        max_pages=None,
+        max_candidates=200,
+        top_k=1,
+    )
+
+    assert len(selection.selected) == 1
+    assert selection.candidate_count == 3
+    assert rasterized == ["Figure 2. Proposed pipeline workflow and quantitative results."]
+    assert len(list((tmp_path / "figures").glob("*.png"))) == 1

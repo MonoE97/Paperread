@@ -197,6 +197,8 @@ def _build_table_candidates(pages: list[dict[str, Any]], sections: list[dict[str
         if not signals:
             continue
         section_title = _section_for_page(sections, page_number)
+        if section_title == "Unknown":
+            continue
         candidate_index = len(candidates) + 1
         candidates.append(
             {

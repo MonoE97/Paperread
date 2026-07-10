@@ -338,11 +338,25 @@ def test_local_publish_revalidates_and_atomically_copies_exact_candidate_markdow
     assert _candidate_tree_snapshot(candidate_dir) == candidate_before
     run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     assert run["status"] == "published"
-    assert any(item["role"] == "local_receipt" for item in run["artifacts"])
+    assert [item["role"] for item in run["artifacts"]].count("local_publication_intent") == 1
+    assert [item["role"] for item in run["artifacts"]].count("local_receipt") == 1
+    intent_path = run_dir / "publication-intent.json"
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    assert intent == {
+        "format": "paper_reader.local-publication-intent.v2-internal",
+        "run_id": candidate.run_id,
+        "candidate_id": candidate.candidate_id,
+        "candidate_digest": local_publication.candidate_core_digest(candidate),
+        "target_path": str(target),
+        "content_sha256": candidate.content_sha256,
+        "content_length": candidate.content_length,
+    }
     receipt_path = Path(payload["data"]["receipt_path"])
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert receipt["format"] == "paper_reader.local-receipt.v2-internal"
     assert receipt["candidate_digest"] == local_publication.candidate_core_digest(candidate)
+    assert receipt["intent_path"] == "publication-intent.json"
+    assert receipt["intent_sha256"] == hashlib.sha256(intent_path.read_bytes()).hexdigest()
     assert receipt["content_sha256"] == candidate.content_sha256
     assert receipt["target_path"] == str(target)
     assert not list(run_dir.rglob("write-payload.json"))
@@ -441,15 +455,22 @@ def test_concurrent_local_publish_converges_on_one_exact_publication(tmp_path: P
     assert (tmp_path / "paper_note.md").read_bytes() == (candidate_path.parent / "note.md").read_bytes()
 
 
-def test_local_publish_fault_before_no_replace_leaves_target_and_status_untouched(
+def test_local_publish_recovers_after_intent_commit_before_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run_dir, candidate_path = _built_candidate(tmp_path)
     run_before = (run_dir / "run.json").read_bytes()
 
-    def injected_failure(_content: bytes, _target: Path) -> Path:
-        raise OSError("injected file publication failure")
+    original_publish = local_publish_module.publish_bytes_no_replace
+    failed = False
+
+    def injected_failure(content: bytes, target: Path) -> Path:
+        nonlocal failed
+        if Path(target) == tmp_path / "paper_note.md" and not failed:
+            failed = True
+            raise OSError("injected failure after intent commit")
+        return original_publish(content, target)
 
     monkeypatch.setattr("paper_reader.local_publish.publish_bytes_no_replace", injected_failure, raising=False)
 
@@ -457,9 +478,15 @@ def test_local_publish_fault_before_no_replace_leaves_target_and_status_untouche
 
     assert result.exit_code == 1
     assert _result_payload(result)["code"] == "publish_failed"
+    assert (run_dir / "publication-intent.json").is_file()
     assert not (tmp_path / "paper_note.md").exists()
     assert (run_dir / "run.json").read_bytes() == run_before
     assert not (run_dir / "receipts").exists()
+
+    retry = _invoke(["local", "publish", str(candidate_path)])
+
+    assert retry.exit_code == 0, retry.stderr
+    assert (tmp_path / "paper_note.md").read_bytes() == (candidate_path.parent / "note.md").read_bytes()
 
 
 def test_local_publish_blocks_projected_run_size_before_target_commit(
@@ -482,11 +509,12 @@ def test_local_publish_blocks_projected_run_size_before_target_commit(
     assert result.exit_code == 1
     assert _result_payload(result)["code"] == "run_size_limit_exceeded"
     assert not (tmp_path / "paper_note.md").exists()
+    assert not (run_dir / "publication-intent.json").exists()
     assert not (run_dir / "receipts").exists()
     assert (run_dir / "run.json").read_bytes() == run_before
 
 
-def test_local_publish_recovers_exact_preexisting_target_without_rewriting_it(
+def test_local_publish_rejects_exact_preexisting_target_without_claiming_intent(
     tmp_path: Path,
 ) -> None:
     run_dir, candidate_path = _built_candidate(tmp_path)
@@ -497,11 +525,12 @@ def test_local_publish_recovers_exact_preexisting_target_without_rewriting_it(
 
     result = _invoke(["local", "publish", str(candidate_path)])
 
-    assert result.exit_code == 0, result.stderr
-    payload = _result_payload(result)
-    assert payload["code"] == "published"
+    assert result.exit_code == 1
+    assert _result_payload(result)["code"] == "publish_conflict"
     assert (target.stat().st_ino, target.stat().st_mtime_ns, target.read_bytes()) == target_before
-    assert json.loads((run_dir / "run.json").read_text())["status"] == "published"
+    assert not (run_dir / "publication-intent.json").exists()
+    assert not (run_dir / "receipts").exists()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "candidate_built"
 
 
 def test_local_publish_recovers_after_target_commit_before_receipt(
@@ -531,6 +560,7 @@ def test_local_publish_recovers_after_target_commit_before_receipt(
 
     assert first.exit_code == 1
     assert _result_payload(first)["code"] == "publication_recovery_required"
+    assert (run_dir / "publication-intent.json").is_file()
     target = tmp_path / "paper_note.md"
     target_before = (target.stat().st_ino, target.stat().st_mtime_ns, target.read_bytes())
     assert not (run_dir / "receipts").exists()
@@ -568,6 +598,7 @@ def test_local_publish_recovers_after_receipt_commit_before_run_update(
     target_before = (target.stat().st_ino, target.stat().st_mtime_ns, target.read_bytes())
     receipts = list((run_dir / "receipts").glob("*.json"))
     assert len(receipts) == 1
+    assert (run_dir / "publication-intent.json").is_file()
     receipt_before = receipts[0].read_bytes()
     assert json.loads((run_dir / "run.json").read_text())["status"] == "candidate_built"
 
@@ -592,6 +623,7 @@ def test_local_publish_is_idempotent_after_published_run(
     receipt = Path(first_payload["data"]["receipt_path"])
     snapshot = {
         "target": (target.stat().st_ino, target.stat().st_mtime_ns, target.read_bytes()),
+        "intent": (run_dir / "publication-intent.json").read_bytes(),
         "receipt": (receipt.stat().st_ino, receipt.stat().st_mtime_ns, receipt.read_bytes()),
         "run": (run_dir / "run.json").read_bytes(),
     }
@@ -603,4 +635,30 @@ def test_local_publish_is_idempotent_after_published_run(
     assert second_payload["data"]["receipt_path"] == str(receipt)
     assert (target.stat().st_ino, target.stat().st_mtime_ns, target.read_bytes()) == snapshot["target"]
     assert (receipt.stat().st_ino, receipt.stat().st_mtime_ns, receipt.read_bytes()) == snapshot["receipt"]
+    assert (run_dir / "publication-intent.json").read_bytes() == snapshot["intent"]
     assert (run_dir / "run.json").read_bytes() == snapshot["run"]
+
+
+def test_second_candidate_with_same_note_bytes_cannot_claim_first_candidate_intent(
+    tmp_path: Path,
+) -> None:
+    run_dir = _sealed_run(tmp_path)
+    first_build = _invoke(["candidate", "build", str(run_dir)])
+    second_build = _invoke(["candidate", "build", str(run_dir)])
+    assert first_build.exit_code == 0, first_build.stderr
+    assert second_build.exit_code == 0, second_build.stderr
+    first_path = Path(_result_payload(first_build)["data"]["candidate_path"])
+    second_path = Path(_result_payload(second_build)["data"]["candidate_path"])
+    assert first_path != second_path
+    assert (first_path.parent / "note.md").read_bytes() == (second_path.parent / "note.md").read_bytes()
+
+    first_publish = _invoke(["local", "publish", str(first_path)])
+    second_publish = _invoke(["local", "publish", str(second_path)])
+
+    assert first_publish.exit_code == 0, first_publish.stderr
+    assert second_publish.exit_code == 1
+    assert _result_payload(second_publish)["code"] == "publication_identity_conflict"
+    assert len(list((run_dir / "receipts").glob("*.json"))) == 1
+    intent = json.loads((run_dir / "publication-intent.json").read_text())
+    first = PaperReaderCandidate.model_validate_json(first_path.read_bytes())
+    assert intent["candidate_id"] == first.candidate_id

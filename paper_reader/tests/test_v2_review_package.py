@@ -245,6 +245,22 @@ def test_review_validate_rehashes_every_bound_evidence_file(tmp_path: Path) -> N
     assert "evidence_artifact_hash_mismatch" in _blocker_codes(result)
 
 
+def test_review_validate_blocks_unreferenced_file_in_immutable_evidence_bundle(
+    tmp_path: Path,
+) -> None:
+    run_dir, evidence_digest = _prepared_run(tmp_path)
+    _write_summary_and_review(run_dir, evidence_digest)
+    run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    evidence_ref = next(item for item in run["artifacts"] if item["role"] == "evidence_manifest")
+    evidence_dir = (run_dir / evidence_ref["path"]).parent
+    (evidence_dir / "unreferenced.bin").write_bytes(b"not in evidence manifest")
+
+    result = _invoke(["review", "validate", str(run_dir)])
+
+    assert result.exit_code == 1
+    assert "evidence_closed_world_mismatch" in _blocker_codes(result)
+
+
 def test_review_seal_atomically_publishes_immutable_snapshots_and_validation(tmp_path: Path) -> None:
     run_dir, evidence_digest = _prepared_run(tmp_path)
     summary, review = _write_summary_and_review(run_dir, evidence_digest)

@@ -93,6 +93,21 @@ def test_extract_pdf_emits_conservative_table_value_candidates(tmp_path: Path) -
     assert candidate["locator"] == "context.md page 2 section Results table_candidate 1"
 
 
+def test_extract_pdf_skips_numeric_table_signals_without_recognized_section(
+    tmp_path: Path,
+) -> None:
+    pdf_path = tmp_path / "paper.pdf"
+    make_pdf(
+        pdf_path,
+        ["Table 1 Baseline RMSE 0.25 MAE 0.13 R2 0.91 speedup 10x."],
+    )
+
+    result = extract_pdf(pdf_path)
+
+    assert result["sections"] == []
+    assert result["table_candidates"] == []
+
+
 def test_extract_pdf_page_records_warn_for_empty_pages(tmp_path: Path) -> None:
     pdf_path = tmp_path / "paper.pdf"
     make_pdf(pdf_path, ["", "Methods\nEnough text for extraction."])

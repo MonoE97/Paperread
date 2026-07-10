@@ -128,23 +128,42 @@ def _load_candidate(
     }
 
 
-def _updated_run(loaded: LoadedRun, receipt_ref: ArtifactRef, gate: GateState) -> PaperReaderRun:
-    run = loaded.run
+def _bind_unique_artifact(
+    artifacts: tuple[ArtifactRef, ...],
+    artifact_ref: ArtifactRef,
+    *,
+    conflict_code: str,
+) -> tuple[ArtifactRef, ...]:
     matching = [
         item
-        for item in run.artifacts
-        if item.role == receipt_ref.role and item.path == receipt_ref.path
+        for item in artifacts
+        if item.role == artifact_ref.role or item.path == artifact_ref.path
     ]
-    if any(item != receipt_ref for item in matching):
+    if any(item != artifact_ref for item in matching):
         raise LocalPublicationError(
-            "receipt_conflict",
-            "run manifest binds conflicting bytes at the deterministic receipt path",
+            conflict_code,
+            "run manifest binds conflicting publication identity bytes",
         )
-    artifacts = tuple(
-        item
-        for item in run.artifacts
-        if not (item.role == receipt_ref.role and item.path == receipt_ref.path)
-    ) + (receipt_ref,)
+    return tuple(item for item in artifacts if item != artifact_ref) + (artifact_ref,)
+
+
+def _updated_run(
+    loaded: LoadedRun,
+    intent_ref: ArtifactRef,
+    receipt_ref: ArtifactRef,
+    gate: GateState,
+) -> PaperReaderRun:
+    run = loaded.run
+    artifacts = _bind_unique_artifact(
+        run.artifacts,
+        intent_ref,
+        conflict_code="publication_identity_conflict",
+    )
+    artifacts = _bind_unique_artifact(
+        artifacts,
+        receipt_ref,
+        conflict_code="receipt_conflict",
+    )
     return PaperReaderRun(
         schema_version="paper_reader.run.v2",
         run_id=run.run_id,
@@ -242,12 +261,103 @@ def _publish_or_recover_target(
         )
 
 
+def _intent_bytes_and_path(
+    *,
+    run_dir: Path,
+    candidate: PaperReaderCandidate,
+    candidate_digest: str,
+) -> tuple[bytes, Path, ArtifactRef]:
+    intent_path = run_dir / "publication-intent.json"
+    intent = {
+        "format": "paper_reader.local-publication-intent.v2-internal",
+        "run_id": candidate.run_id,
+        "candidate_id": candidate.candidate_id,
+        "candidate_digest": candidate_digest,
+        "target_path": candidate.target.resolved_path,
+        "content_sha256": candidate.content_sha256,
+        "content_length": candidate.content_length,
+    }
+    intent_bytes = canonical_json_bytes(intent)
+    intent_ref = ArtifactRef(
+        role="local_publication_intent",
+        path=intent_path.relative_to(run_dir).as_posix(),
+        sha256=hashlib.sha256(intent_bytes).hexdigest(),
+        size_bytes=len(intent_bytes),
+        media_type="application/json",
+    )
+    return intent_bytes, intent_path, intent_ref
+
+
+def _publish_or_verify_intent(
+    *,
+    intent_bytes: bytes,
+    intent_path: Path,
+    target_path: Path,
+) -> None:
+    if os.path.lexists(intent_path):
+        actual = _read_stable_regular_file(
+            intent_path,
+            conflict_code="publication_identity_conflict",
+        )
+        if actual != intent_bytes:
+            raise LocalPublicationError(
+                "publication_identity_conflict",
+                f"run publication intent belongs to another candidate: {intent_path}",
+            )
+        return
+
+    if os.path.lexists(target_path):
+        raise LocalPublicationError(
+            "publish_conflict",
+            f"fixed local target predates this run publication intent: {target_path}",
+            data={"target_path": str(target_path)},
+        )
+    try:
+        publish_bytes_no_replace(intent_bytes, intent_path)
+    except (PublishConflictError, FileExistsError):
+        actual = _read_stable_regular_file(
+            intent_path,
+            conflict_code="publication_identity_conflict",
+        )
+        if actual != intent_bytes:
+            raise LocalPublicationError(
+                "publication_identity_conflict",
+                f"run publication intent belongs to another candidate: {intent_path}",
+            )
+    except Exception as exc:
+        if os.path.lexists(intent_path):
+            actual = _read_stable_regular_file(
+                intent_path,
+                conflict_code="publication_identity_conflict",
+            )
+            if actual == intent_bytes:
+                return
+            raise LocalPublicationError(
+                "publication_identity_conflict",
+                f"run publication intent belongs to another candidate: {intent_path}",
+            ) from exc
+        raise LocalPublicationError(
+            "publication_intent_failed",
+            f"atomic publication intent commit failed: {intent_path}: {exc}",
+        ) from exc
+    actual = _read_stable_regular_file(
+        intent_path,
+        conflict_code="publication_identity_conflict",
+    )
+    if actual != intent_bytes:
+        raise LocalPublicationError(
+            "publication_identity_conflict",
+            f"run publication intent belongs to another candidate: {intent_path}",
+        )
+
+
 def _receipt_bytes_and_path(
     *,
     run_dir: Path,
     candidate_path: Path,
     candidate: PaperReaderCandidate,
     candidate_digest: str,
+    intent_ref: ArtifactRef,
 ) -> tuple[bytes, Path, ArtifactRef]:
     receipt_id = f"local-receipt-{candidate.candidate_id}"
     receipt_path = run_dir / "receipts" / f"{candidate.candidate_id}.json"
@@ -257,6 +367,8 @@ def _receipt_bytes_and_path(
         "run_id": candidate.run_id,
         "candidate_path": candidate_path.relative_to(run_dir).as_posix(),
         "candidate_digest": candidate_digest,
+        "intent_path": intent_ref.path,
+        "intent_sha256": intent_ref.sha256,
         "target_path": candidate.target.resolved_path,
         "content_sha256": candidate.content_sha256,
         "content_length": candidate.content_length,
@@ -278,12 +390,14 @@ def _publish_or_verify_receipt(
     candidate_path: Path,
     candidate: PaperReaderCandidate,
     candidate_digest: str,
+    intent_ref: ArtifactRef,
 ) -> tuple[Path, ArtifactRef]:
     receipt_bytes, receipt_path, receipt_ref = _receipt_bytes_and_path(
         run_dir=run_dir,
         candidate_path=candidate_path,
         candidate=candidate,
         candidate_digest=candidate_digest,
+        intent_ref=intent_ref,
     )
     if os.path.lexists(receipt_path):
         actual = _read_stable_regular_file(receipt_path, conflict_code="receipt_conflict")
@@ -358,18 +472,30 @@ def _publish_local_candidate_locked(
     target_path = validate_local_target_location(target, source)
     _note_path, note_bytes = verified["note_markdown"][0]
     run_dir = loaded.manifest_path.resolve(strict=True).parent
+    intent_bytes, intent_path, intent_ref = _intent_bytes_and_path(
+        run_dir=run_dir,
+        candidate=candidate,
+        candidate_digest=digest,
+    )
     receipt_bytes, projected_receipt_path, projected_receipt_ref = _receipt_bytes_and_path(
         run_dir=run_dir,
         candidate_path=candidate_path,
         candidate=candidate,
         candidate_digest=digest,
+        intent_ref=intent_ref,
     )
-    projected_run = _updated_run(loaded, projected_receipt_ref, candidate.gate)
+    projected_run = _updated_run(
+        loaded,
+        intent_ref,
+        projected_receipt_ref,
+        candidate.gate,
+    )
     try:
         enforce_projected_run_size(
             run_dir,
             max_bytes=V2_RESOURCE_POLICY.run_max_bytes,
             replacements={
+                intent_path: intent_bytes,
                 projected_receipt_path: receipt_bytes,
                 loaded.manifest_path: canonical_json_bytes(projected_run),
             },
@@ -383,6 +509,11 @@ def _publish_local_candidate_locked(
                 "max_bytes": exc.max_bytes,
             },
         ) from exc
+    _publish_or_verify_intent(
+        intent_bytes=intent_bytes,
+        intent_path=intent_path,
+        target_path=target_path,
+    )
     _publish_or_recover_target(target_path, note_bytes, candidate.content_sha256)
 
     try:
@@ -391,6 +522,7 @@ def _publish_local_candidate_locked(
             candidate_path=candidate_path,
             candidate=candidate,
             candidate_digest=digest,
+            intent_ref=intent_ref,
         )
     except LocalPublicationError:
         raise
@@ -401,7 +533,7 @@ def _publish_local_candidate_locked(
             data={"target_path": str(target_path)},
         ) from exc
     try:
-        updated_run = _updated_run(loaded, receipt_ref, candidate.gate)
+        updated_run = _updated_run(loaded, intent_ref, receipt_ref, candidate.gate)
         if updated_run != loaded.run:
             atomic_write_json(loaded.manifest_path, updated_run)
     except LocalPublicationError:
