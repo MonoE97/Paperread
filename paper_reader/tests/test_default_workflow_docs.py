@@ -1,5 +1,11 @@
+import os
+import shutil
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
+
+import pytest
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -274,6 +280,10 @@ def test_zotero_reference_keeps_single_paper_write_safety_contract() -> None:
         "paper_reader.candidate.v2",
         "paper_reader.write-authorization.v2",
         "immutable candidate",
+        "--external-claim-id <claim_id>",
+        "--write-attempt-id <write_attempt_id>",
+        "candidate digest",
+        "does not bind lease_token",
         "TTL",
         "300 seconds",
         "at most once",
@@ -284,10 +294,13 @@ def test_zotero_reference_keeps_single_paper_write_safety_contract() -> None:
         "http://127.0.0.1:23120/mcp",
         "NO_PROXY",
         "Zotero local API and SQLite are read-only",
+        "An exact parent + title + canonical HTML hash match locates one note but does not verify it",
+        "only after full verification passes exact parent, note key, exact title, complete tags, required headings, minimum length, and canonical HTML hash",
     ]:
         assert phrase in text
 
     assert ('write_note(action="' + "update" + '"') not in text
+    assert "one match -> verified" not in text
 
 
 def test_pdf_path_reference_forbids_zotero_write_path() -> None:
@@ -364,7 +377,11 @@ def test_summary_reference_documents_rendered_chinese_fields() -> None:
 
 
 def test_root_agents_defines_breaking_v2_public_contract() -> None:
-    text = read(REPO_ROOT / "AGENTS.md")
+    agents = REPO_ROOT / "AGENTS.md"
+    if not agents.exists():
+        pytest.skip("root AGENTS contract is validated only in the source repository")
+
+    text = read(agents)
 
     for phrase in [
         "Paper Reader 2.0",
@@ -389,8 +406,39 @@ def test_root_agents_defines_breaking_v2_public_contract() -> None:
         "lease",
         "external agent",
         "MCP `write_note`",
+        "An exact parent + title + canonical HTML hash match locates one note but does not verify it",
     ]:
         assert phrase in text
+
+
+def test_default_workflow_docs_pass_in_isolated_skill_copy(tmp_path: Path) -> None:
+    if os.environ.get("PAPER_READER_DOCS_ISOLATION_CHILD") == "1":
+        pytest.skip("outer test owns isolated-copy execution")
+
+    isolated_root = tmp_path / "paper_reader"
+    shutil.copytree(
+        SKILL_ROOT,
+        isolated_root,
+        ignore=shutil.ignore_patterns(
+            ".venv",
+            ".pytest_cache",
+            "__pycache__",
+            "*.pyc",
+            "runs",
+        ),
+    )
+    env = os.environ.copy()
+    env["PAPER_READER_DOCS_ISOLATION_CHILD"] = "1"
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/test_default_workflow_docs.py", "-q"],
+        cwd=isolated_root,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
 
 
 def test_capture_secondary_script_is_in_skill_bundle() -> None:

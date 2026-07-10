@@ -56,6 +56,8 @@ def test_batch_skill_declares_grouped_routing_and_safety() -> None:
         "paper_reader_batch.command-result.v2",
         "unsupported_run_schema",
         "historical-only",
+        "An exact parent + title + canonical HTML hash match locates one note but does not verify it",
+        "only after full verification passes exact parent, note key, exact title, complete tags, required headings, minimum length, and canonical HTML hash",
     ]:
         assert phrase in text
 
@@ -92,26 +94,35 @@ def test_batch_workflow_declares_journal_leases_and_write_sequence() -> None:
         "uncertain",
         "never queued",
         "takeaway_source_sha256",
-        "worker renew <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token>",
-        "worker finish <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token>",
-        "worker release <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token>",
-        "local-prepare renew <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token>",
-        "local-prepare finish <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token>",
-        "local-prepare release <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token>",
-        "write preview <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token>",
-        "write renew <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token>",
-        "write release <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token>",
-        "write begin <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token> --authorization <authorization.json>",
-        "write commit <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token>",
-        "write mark-uncertain <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token>",
+        "worker renew <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id>",
+        "worker finish <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id>",
+        "worker release <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id>",
+        "local-prepare renew <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id>",
+        "local-prepare finish <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id>",
+        "local-prepare release <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id>",
+        "write preview <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id>",
+        "write renew <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id>",
+        "write release <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id>",
+        "write begin <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id> --authorization <authorization.json>",
+        "write commit <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id>",
+        "write mark-uncertain <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id>",
         "write reconcile <batch_run_dir> <item_id> --readback <readback.json> --request-id UUID",
         "write preview shows only the immutable candidate",
         "explicit real-write intent",
         "external claim id",
+        "candidate digest",
+        "write_attempt_id",
+        "does not bind lease_token",
+        "write begin independently validates the current claim_id, lease_token, and write_attempt_id",
+        "write events and results bind claim_id, lease_token, and write_attempt_id",
         "Chinese-first",
         "unsupported_run_schema",
+        "An exact parent + title + canonical HTML hash match locates one note but does not verify it",
+        "only after full verification passes exact parent, note key, exact title, complete tags, required headings, minimum length, and canonical HTML hash",
     ]:
         assert phrase in text
+
+    assert "One match commits written" not in text
 
 
 def test_parallel_dispatch_declares_claim_bound_authorization_handoff() -> None:
@@ -126,8 +137,24 @@ def test_parallel_dispatch_declares_claim_bound_authorization_handoff() -> None:
         "$paper_reader zotero authorize",
         "external claim id",
         "write begin",
+        "uv run paper_reader_batch worker claim <batch_run> --worker-id <worker_id> --request-id UUID",
+        "uv run paper_reader_batch worker renew <batch_run> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id>",
+        "uv run paper_reader_batch local-prepare claim <batch_run> --worker-id <worker_id> --request-id UUID",
+        "uv run paper_reader_batch local-prepare renew <batch_run> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id>",
+        "uv run paper_reader_batch local-prepare finish <batch_run> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id>",
+        "uv run paper_reader_batch local-prepare release <batch_run> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id>",
+        "uv run paper_reader_batch write claim <batch_run> --writer-id <writer_id> --request-id UUID",
+        "uv run paper_reader_batch write preview <batch_run> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id>",
+        "uv run paper_reader_batch write renew <batch_run> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id>",
+        "uv run paper_reader_batch write release <batch_run> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id>",
+        "uv run paper_reader_batch write commit <batch_run> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id>",
+        "uv run paper_reader_batch write mark-uncertain <batch_run> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id>",
+        "authorization binds the external claim id, candidate digest, and write_attempt_id",
+        "authorization does not bind the lease token",
+        "write begin independently validates the current claim id, lease token, and write attempt id",
         "Chinese-first",
         "uncertain, never queued",
+        "An exact parent + title + canonical HTML hash match locates one note but does not verify it",
     ]:
         assert phrase in text
 
@@ -178,8 +205,18 @@ def test_batch_v2_schema_contract_is_exhaustive() -> None:
     ]:
         assert phrase in text
 
-    for phrase in ["Chinese-first", "sealed review", "candidate", "lease token"]:
+    for phrase in [
+        "Chinese-first",
+        "sealed review",
+        "candidate",
+        "lease token",
+        "write_attempt_id",
+        "An exact parent + title + canonical HTML hash match locates one note but does not verify it",
+        "only after full verification passes exact parent, note key, exact title, complete tags, required headings, minimum length, and canonical HTML hash",
+    ]:
         assert phrase in text
+
+    assert "one exact parent + title + hash match may become written" not in text
 
     for stale_schema in [
         "paper_reader_batch.manifest.v1",

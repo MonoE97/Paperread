@@ -59,9 +59,9 @@ Default Codex concurrency is 3. Use `references/parallel-dispatch.md` for worker
 
 ```bash
 uv run paper_reader_batch worker claim <batch_run_dir> --worker-id <worker_id> --request-id UUID
-uv run paper_reader_batch worker renew <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --request-id UUID
-uv run paper_reader_batch worker finish <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --result <result.json> --request-id UUID
-uv run paper_reader_batch worker release <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --request-id UUID
+uv run paper_reader_batch worker renew <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --request-id UUID
+uv run paper_reader_batch worker finish <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --result <result.json> --request-id UUID
+uv run paper_reader_batch worker release <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --request-id UUID
 uv run paper_reader_batch worker retry <batch_run_dir> <item_id> --request-id UUID
 ```
 
@@ -71,9 +71,9 @@ If outer-agent parallelism is unavailable, use the `local-prepare` group as fall
 
 ```bash
 uv run paper_reader_batch local-prepare claim <batch_run_dir> --worker-id <worker_id> --request-id UUID
-uv run paper_reader_batch local-prepare renew <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --request-id UUID
-uv run paper_reader_batch local-prepare finish <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --result <result.json> --request-id UUID
-uv run paper_reader_batch local-prepare release <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --request-id UUID
+uv run paper_reader_batch local-prepare renew <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --request-id UUID
+uv run paper_reader_batch local-prepare finish <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --result <result.json> --request-id UUID
+uv run paper_reader_batch local-prepare release <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --request-id UUID
 uv run paper_reader_batch local-prepare retry <batch_run_dir> <item_id> --request-id UUID
 ```
 
@@ -106,35 +106,37 @@ The default write policy is `zotero_write`; explicit dry-run uses `prepare_only`
 
 ```bash
 uv run paper_reader_batch write claim <batch_run_dir> --writer-id <writer_id> --request-id UUID
-uv run paper_reader_batch write preview <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token>
-uv run paper_reader_batch write renew <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token> --request-id UUID
+uv run paper_reader_batch write preview <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id>
+uv run paper_reader_batch write renew <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id> --request-id UUID
 ```
 
-Write claim returns and binds exactly one candidate plus `claim_id`, `lease_token`, writer id and expiry. `write preview shows only the immutable candidate`: its target, fixed title/tags, `note.md`, `note.html` and hashes; no authorization exists yet. After preview, obtain the user's explicit real-write intent. Only then may the external agent run `$paper_reader zotero authorize <candidate> --external-claim-id <claim_id>` so the immutable authorization binds this external claim id. Pass that authorization to batch begin; it must have at least 30 seconds remaining. Begin atomically consumes the nonce and commits `write.started` before returning the exact MCP envelope:
+Write claim returns and binds exactly one candidate plus writer id, `claim_id`, `lease_token`, `write_attempt_id` and expiry. The write preview shows only the immutable candidate: its target, fixed title/tags, `note.md`, `note.html` and hashes; no authorization exists yet. After preview, obtain the user's explicit real-write intent. Only then may the external agent run `$paper_reader zotero authorize <candidate> --external-claim-id <claim_id> --write-attempt-id <write_attempt_id>`. The authorization binds the external claim id, candidate digest, and `write_attempt_id`; it does not bind lease_token. Pass that authorization to batch begin; it must have at least 30 seconds remaining. Batch write begin independently validates the current claim_id, lease_token, and write_attempt_id plus writer, item, candidate digest and authorization bindings. It then atomically consumes the nonce and commits `write.started` before returning the exact MCP envelope:
 
 ```bash
-uv run paper_reader_batch write begin <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token> --authorization <authorization.json> --request-id UUID
+uv run paper_reader_batch write begin <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id> --authorization <authorization.json> --request-id UUID
 ```
 
 The batch CLI must not call `write_note`. The external agent may send the exact envelope at most once, then uses `$paper_reader` read-only verification. A verified `paper_reader_batch.write-result.v2` is committed with:
 
 ```bash
-uv run paper_reader_batch write commit <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token> --result <write-result.json> --request-id UUID
+uv run paper_reader_batch write commit <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id> --result <write-result.json> --request-id UUID
 ```
 
 Claim release/expiry may return queued work to the queue. Any crash, error or expiry after `write.started` must be recorded as uncertain, never queued:
 
 ```bash
-uv run paper_reader_batch write mark-uncertain <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token> --reason <reason> --request-id UUID
+uv run paper_reader_batch write mark-uncertain <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id> --reason <reason> --request-id UUID
 uv run paper_reader_batch write reconcile <batch_run_dir> <item_id> --readback <readback.json> --request-id UUID
 ```
 
-Reconciliation matches exact parent + title + canonical HTML hash. One match commits written; zero requires explicit retry confirmation; many blocks. Retry requires `--acknowledge-no-match`, a new authorization and a new request id:
+An exact parent + title + canonical HTML hash match locates one note but does not verify it. The located note may become written only after full verification passes exact parent, note key, exact title, complete tags, required headings, minimum length, and canonical HTML hash. Zero matches require explicit retry confirmation; many block. Retry requires `--acknowledge-no-match`, a new authorization and a new request id:
 
 ```bash
 uv run paper_reader_batch write retry <batch_run_dir> <item_id> --acknowledge-no-match --request-id UUID
-uv run paper_reader_batch write release <batch_run_dir> <item_id> --claim-id <claim_id> --lease-token <lease_token> --request-id UUID
+uv run paper_reader_batch write release <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id> --request-id UUID
 ```
+
+All write events and results bind claim_id, lease_token, and write_attempt_id. Journal replay rejects stale, cross-claim or cross-attempt events/results before state mutation.
 
 ## Safety
 

@@ -78,10 +78,10 @@ The immutable candidate binds run/source/evidence/review identity, exact parent 
 9. Only after explicit real-write intent, create `paper_reader.write-authorization.v2`:
 
 ```bash
-uv run paper_reader zotero authorize <candidate>
+uv run paper_reader zotero authorize <candidate> --external-claim-id <claim_id> --write-attempt-id <write_attempt_id>
 ```
 
-Authorization accepts no parent/title/content/tag overrides. It re-hashes all artifacts, refreshes the read-only parent/children snapshot, verifies title availability and parent fingerprint, takes a local parent lease, then binds the exact HTML, canonical HTML hash/length, tags, candidate digest, parent snapshot, external claim id, random nonce/token and TTL. TTL defaults to and may not exceed 300 seconds.
+Authorization accepts no parent/title/content/tag overrides. It re-hashes all artifacts, refreshes the read-only parent/children snapshot, verifies title availability and parent fingerprint, takes a local parent lease, then binds the exact HTML, canonical HTML hash/length, tags, candidate digest, parent snapshot, external claim id, `write_attempt_id`, random nonce/token and TTL. Authorization does not bind lease_token: a batch lease may be renewed independently, while batch `write begin` validates its current claim and lease. TTL defaults to and may not exceed 300 seconds.
 
 10. The external agent is the only writer. It may send the authorization's exact MCP envelope at most once: `zotero-mcp write_note(action="create", parentKey=<authorization parentKey>, content=<exact authorization HTML>, tags=<authorization tags>)`. Neither the CLI nor batch runtime may call `write_note`.
 11. Verify immediately:
@@ -98,7 +98,7 @@ Verification checks exact parent, note key, title, complete tags, required headi
 uv run paper_reader zotero reconcile <authorization>
 ```
 
-Exact parent + title + canonical HTML hash has three outcomes: one match -> verified; zero -> `not_found` and retry requires explicit confirmation; many -> ambiguous/blocked. Expired authorization remains evidence for verify/reconcile, not permission to write.
+An exact parent + title + canonical HTML hash match locates one note but does not verify it. For one located note, run `zotero verify` against that exact note key and readback; only after full verification passes exact parent, note key, exact title, complete tags, required headings, minimum length, and canonical HTML hash may the note become verified. Zero matches -> `not_found` and retry requires explicit confirmation; many -> ambiguous/blocked. Expired authorization remains evidence for verify/reconcile, not permission to write.
 
 ## Boundaries
 

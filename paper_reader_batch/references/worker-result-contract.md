@@ -34,9 +34,9 @@ Failed/blocked `paper_reader_batch.worker-result.v2` still binds manifest/item, 
 
 ## Verified Zotero Write Result
 
-`paper_reader_batch.write-result.v2` binds item, write claim/lease, `write.started` event, candidate digest, authorization digest/nonce, external claim id, exact note/parent keys, canonical HTML hash and `paper_reader.verification.v2`. Commit accepts only passed verification whose parent, title, complete tags, headings, length and hash match the immutable authorization.
+`paper_reader_batch.write-result.v2` binds item, writer id, claim id, lease token, `write_attempt_id`, `write.started` event, candidate digest, authorization digest/nonce, external claim id, exact note/parent keys, canonical HTML hash and `paper_reader.verification.v2`. Authorization binds external claim id + candidate digest + `write_attempt_id`, never the renewable lease token; batch begin independently validates the current claim/lease/write-attempt identity. Commit accepts only passed verification whose parent, note key, exact title, complete tags, required headings, minimum length and canonical HTML hash match the immutable authorization.
 
-If the external outcome is unknown, record uncertain instead of fabricating a result. `paper_reader_batch.reconciliation.v2` binds the same candidate/authorization and read-only search evidence: one exact parent + title + hash match may become written; zero requires explicit no-match acknowledgement plus new authorization/request id; many remains blocked. Expired authorization is valid evidence for verification/reconciliation but never write authority.
+If the external outcome is unknown, record uncertain instead of fabricating a result. `paper_reader_batch.reconciliation.v2` binds the same claim id, `write_attempt_id`, candidate/authorization and read-only search evidence. An exact parent + title + canonical HTML hash match locates one note but does not verify it. The located note may become written only after full verification passes exact parent, note key, exact title, complete tags, required headings, minimum length, and canonical HTML hash. Zero matches require explicit no-match acknowledgement plus new authorization/request id; many remain blocked. Expired authorization is valid evidence for verification/reconciliation but never write authority.
 
 ## Command Result
 
