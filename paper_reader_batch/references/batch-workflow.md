@@ -53,19 +53,22 @@ The append-only hash-chain `events/<20-digit-seq>.json` is the source of truth. 
 
 Every state-mutating command requires `--request-id UUID`. Reusing the same UUID with the same fingerprint returns an idempotent replay; reusing it for another request is rejected.
 
+Manifest builders and default `run init` execute before a run journal exists. They use a skill-root request receipt under a global no-follow allocation lock: the receipt binds the exact UUID, canonical request fingerprint and reserved output/run target before publication. Crash recovery resumes only that receipt and target; scanning or globbing runs to rediscover a result is forbidden.
+
 ## Execution
 
 Default Codex concurrency is 3. Use `references/parallel-dispatch.md` for worker/local-prepare lease commands and the controller loop. Manifest concurrency sets claim defaults but never weakens safety limits.
 
 ```bash
 uv run paper_reader_batch worker claim <batch_run_dir> --worker-id <worker_id> --request-id UUID
+uv run paper_reader_batch worker prompt <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id>
 uv run paper_reader_batch worker renew <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --request-id UUID
 uv run paper_reader_batch worker finish <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --result <result.json> --request-id UUID
-uv run paper_reader_batch worker release <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --request-id UUID
+uv run paper_reader_batch worker release <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --acknowledge-no-side-effects --request-id UUID
 uv run paper_reader_batch worker retry <batch_run_dir> <item_id> --request-id UUID
 ```
 
-Worker claim returns and binds `claim_id`, `lease_token`, `attempt_id`, worker id and item id. Worker leases default to 900 seconds. Every renew/finish/release must present the same claim id, lease token and exact attempt; stale lease tokens or cross-item values are rejected. Failed/blocked items require explicit retry. Duplicate resolved PDFs use same-PDF mutual exclusion across worker and local-prepare lanes.
+Worker claim returns and binds `claim_id`, `lease_token`, `attempt_id`, worker id and item id. `worker prompt` validates that exact live identity and returns the deterministic outer-agent instruction without mutating state or dispatching an LLM. Worker leases default to 900 seconds. Every renew/finish/release must present the same claim id, lease token and exact attempt; stale lease tokens or cross-item values are rejected. Release additionally requires `--acknowledge-no-side-effects` and is forbidden after any external side effect or single-paper artifact. Failed/blocked items require explicit retry. Duplicate resolved PDFs use same-PDF mutual exclusion across worker and local-prepare lanes.
 
 If outer-agent parallelism is unavailable, use the `local-prepare` group as fallback pre-extraction for `pdf_path` items only, then continue deep reading from the exact claimed prepare attempt:
 
@@ -73,11 +76,11 @@ If outer-agent parallelism is unavailable, use the `local-prepare` group as fall
 uv run paper_reader_batch local-prepare claim <batch_run_dir> --worker-id <worker_id> --request-id UUID
 uv run paper_reader_batch local-prepare renew <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --request-id UUID
 uv run paper_reader_batch local-prepare finish <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --result <result.json> --request-id UUID
-uv run paper_reader_batch local-prepare release <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --request-id UUID
-uv run paper_reader_batch local-prepare retry <batch_run_dir> <item_id> --request-id UUID
+uv run paper_reader_batch local-prepare release <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --acknowledge-no-side-effects --request-id UUID
+uv run paper_reader_batch local-prepare run <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --paper-reader-root <paper_reader_root> --request-id UUID
 ```
 
-Local-prepare claim returns and binds its own claim id, lease token, prepare attempt, worker id and item id. Leases default to 900 seconds. Renew/finish/release require all bound identities; finish also matches source absolute path/size/SHA-256. Recovery by glob, filename stem or mtime is forbidden.
+Local-prepare claim returns and binds its own claim id, lease token, prepare attempt, worker id and item id. Leases default to 900 seconds. Renew/finish/release/run require all bound identities; finish also matches source absolute path/size/SHA-256. `local-prepare run` invokes only the explicit paper_reader V2 grouped `run init-local` and `run prepare` commands through `--paper-reader-root`, validates both command-result envelopes, and records the exact evidence attempt; it does not import paper_reader, dispatch an LLM, search Zotero, or generate a summary/candidate. A failed prepare is re-attempted only by a new claim/run request and new attempt. Recovery by glob, filename stem or mtime is forbidden.
 
 ## Result Ingestion
 

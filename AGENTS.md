@@ -33,8 +33,8 @@
 
 - `manifest ...`
 - `run init|validate|status|recover|report`
-- `worker claim|renew|finish|release|retry`
-- `local-prepare claim|renew|finish|release|retry`
+- `worker claim|prompt|renew|finish|release|retry`
+- `local-prepare claim|renew|finish|release|run`
 - `write claim|preview|renew|release|begin|commit|mark-uncertain|reconcile|retry`
 
 所有 batch state mutation 都必须带 `--request-id UUID`，并通过 request fingerprint 提供幂等 replay；相同 request id 只允许重放相同请求，不允许代表另一项操作。
@@ -42,6 +42,7 @@
 ### Immutable candidate 与 authorization
 
 - Evidence、sealed review package、candidate 和 authorization 都是 immutable artifacts；任何输入、目标、正文、标签或 hash 改变都必须重建后继 artifact，禁止原地修补。
+- 单篇 run 的 deterministic ownership 必须使用 `authorizations/<authorization_id>.json`、`verifications/<authorization_id>/<note_key>.json` 和 `reconciliations/<authorization_id>.json`；snapshot sidecar 可使用对应无 `.json` 的同 stem 目录，但 main artifact 必须最后发布并通过持续打开的 no-follow parent fd 完成 no-replace，禁止中间 symlink、hardlink 或检查后 pathname race 逃逸 run root。
 - Candidate 必须绑定 run、source identity、evidence、sealed review、固定输出目标或 Zotero parent、精确 note title/tags/content，以及所有相关 artifact 的 canonical SHA-256 与 size。
 - `local publish` 只能把 local candidate 发布到 candidate 已固定的目标，使用 same-filesystem atomic no-replace；目标已占用时停止并 rebuild candidate，禁止覆盖或换目标继续发布。Local candidates 绝不产生 Zotero authorization。
 - `zotero authorize` 不接受 parent/title/content/tag override；它必须重新计算所有 hash，刷新只读 parent/children snapshot，检查 parent fingerprint 与 title availability，并在本地 parent lease 下创建一次性 immutable authorization。Direct single-paper authorize 不传 batch identity options；命令必须在同一 atomic authorization transaction 内分别生成两个不可变 `direct_<uuid>` 作为 external claim identity 与 attempt identity，持久化到 authorization 并在 command result 返回，调用者不得自造或覆盖。Batch path 的 `--external-claim-id` 与 `--write-attempt-id` 仅 batch authorize 使用，both batch identity options must appear together，partial input 在 mutation 前拒绝，并绑定 batch claim + candidate digest；batch path 不生成 direct identity。TTL 默认且最大均为 300 seconds，authorization 绑定 random nonce/token、exact HTML、canonical HTML hash/length、tags、candidate digest、parent snapshot、external claim id 和 `write_attempt_id`。Authorization 不绑定 batch `lease_token`；lease 可独立 renew，batch begin 另行校验当前 lease。
@@ -52,7 +53,9 @@
 
 - `events/<20-digit-seq>.json` append-only hash-chain 是唯一 source of truth；`state.json` 只是 reconstructable snapshot。任何 gap、hash mismatch 或非法 event 都返回 `journal_corrupt` 并禁止 mutation。
 - 每次 transaction 在 `.run.lock` 下校验 manifest SHA、journal、request id/fingerprint 与 lease token，按 durable atomic ordering 写 content-addressed result、event，再替换 snapshot。Stale snapshot 必须 replay journal；orphan result 必须忽略。
-- Worker 与 local-prepare lease 默认 900 seconds，支持 claim/renew/finish/release/retry；stale lease token 必须拒绝，failed/blocked 只可显式 retry，同一 resolved PDF 必须保持 same-PDF mutual exclusion。
+- Manifest builder 与默认 `run init` 尚未拥有 run journal 时，必须使用 skill-root 内、受全局 no-follow lock 保护的持久化 request receipt；receipt 先绑定 exact UUID、request fingerprint 与预留目标，crash/replay 只能恢复该 exact target，禁止扫描 runs 猜测。
+- Worker 与 local-prepare lease 默认 900 seconds。Worker 支持 claim/prompt/renew/finish/release/retry；`worker prompt` 只读且不 dispatch LLM。Local-prepare 支持 claim/renew/finish/release/run；`local-prepare run` 只可通过显式 `--paper-reader-root` 调用 V2 grouped local init/prepare，不 import 单篇 package、不做 LLM/Zotero 工作。Stale lease token 必须拒绝，worker failed/blocked 只可显式 retry，local prepare failed 只可用新 request id/new attempt 显式 run，同一 resolved PDF 必须保持 same-PDF mutual exclusion。
+- Worker/local release 只允许在外部 side effect 与单篇 artifact 产生前，并必须显式 `--acknowledge-no-side-effects`；缺少确认、已有 result 或 identity 过期时只读拒绝，不能把可能已执行的工作重新排队。
 - Write claim 每次只返回一个 candidate，并生成绑定 writer/item 的 `claim_id`、`lease_token` 与 `write_attempt_id`；lease 默认 120 seconds。固定顺序是 claim -> preview immutable candidate（此时 authorization 尚不存在）-> 展示目标并取得用户 explicit real-write intent -> external agent 调 single `$paper_reader zotero authorize`，authorization 只绑定 external claim id + candidate digest + `write_attempt_id` -> batch `write begin` 独立校验当前 `claim_id`、`lease_token`、`write_attempt_id` 与 candidate digest。Begin 要求 authorization 至少剩余 30 seconds，并在返回精确 MCP envelope 前原子消费 nonce、提交 `write.started`。同 request id 只返回 `replayed=true`，不得再次发送；新 request id 也不能创建第二次 start。
 - 所有 write preview/renew/release/begin/commit/mark-uncertain 命令，以及对应 journal events 和 content-addressed results，都必须绑定同一 `claim_id`、`lease_token` 与 `write_attempt_id`；stale 或 cross-attempt identity 在 mutation 前拒绝。
 - Write 状态为 queued -> claimed -> started -> written。Claimed release/expiry 可回 queued；started 后的 crash、error 或 expiry 必须进入 uncertain, never queued。`run recover` 在 `.run.lock` 内检测 exact `write_attempt_id` 的 `write.started` lease expiry，并追加唯一 `write.lease_expired_uncertain` event；expired token 不作为输入，同 recover request id 幂等 replay，该 attempt 不得回 queued 或再次 begin。`write mark-uncertain` 仅接受未过期 exact writer/claim/token/write-attempt identity，用于主动报告已知异常。只读 reconcile 的 parent + title + hash 唯一匹配只定位 note；该 note 完成 exact parent、note key、exact title、complete tags、required headings、minimum length 和 canonical hash 全量验证后才可 written。零匹配要求 `--acknowledge-no-match` 后以新 authorization/new request id retry，多匹配必须 blocked。

@@ -47,6 +47,7 @@ uv run paper_reader_batch run status
 uv run paper_reader_batch run recover
 uv run paper_reader_batch run report
 uv run paper_reader_batch worker claim
+uv run paper_reader_batch worker prompt
 uv run paper_reader_batch worker renew
 uv run paper_reader_batch worker finish
 uv run paper_reader_batch worker release
@@ -55,7 +56,7 @@ uv run paper_reader_batch local-prepare claim
 uv run paper_reader_batch local-prepare renew
 uv run paper_reader_batch local-prepare finish
 uv run paper_reader_batch local-prepare release
-uv run paper_reader_batch local-prepare retry
+uv run paper_reader_batch local-prepare run
 uv run paper_reader_batch write claim
 uv run paper_reader_batch write preview
 uv run paper_reader_batch write renew
@@ -85,7 +86,7 @@ An existing directory path passed through `$paper_reader` should be routed here
 instead of being treated as a Zotero title fragment.
 
 Default Codex concurrency is 3. When outer-agent parallelism is unavailable,
-claim local-prepare leases as the fallback pre-extraction path for local PDF items, then continue deep reading from the exact prepared attempt. Worker and local-prepare leases default to 900 seconds; stale lease tokens, changed source identity and same-PDF concurrent work are rejected.
+claim local-prepare leases as the fallback pre-extraction path for local PDF items, then use `local-prepare run --paper-reader-root <root>` for deterministic V2 init/prepare only and continue deep reading from the exact prepared attempt. `worker prompt` is read-only and never dispatches an LLM. Worker and local-prepare leases default to 900 seconds; stale lease tokens, changed source identity and same-PDF concurrent work are rejected. Release requires explicit `--acknowledge-no-side-effects` and is forbidden after external artifacts or side effects exist.
 
 The append-only hash-chain at `events/<20-digit-seq>.json` is source of truth; `state.json` is only a reconstructable snapshot. `.run.lock`, manifest hash binding and request-id idempotency protect mutation. Journal gaps or hash failures return `journal_corrupt` and must not mutate.
 
