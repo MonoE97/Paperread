@@ -4,6 +4,7 @@ import copy
 import importlib
 import importlib.util
 import json
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -23,6 +24,7 @@ from test_v2_zotero_authorization import (
     _authorize,
     _candidate,
     _filesystem_snapshot,
+    _inject_root_swap_at_anchor_recheck,
     _install_unsafe_artifact_layout,
 )
 from test_v2_zotero_candidate import InMemoryZoteroProvider, _build
@@ -179,6 +181,47 @@ def test_verify_rejects_unsafe_deterministic_paths_before_provider_or_publicatio
     assert provider.calls == 0
     assert _filesystem_snapshot(run_dir) == run_before
     assert _filesystem_snapshot(outside) == outside_before
+
+
+def test_verify_root_swap_before_sidecar_publication_cannot_escape_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization_path, authorization = _authorized(tmp_path)
+    run_dir = authorization_path.parent.parent
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    provider_calls: list[str] = []
+
+    class ProviderSpy:
+        def get_note(self, note_key: str):
+            provider_calls.append("note")
+            return _note_snapshot(authorization, requested_key=note_key)
+
+    detached, state = _inject_root_swap_at_anchor_recheck(
+        monkeypatch,
+        run_dir=run_dir,
+        root_name="verifications",
+        outside=outside,
+        provider_calls=provider_calls,
+    )
+    run_before = (run_dir / "run.json").read_bytes()
+    outside_before = _filesystem_snapshot(outside)
+
+    with pytest.raises(Exception) as exc_info:
+        _verify(authorization_path, ProviderSpy())
+
+    assert getattr(exc_info.value, "code", None) == "unsafe_artifact_path"
+    assert state == {"triggered": True, "calls_at_swap": ("note",)}
+    assert provider_calls == ["note"]
+    assert (run_dir / "run.json").read_bytes() == run_before
+    assert _filesystem_snapshot(outside) == outside_before
+    detached_parent = detached / authorization.authorization_id
+    assert detached_parent.is_dir()
+    assert not (detached_parent / "NOTE1").exists()
+    assert not os.path.lexists(detached_parent / "NOTE1.json")
+    assert not (outside / authorization.authorization_id).exists()
+    assert not tuple(run_dir.glob(".*.staging"))
 
 
 @pytest.mark.parametrize("note_key", ["NOTE:1", "NOTE/1", "../NOTE1", "NOTE..1"])

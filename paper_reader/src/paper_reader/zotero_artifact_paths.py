@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+import ctypes
+import errno
 import os
 import stat
+import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
+
+from paper_reader.storage import (
+    AtomicNoReplaceUnsupportedError,
+    PublishConflictError,
+    new_uuid,
+)
 
 
 class UnsafeZoteroArtifactPathError(ValueError):
@@ -24,6 +35,185 @@ class DeterministicArtifactPaths:
     parent: Path
     sidecar: Path
     main: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _AnchoredDirectory:
+    parent_fd: int
+    name: str
+    path: Path
+    fd: int
+    device: int
+    inode: int
+
+
+@dataclass(slots=True)
+class AnchoredArtifactPublication:
+    paths: DeterministicArtifactPaths
+    run_fd: int
+    run_device: int
+    run_inode: int
+    directories: tuple[_AnchoredDirectory, ...]
+    staging_dir: Path | None = None
+    staging_fd: int | None = None
+    staging_device: int | None = None
+    staging_inode: int | None = None
+
+    @property
+    def parent_fd(self) -> int:
+        return self.directories[-1].fd
+
+    def publish_sidecar(self, source: Path) -> Path:
+        source_path = Path(source)
+        if self.staging_dir is None or self.staging_fd is None:
+            raise _unsafe(
+                source_path,
+                "sidecar publication requires one anchored staging directory",
+            )
+        if source_path.parent != self.staging_dir:
+            raise _unsafe(source_path, "sidecar source is outside the anchored staging directory")
+        source_name = _safe_component(source_path.name)
+        source_fd = _open_directory_entry(
+            self.staging_fd,
+            source_name,
+            source_path,
+        )
+        destination_fd: int | None = None
+        try:
+            _fsync_tree_fd(source_fd, source_path)
+            source_metadata = os.fstat(source_fd)
+            _validate_anchor_identity(self)
+            _require_absent(self.parent_fd, self.paths.stem, self.paths.sidecar)
+            _require_absent(self.parent_fd, self.paths.main.name, self.paths.main)
+            if source_metadata.st_dev != os.fstat(self.parent_fd).st_dev:
+                raise OSError(errno.EXDEV, "sidecar publication requires the same filesystem")
+            _renameat_no_replace(
+                self.staging_fd,
+                source_name,
+                self.parent_fd,
+                self.paths.stem,
+                source=source_path,
+                destination=self.paths.sidecar,
+            )
+            os.fsync(self.parent_fd)
+            destination_fd = _open_directory_entry(
+                self.parent_fd,
+                self.paths.stem,
+                self.paths.sidecar,
+            )
+            destination_metadata = os.fstat(destination_fd)
+            if (source_metadata.st_dev, source_metadata.st_ino) != (
+                destination_metadata.st_dev,
+                destination_metadata.st_ino,
+            ):
+                raise _unsafe(
+                    self.paths.sidecar,
+                    "published sidecar does not match the anchored staging directory",
+                )
+            os.fsync(destination_fd)
+            os.fsync(self.parent_fd)
+            _validate_anchor_identity(self)
+            return self.paths.sidecar
+        finally:
+            if destination_fd is not None:
+                os.close(destination_fd)
+            os.close(source_fd)
+
+    def publish_main(self, source: Path, *, expected_bytes: bytes) -> Path:
+        source_path = Path(source)
+        _validate_anchor_identity(self)
+        _require_real_sidecar(self)
+        _require_absent(self.parent_fd, self.paths.main.name, self.paths.main)
+        source_parent_fd, close_source_parent = _main_source_parent(self, source_path)
+        source_fd: int | None = None
+        temporary_fd: int | None = None
+        published_fd: int | None = None
+        temporary_name = f".{self.paths.main.name}.{new_uuid()}.tmp"
+        renamed = False
+        try:
+            source_name = _safe_component(source_path.name)
+            source_fd = _open_regular_entry(source_parent_fd, source_name, source_path)
+            source_before = os.fstat(source_fd)
+            source_bytes = _read_all(source_fd)
+            source_after = os.fstat(source_fd)
+            source_identity_before = (
+                source_before.st_dev,
+                source_before.st_ino,
+                source_before.st_size,
+                source_before.st_mtime_ns,
+            )
+            source_identity_after = (
+                source_after.st_dev,
+                source_after.st_ino,
+                source_after.st_size,
+                source_after.st_mtime_ns,
+            )
+            if source_identity_before != source_identity_after or source_bytes != expected_bytes:
+                raise _unsafe(source_path, "main publication source changed after validation")
+            temporary_fd = os.open(
+                temporary_name,
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                0o644,
+                dir_fd=self.parent_fd,
+            )
+            _write_all(temporary_fd, source_bytes)
+            os.fsync(temporary_fd)
+            _validate_anchor_identity(self)
+            _require_real_sidecar(self)
+            _require_absent(self.parent_fd, self.paths.main.name, self.paths.main)
+            _renameat_no_replace(
+                self.parent_fd,
+                temporary_name,
+                self.parent_fd,
+                self.paths.main.name,
+                source=self.paths.parent / temporary_name,
+                destination=self.paths.main,
+            )
+            renamed = True
+            os.fsync(self.parent_fd)
+            published_fd = _open_regular_entry(
+                self.parent_fd,
+                self.paths.main.name,
+                self.paths.main,
+            )
+            temporary_metadata = os.fstat(temporary_fd)
+            published_metadata = os.fstat(published_fd)
+            if (
+                temporary_metadata.st_dev,
+                temporary_metadata.st_ino,
+                temporary_metadata.st_size,
+            ) != (
+                published_metadata.st_dev,
+                published_metadata.st_ino,
+                published_metadata.st_size,
+            ) or _read_all(published_fd) != source_bytes:
+                raise _unsafe(
+                    self.paths.main,
+                    "published main artifact does not match the anchored temporary file",
+                )
+            os.fsync(published_fd)
+            os.fsync(self.parent_fd)
+            _validate_anchor_identity(self)
+            return self.paths.main
+        finally:
+            if published_fd is not None:
+                os.close(published_fd)
+            if temporary_fd is not None:
+                os.close(temporary_fd)
+            if source_fd is not None:
+                os.close(source_fd)
+            if close_source_parent:
+                os.close(source_parent_fd)
+            if not renamed:
+                try:
+                    os.unlink(temporary_name, dir_fd=self.parent_fd)
+                    os.fsync(self.parent_fd)
+                except OSError:
+                    pass
 
 
 def _unsafe(path: Path, message: str) -> UnsafeZoteroArtifactPathError:
@@ -133,82 +323,436 @@ def inspect_deterministic_artifact_paths(
     )
 
 
-def ensure_safe_publication_parent(paths: DeterministicArtifactPaths) -> None:
-    directory_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-    )
-    current = paths.run_dir
+_DIRECTORY_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+_REGULAR_READ_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+
+
+def _same_identity(first: os.stat_result, second: os.stat_result) -> bool:
+    return (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
+
+
+def _open_directory_entry(parent_fd: int, name: str, path: Path) -> int:
     try:
-        parent_descriptor = os.open(paths.run_dir, directory_flags)
+        descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
     except OSError as exc:
-        raise _unsafe(paths.run_dir, f"safe run directory open failed: {exc}") from exc
+        raise _unsafe(path, f"anchored directory open failed: {exc}") from exc
     try:
+        opened = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(current.st_mode)
+            or not _same_identity(opened, current)
+        ):
+            raise _unsafe(path, "anchored directory entry changed during no-follow open")
+        return descriptor
+    except UnsafeZoteroArtifactPathError:
+        os.close(descriptor)
+        raise
+    except OSError as exc:
+        os.close(descriptor)
+        raise _unsafe(path, f"anchored directory identity check failed: {exc}") from exc
+
+
+def _open_regular_entry(parent_fd: int, name: str, path: Path) -> int:
+    try:
+        descriptor = os.open(name, _REGULAR_READ_FLAGS, dir_fd=parent_fd)
+    except OSError as exc:
+        raise _unsafe(path, f"anchored regular file open failed: {exc}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or opened.st_nlink != 1
+            or current.st_nlink != 1
+            or not _same_identity(opened, current)
+        ):
+            raise _unsafe(
+                path,
+                "anchored file must be one non-symlink, non-hardlinked regular file",
+            )
+        return descriptor
+    except UnsafeZoteroArtifactPathError:
+        os.close(descriptor)
+        raise
+    except OSError as exc:
+        os.close(descriptor)
+        raise _unsafe(path, f"anchored file identity check failed: {exc}") from exc
+
+
+def _require_absent(parent_fd: int, name: str, path: Path) -> None:
+    try:
+        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise _unsafe(path, f"deterministic artifact entry cannot be inspected: {exc}") from exc
+    raise _unsafe(path, "deterministic artifact destination is already occupied")
+
+
+def _require_real_sidecar(anchor: AnchoredArtifactPublication) -> None:
+    descriptor = _open_directory_entry(
+        anchor.parent_fd,
+        anchor.paths.stem,
+        anchor.paths.sidecar,
+    )
+    os.close(descriptor)
+
+
+def _validate_existing_destination_state(
+    anchor: AnchoredArtifactPublication,
+    *,
+    allow_existing_sidecar: bool,
+    allow_existing_main: bool,
+) -> None:
+    try:
+        sidecar_fd = _open_directory_entry(
+            anchor.parent_fd,
+            anchor.paths.stem,
+            anchor.paths.sidecar,
+        )
+    except UnsafeZoteroArtifactPathError as exc:
+        if isinstance(exc.__cause__, FileNotFoundError):
+            sidecar_fd = None
+        else:
+            raise
+    if sidecar_fd is not None:
+        os.close(sidecar_fd)
+        if not allow_existing_sidecar:
+            raise _unsafe(anchor.paths.sidecar, "deterministic sidecar path is already occupied")
+    try:
+        main_fd = _open_regular_entry(
+            anchor.parent_fd,
+            anchor.paths.main.name,
+            anchor.paths.main,
+        )
+    except UnsafeZoteroArtifactPathError as exc:
+        if isinstance(exc.__cause__, FileNotFoundError):
+            main_fd = None
+        else:
+            raise
+    if main_fd is not None:
+        os.close(main_fd)
+        if not allow_existing_main:
+            raise _unsafe(anchor.paths.main, "deterministic main artifact path is already occupied")
+
+
+def _validate_anchor_identity(anchor: AnchoredArtifactPublication) -> None:
+    try:
+        opened_run = os.fstat(anchor.run_fd)
+        current_run = os.lstat(anchor.paths.run_dir)
+    except OSError as exc:
+        raise _unsafe(anchor.paths.run_dir, f"anchored run directory changed: {exc}") from exc
+    if (
+        not stat.S_ISDIR(opened_run.st_mode)
+        or not stat.S_ISDIR(current_run.st_mode)
+        or stat.S_ISLNK(current_run.st_mode)
+        or (opened_run.st_dev, opened_run.st_ino) != (anchor.run_device, anchor.run_inode)
+        or not _same_identity(opened_run, current_run)
+    ):
+        raise _unsafe(anchor.paths.run_dir, "anchored run directory identity changed")
+    for component in anchor.directories:
+        try:
+            opened = os.fstat(component.fd)
+            current = os.stat(
+                component.name,
+                dir_fd=component.parent_fd,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise _unsafe(component.path, f"anchored directory identity changed: {exc}") from exc
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(current.st_mode)
+            or (opened.st_dev, opened.st_ino) != (component.device, component.inode)
+            or not _same_identity(opened, current)
+        ):
+            raise _unsafe(component.path, "anchored directory identity changed")
+    if anchor.staging_fd is not None and anchor.staging_dir is not None:
+        try:
+            opened = os.fstat(anchor.staging_fd)
+            current = os.stat(
+                anchor.staging_dir.name,
+                dir_fd=anchor.run_fd,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise _unsafe(anchor.staging_dir, f"anchored staging directory changed: {exc}") from exc
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(current.st_mode)
+            or (opened.st_dev, opened.st_ino)
+            != (anchor.staging_device, anchor.staging_inode)
+            or not _same_identity(opened, current)
+        ):
+            raise _unsafe(anchor.staging_dir, "anchored staging directory identity changed")
+
+
+def _fsync_tree_fd(directory_fd: int, path: Path) -> None:
+    try:
+        names = sorted(os.listdir(directory_fd))
+    except OSError as exc:
+        raise _unsafe(path, f"anchored staging tree cannot be listed: {exc}") from exc
+    for name in names:
+        entry_path = path / name
+        try:
+            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise _unsafe(entry_path, f"anchored staging entry cannot be inspected: {exc}") from exc
+        if stat.S_ISDIR(metadata.st_mode):
+            child_fd = _open_directory_entry(directory_fd, name, entry_path)
+            try:
+                _fsync_tree_fd(child_fd, entry_path)
+            finally:
+                os.close(child_fd)
+        elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+            child_fd = _open_regular_entry(directory_fd, name, entry_path)
+            try:
+                os.fsync(child_fd)
+            finally:
+                os.close(child_fd)
+        else:
+            raise _unsafe(
+                entry_path,
+                "anchored staging tree contains a symlink, hardlink, or special file",
+            )
+    os.fsync(directory_fd)
+
+
+def _read_all(descriptor: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _write_all(descriptor: int, content: bytes) -> None:
+    view = memoryview(content)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError(errno.EIO, "short write during anchored artifact publication")
+        view = view[written:]
+
+
+def _main_source_parent(
+    anchor: AnchoredArtifactPublication,
+    source: Path,
+) -> tuple[int, bool]:
+    if (
+        anchor.staging_dir is not None
+        and anchor.staging_fd is not None
+        and source.parent == anchor.staging_dir
+    ):
+        return anchor.staging_fd, False
+    if source.parent == anchor.paths.sidecar:
+        descriptor = _open_directory_entry(
+            anchor.parent_fd,
+            anchor.paths.stem,
+            anchor.paths.sidecar,
+        )
+        return descriptor, True
+    raise _unsafe(source, "main source is outside the anchored staging or sidecar directory")
+
+
+def _raise_rename_error(
+    error_number: int,
+    *,
+    source: Path,
+    destination: Path,
+) -> None:
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise PublishConflictError(destination)
+    unsupported = {errno.ENOSYS, errno.ENOTSUP}
+    if hasattr(errno, "EOPNOTSUPP"):
+        unsupported.add(errno.EOPNOTSUPP)
+    if error_number in unsupported:
+        raise AtomicNoReplaceUnsupportedError(sys.platform)
+    raise OSError(error_number, os.strerror(error_number), source, destination)
+
+
+def _renameat_no_replace(
+    source_dir_fd: int,
+    source_name: str,
+    destination_dir_fd: int,
+    destination_name: str,
+    *,
+    source: Path,
+    destination: Path,
+) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        try:
+            renameatx_np = libc.renameatx_np
+        except AttributeError as exc:
+            raise AtomicNoReplaceUnsupportedError(sys.platform) from exc
+        renameatx_np.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameatx_np.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        result = renameatx_np(
+            source_dir_fd,
+            os.fsencode(source_name),
+            destination_dir_fd,
+            os.fsencode(destination_name),
+            0x00000004,
+        )
+    elif sys.platform.startswith("linux"):
+        try:
+            renameat2 = libc.renameat2
+        except AttributeError as exc:
+            raise AtomicNoReplaceUnsupportedError(sys.platform) from exc
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        result = renameat2(
+            source_dir_fd,
+            os.fsencode(source_name),
+            destination_dir_fd,
+            os.fsencode(destination_name),
+            1,
+        )
+    else:
+        raise AtomicNoReplaceUnsupportedError(sys.platform)
+    if result != 0:
+        _raise_rename_error(
+            ctypes.get_errno(),
+            source=source,
+            destination=destination,
+        )
+
+
+@contextmanager
+def anchored_artifact_publication(
+    paths: DeterministicArtifactPaths,
+    *,
+    staging_dir: Path | None,
+    allow_existing_sidecar: bool,
+    allow_existing_main: bool,
+) -> Iterator[AnchoredArtifactPublication]:
+    descriptors: list[int] = []
+    staging_fd: int | None = None
+    try:
+        try:
+            run_fd = os.open(paths.run_dir, _DIRECTORY_FLAGS)
+        except OSError as exc:
+            raise _unsafe(paths.run_dir, f"anchored run directory open failed: {exc}") from exc
+        descriptors.append(run_fd)
+        opened_run = os.fstat(run_fd)
+        current_run = os.lstat(paths.run_dir)
+        if (
+            not stat.S_ISDIR(opened_run.st_mode)
+            or not stat.S_ISDIR(current_run.st_mode)
+            or stat.S_ISLNK(current_run.st_mode)
+            or not _same_identity(opened_run, current_run)
+        ):
+            raise _unsafe(paths.run_dir, "run directory changed during anchored open")
+        components: list[_AnchoredDirectory] = []
+        parent_fd = run_fd
+        current_path = paths.run_dir
         for part in (paths.root_name, *paths.parent_parts):
-            current = current / part
+            current_path = current_path / part
             try:
-                child_descriptor = os.open(part, directory_flags, dir_fd=parent_descriptor)
-            except FileNotFoundError:
+                child_fd = _open_directory_entry(parent_fd, part, current_path)
+            except UnsafeZoteroArtifactPathError as exc:
+                if not isinstance(exc.__cause__, FileNotFoundError):
+                    raise
                 try:
-                    os.mkdir(part, mode=0o755, dir_fd=parent_descriptor)
-                    child_descriptor = os.open(part, directory_flags, dir_fd=parent_descriptor)
-                except OSError as exc:
+                    os.mkdir(part, mode=0o755, dir_fd=parent_fd)
+                    os.fsync(parent_fd)
+                    child_fd = _open_directory_entry(parent_fd, part, current_path)
+                except OSError as mkdir_exc:
                     raise _unsafe(
-                        current,
-                        f"safe deterministic artifact directory creation failed: {exc}",
-                    ) from exc
-            except OSError as exc:
+                        current_path,
+                        f"anchored artifact directory creation failed: {mkdir_exc}",
+                    ) from mkdir_exc
+            descriptors.append(child_fd)
+            metadata = os.fstat(child_fd)
+            components.append(
+                _AnchoredDirectory(
+                    parent_fd=parent_fd,
+                    name=part,
+                    path=current_path,
+                    fd=child_fd,
+                    device=metadata.st_dev,
+                    inode=metadata.st_ino,
+                )
+            )
+            parent_fd = child_fd
+
+        resolved_staging: Path | None = None
+        staging_metadata: os.stat_result | None = None
+        if staging_dir is not None:
+            requested_staging = Path(staging_dir)
+            if requested_staging.parent != paths.run_dir:
                 raise _unsafe(
-                    current,
-                    f"safe deterministic artifact directory open failed: {exc}",
-                ) from exc
-            child_metadata = os.fstat(child_descriptor)
-            try:
-                path_metadata = os.lstat(current)
-            except OSError as exc:
-                os.close(child_descriptor)
-                raise _unsafe(current, f"deterministic artifact directory changed: {exc}") from exc
-            if (
-                not stat.S_ISDIR(child_metadata.st_mode)
-                or stat.S_ISLNK(path_metadata.st_mode)
-                or not stat.S_ISDIR(path_metadata.st_mode)
-                or (child_metadata.st_dev, child_metadata.st_ino)
-                != (path_metadata.st_dev, path_metadata.st_ino)
-            ):
-                os.close(child_descriptor)
-                raise _unsafe(current, "deterministic artifact directory changed during no-follow open")
-            os.close(parent_descriptor)
-            parent_descriptor = child_descriptor
-            _validate_real_directory(current, run_dir=paths.run_dir)
+                    requested_staging,
+                    "staging directory must be one direct child of the anchored run",
+                )
+            _safe_component(requested_staging.name)
+            resolved_staging = paths.run_dir / requested_staging.name
+            staging_fd = _open_directory_entry(
+                run_fd,
+                resolved_staging.name,
+                resolved_staging,
+            )
+            descriptors.append(staging_fd)
+            staging_metadata = os.fstat(staging_fd)
+
+        anchor = AnchoredArtifactPublication(
+            paths=paths,
+            run_fd=run_fd,
+            run_device=opened_run.st_dev,
+            run_inode=opened_run.st_ino,
+            directories=tuple(components),
+            staging_dir=resolved_staging,
+            staging_fd=staging_fd,
+            staging_device=None if staging_metadata is None else staging_metadata.st_dev,
+            staging_inode=None if staging_metadata is None else staging_metadata.st_ino,
+        )
+        _validate_existing_destination_state(
+            anchor,
+            allow_existing_sidecar=allow_existing_sidecar,
+            allow_existing_main=allow_existing_main,
+        )
+        yield anchor
     finally:
-        os.close(parent_descriptor)
-    inspect_deterministic_artifact_paths(
-        paths.run_dir,
-        root_name=paths.root_name,
-        parent_parts=paths.parent_parts,
-        stem=paths.stem,
-        allow_existing_sidecar=False,
-        allow_existing_main=False,
-    )
-
-
-def revalidate_before_main_publication(paths: DeterministicArtifactPaths) -> None:
-    inspect_deterministic_artifact_paths(
-        paths.run_dir,
-        root_name=paths.root_name,
-        parent_parts=paths.parent_parts,
-        stem=paths.stem,
-        allow_existing_sidecar=True,
-        allow_existing_main=False,
-    )
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 __all__ = [
+    "AnchoredArtifactPublication",
     "DeterministicArtifactPaths",
     "UnsafeZoteroArtifactPathError",
-    "ensure_safe_publication_parent",
+    "anchored_artifact_publication",
     "inspect_deterministic_artifact_paths",
-    "revalidate_before_main_publication",
 ]

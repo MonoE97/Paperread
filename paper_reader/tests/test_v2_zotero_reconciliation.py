@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -22,6 +23,7 @@ from test_v2_zotero_authorization import (
     _authorize,
     _candidate,
     _filesystem_snapshot,
+    _inject_root_swap_at_anchor_recheck,
     _install_unsafe_artifact_layout,
 )
 from test_v2_zotero_candidate import InMemoryZoteroProvider
@@ -128,6 +130,47 @@ def test_reconcile_rejects_unsafe_deterministic_paths_before_provider_or_publica
     assert provider.calls == 0
     assert _filesystem_snapshot(run_dir) == run_before
     assert _filesystem_snapshot(outside) == outside_before
+
+
+def test_reconcile_root_swap_before_sidecar_publication_cannot_escape_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization_path, authorization = _authorized(tmp_path)
+    run_dir = authorization_path.parent.parent
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    provider_calls: list[str] = []
+
+    class ProviderSpy:
+        def get_children(self, _parent_key: str):
+            provider_calls.append("children")
+            return []
+
+    detached, state = _inject_root_swap_at_anchor_recheck(
+        monkeypatch,
+        run_dir=run_dir,
+        root_name="reconciliations",
+        outside=outside,
+        provider_calls=provider_calls,
+    )
+    run_before = (run_dir / "run.json").read_bytes()
+    outside_before = _filesystem_snapshot(outside)
+
+    with pytest.raises(Exception) as exc_info:
+        _reconcile(authorization_path, ProviderSpy())
+
+    assert getattr(exc_info.value, "code", None) == "unsafe_artifact_path"
+    assert state == {"triggered": True, "calls_at_swap": ("children",)}
+    assert provider_calls == ["children"]
+    assert (run_dir / "run.json").read_bytes() == run_before
+    assert _filesystem_snapshot(outside) == outside_before
+    assert detached.is_dir()
+    assert not (detached / authorization.authorization_id).exists()
+    assert not os.path.lexists(detached / f"{authorization.authorization_id}.json")
+    assert not (outside / authorization.authorization_id).exists()
+    assert not os.path.lexists(outside / f"{authorization.authorization_id}.json")
+    assert not tuple(run_dir.glob(".*.staging"))
 
 
 def test_reconcile_many_exact_matches_is_ambiguous_and_blocked(tmp_path: Path) -> None:

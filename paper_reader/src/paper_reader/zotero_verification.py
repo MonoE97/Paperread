@@ -19,12 +19,10 @@ from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
-    atomic_publish_tree,
     atomic_write_json,
     canonical_json_bytes,
     new_random_id,
     new_uuid,
-    publish_file_no_replace,
     rfc3339_utc,
 )
 from paper_reader.v2_loader import LoadedRun
@@ -38,9 +36,8 @@ from paper_reader.zotero_authorization_loader import (
 from paper_reader.zotero_artifact_paths import (
     DeterministicArtifactPaths,
     UnsafeZoteroArtifactPathError,
-    ensure_safe_publication_parent,
+    anchored_artifact_publication,
     inspect_deterministic_artifact_paths,
-    revalidate_before_main_publication,
 )
 from paper_reader.zotero_candidate import _artifact_ref
 from paper_reader.zotero_lock import locked_zotero_parent
@@ -72,20 +69,6 @@ def _verification_artifact_paths(
             allow_existing_sidecar=allow_existing_sidecar,
             allow_existing_main=allow_existing_main,
         )
-    except UnsafeZoteroArtifactPathError as exc:
-        raise ZoteroVerificationError(exc.code, str(exc), data=exc.data) from exc
-
-
-def _ensure_verification_publication_parent(paths: DeterministicArtifactPaths) -> None:
-    try:
-        ensure_safe_publication_parent(paths)
-    except UnsafeZoteroArtifactPathError as exc:
-        raise ZoteroVerificationError(exc.code, str(exc), data=exc.data) from exc
-
-
-def _revalidate_verification_main_parent(paths: DeterministicArtifactPaths) -> None:
-    try:
-        revalidate_before_main_publication(paths)
     except UnsafeZoteroArtifactPathError as exc:
         raise ZoteroVerificationError(exc.code, str(exc), data=exc.data) from exc
 
@@ -221,9 +204,16 @@ def _existing_verification(
         note_key=note_key,
     )
     if not verification_path.exists():
-        _revalidate_verification_main_parent(artifact_paths)
         try:
-            publish_file_no_replace(recovery_record, verification_path)
+            with anchored_artifact_publication(
+                artifact_paths,
+                staging_dir=None,
+                allow_existing_sidecar=True,
+                allow_existing_main=False,
+            ) as publication:
+                publication.publish_main(recovery_record, expected_bytes=raw)
+        except UnsafeZoteroArtifactPathError as exc:
+            raise ZoteroVerificationError(exc.code, str(exc), data=exc.data) from exc
         except Exception as exc:
             raise ZoteroVerificationError(
                 "verification_recovery_failed",
@@ -411,21 +401,29 @@ def publish_verification_locked(
                 str(exc),
                 data={"run_size_bytes": exc.actual_bytes, "max_bytes": exc.max_bytes},
             ) from exc
-        _ensure_verification_publication_parent(artifact_paths)
+        publication_phase = "sidecar"
         try:
-            atomic_publish_tree(staged_sidecar, verification_dir)
+            with anchored_artifact_publication(
+                artifact_paths,
+                staging_dir=staging,
+                allow_existing_sidecar=False,
+                allow_existing_main=False,
+            ) as publication:
+                publication.publish_sidecar(staged_sidecar)
+                publication_phase = "main"
+                publication.publish_main(
+                    staged_verification_path,
+                    expected_bytes=verification_bytes,
+                )
+        except UnsafeZoteroArtifactPathError as exc:
+            raise ZoteroVerificationError(exc.code, str(exc), data=exc.data) from exc
         except Exception as exc:
             raise ZoteroVerificationError(
                 "verification_publication_failed",
-                f"immutable verification publication failed: {verification_dir}: {exc}",
-            ) from exc
-        _revalidate_verification_main_parent(artifact_paths)
-        try:
-            publish_file_no_replace(staged_verification_path, verification_path)
-        except Exception as exc:
-            raise ZoteroVerificationError(
-                "verification_publication_failed",
-                f"immutable verification main publication failed: {verification_path}: {exc}",
+                (
+                    f"immutable verification {publication_phase} publication failed: "
+                    f"{verification_path}: {exc}"
+                ),
             ) from exc
         try:
             atomic_write_json(loaded.manifest_path, updated_run)

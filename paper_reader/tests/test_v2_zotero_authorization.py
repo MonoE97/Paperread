@@ -100,6 +100,39 @@ def _install_unsafe_artifact_layout(
         raise AssertionError(case)
 
 
+def _inject_root_swap_at_anchor_recheck(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    run_dir: Path,
+    root_name: str,
+    outside: Path,
+    provider_calls: list[str],
+) -> tuple[Path, dict[str, object]]:
+    import paper_reader.zotero_artifact_paths as artifact_paths
+
+    detached = run_dir / f".{root_name}.detached"
+    state: dict[str, object] = {"triggered": False, "calls_at_swap": ()}
+    original = getattr(artifact_paths, "_validate_anchor_identity", None)
+
+    def swap_then_validate(anchor) -> None:
+        if not state["triggered"]:
+            root = run_dir / root_name
+            root.rename(detached)
+            root.symlink_to(outside, target_is_directory=True)
+            state["triggered"] = True
+            state["calls_at_swap"] = tuple(provider_calls)
+        if original is not None:
+            original(anchor)
+
+    monkeypatch.setattr(
+        artifact_paths,
+        "_validate_anchor_identity",
+        swap_then_validate,
+        raising=False,
+    )
+    return detached, state
+
+
 def _module():
     module_name = "paper_reader.zotero_authorization"
     assert importlib.util.find_spec(module_name) is not None, "Zotero authorization module is missing"
@@ -254,6 +287,64 @@ def test_authorize_rejects_unsafe_deterministic_paths_before_provider_or_publica
     assert provider.calls == 0
     assert _filesystem_snapshot(run_dir) == run_before
     assert _filesystem_snapshot(outside) == outside_before
+
+
+def test_authorize_root_swap_before_sidecar_publication_cannot_escape_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, delegate = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    authorization_id = "authorization_race"
+    original_new_random_id = module.new_random_id
+
+    def deterministic_id(prefix: str) -> str:
+        if prefix == "authorization":
+            return authorization_id
+        return original_new_random_id(prefix)
+
+    monkeypatch.setattr(module, "new_random_id", deterministic_id)
+    provider_calls: list[str] = []
+
+    class ProviderSpy:
+        def get_parent(self, item_key: str):
+            provider_calls.append("parent")
+            return delegate.get_parent(item_key)
+
+        def get_children(self, parent_key: str):
+            provider_calls.append("children")
+            return delegate.get_children(parent_key)
+
+    detached, state = _inject_root_swap_at_anchor_recheck(
+        monkeypatch,
+        run_dir=run_dir,
+        root_name="authorizations",
+        outside=outside,
+        provider_calls=provider_calls,
+    )
+    run_before = (run_dir / "run.json").read_bytes()
+    outside_before = _filesystem_snapshot(outside)
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, ProviderSpy())
+
+    assert getattr(exc_info.value, "code", None) == "unsafe_artifact_path"
+    assert state == {
+        "triggered": True,
+        "calls_at_swap": ("parent", "children"),
+    }
+    assert provider_calls == ["parent", "children"]
+    assert (run_dir / "run.json").read_bytes() == run_before
+    assert _filesystem_snapshot(outside) == outside_before
+    assert detached.is_dir()
+    assert not (detached / authorization_id).exists()
+    assert not os.path.lexists(detached / f"{authorization_id}.json")
+    assert not (outside / authorization_id).exists()
+    assert not os.path.lexists(outside / f"{authorization_id}.json")
+    assert not tuple(run_dir.glob(".*.staging"))
 
 
 def test_batch_authorization_preserves_both_external_identities(tmp_path: Path) -> None:

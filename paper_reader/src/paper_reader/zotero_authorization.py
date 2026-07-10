@@ -32,12 +32,10 @@ from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
-    atomic_publish_tree,
     atomic_write_json,
     canonical_json_bytes,
     new_random_id,
     new_uuid,
-    publish_file_no_replace,
     random_token,
     rfc3339_utc,
 )
@@ -52,9 +50,8 @@ from paper_reader.zotero_authorization_loader import (
 from paper_reader.zotero_artifact_paths import (
     DeterministicArtifactPaths,
     UnsafeZoteroArtifactPathError,
-    ensure_safe_publication_parent,
+    anchored_artifact_publication,
     inspect_deterministic_artifact_paths,
-    revalidate_before_main_publication,
 )
 
 
@@ -81,20 +78,6 @@ def _authorization_artifact_paths(
             allow_existing_sidecar=allow_existing_sidecar,
             allow_existing_main=allow_existing_main,
         )
-    except UnsafeZoteroArtifactPathError as exc:
-        raise ZoteroAuthorizationError(exc.code, str(exc), data=exc.data) from exc
-
-
-def _ensure_authorization_publication_parent(paths: DeterministicArtifactPaths) -> None:
-    try:
-        ensure_safe_publication_parent(paths)
-    except UnsafeZoteroArtifactPathError as exc:
-        raise ZoteroAuthorizationError(exc.code, str(exc), data=exc.data) from exc
-
-
-def _revalidate_authorization_main_parent(paths: DeterministicArtifactPaths) -> None:
-    try:
-        revalidate_before_main_publication(paths)
     except UnsafeZoteroArtifactPathError as exc:
         raise ZoteroAuthorizationError(exc.code, str(exc), data=exc.data) from exc
 
@@ -305,11 +288,27 @@ def _recover_matching_orphan_authorization(
 
     recovered = matches[0]
     if not recovered.authorization_path.exists():
+        recovery_record = recovered.authorization_path.with_suffix("") / "record.json"
+        recovery_bytes = recovery_record.read_bytes()
+        artifact_paths = _authorization_artifact_paths(
+            run_dir,
+            recovered.authorization.authorization_id,
+            allow_existing_sidecar=True,
+            allow_existing_main=False,
+        )
         try:
-            publish_file_no_replace(
-                recovered.authorization_path.with_suffix("") / "record.json",
-                recovered.authorization_path,
-            )
+            with anchored_artifact_publication(
+                artifact_paths,
+                staging_dir=None,
+                allow_existing_sidecar=True,
+                allow_existing_main=False,
+            ) as publication:
+                publication.publish_main(
+                    recovery_record,
+                    expected_bytes=recovery_bytes,
+                )
+        except UnsafeZoteroArtifactPathError as exc:
+            raise ZoteroAuthorizationError(exc.code, str(exc), data=exc.data) from exc
         except Exception as exc:
             raise ZoteroAuthorizationError(
                 "authorization_recovery_failed",
@@ -558,21 +557,29 @@ def authorize_zotero_candidate(
                         str(exc),
                         data={"run_size_bytes": exc.actual_bytes, "max_bytes": exc.max_bytes},
                     ) from exc
-                _ensure_authorization_publication_parent(artifact_paths)
+                publication_phase = "sidecar"
                 try:
-                    atomic_publish_tree(staged_sidecar, authorization_dir)
+                    with anchored_artifact_publication(
+                        artifact_paths,
+                        staging_dir=staging,
+                        allow_existing_sidecar=False,
+                        allow_existing_main=False,
+                    ) as publication:
+                        publication.publish_sidecar(staged_sidecar)
+                        publication_phase = "main"
+                        publication.publish_main(
+                            staged_authorization_path,
+                            expected_bytes=authorization_bytes,
+                        )
+                except UnsafeZoteroArtifactPathError as exc:
+                    raise ZoteroAuthorizationError(exc.code, str(exc), data=exc.data) from exc
                 except Exception as exc:
                     raise ZoteroAuthorizationError(
                         "authorization_publication_failed",
-                        f"immutable authorization publication failed: {authorization_dir}: {exc}",
-                    ) from exc
-                _revalidate_authorization_main_parent(artifact_paths)
-                try:
-                    publish_file_no_replace(staged_authorization_path, authorization_path)
-                except Exception as exc:
-                    raise ZoteroAuthorizationError(
-                        "authorization_publication_failed",
-                        f"immutable authorization main publication failed: {authorization_path}: {exc}",
+                        (
+                            f"immutable authorization {publication_phase} publication failed: "
+                            f"{authorization_path}: {exc}"
+                        ),
                     ) from exc
                 try:
                     atomic_write_json(loaded.manifest_path, updated_run)
