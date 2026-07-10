@@ -19,7 +19,12 @@ from paper_reader.contracts import (
 )
 from paper_reader.public_cli import app
 
-from test_v2_zotero_authorization import _authorize, _candidate
+from test_v2_zotero_authorization import (
+    _authorize,
+    _candidate,
+    _filesystem_snapshot,
+    _install_unsafe_artifact_layout,
+)
 from test_v2_zotero_candidate import InMemoryZoteroProvider, _build
 
 
@@ -127,6 +132,53 @@ def test_verification_main_artifact_uses_authorization_and_note_key_topology(
     assert verified.verification_path == expected
     assert expected.is_file()
     assert verified.verification_dir == expected.with_suffix("")
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "root_symlink",
+        "intermediate_symlink",
+        "sidecar_symlink",
+        "main_symlink",
+        "main_hardlink",
+    ],
+)
+def test_verify_rejects_unsafe_deterministic_paths_before_provider_or_publication(
+    case: str,
+    tmp_path: Path,
+) -> None:
+    authorization_path, authorization = _authorized(tmp_path)
+    run_dir = authorization_path.parent.parent
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _install_unsafe_artifact_layout(
+        run_dir=run_dir,
+        outside=outside,
+        root_name="verifications",
+        parent_parts=(authorization.authorization_id,),
+        stem="NOTE1",
+        case=case,
+    )
+    run_before = _filesystem_snapshot(run_dir)
+    outside_before = _filesystem_snapshot(outside)
+
+    class ProviderSpy:
+        calls = 0
+
+        def get_note(self, _note_key: str):
+            self.calls += 1
+            raise AssertionError("unsafe verification path reached provider")
+
+    provider = ProviderSpy()
+
+    with pytest.raises(Exception) as exc_info:
+        _verify(authorization_path, provider)
+
+    assert getattr(exc_info.value, "code", None) == "unsafe_artifact_path"
+    assert provider.calls == 0
+    assert _filesystem_snapshot(run_dir) == run_before
+    assert _filesystem_snapshot(outside) == outside_before
 
 
 @pytest.mark.parametrize("note_key", ["NOTE:1", "NOTE/1", "../NOTE1", "NOTE..1"])

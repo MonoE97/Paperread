@@ -35,6 +35,13 @@ from paper_reader.zotero_authorization_loader import (
     inspect_authorization_target,
     load_bound_authorization,
 )
+from paper_reader.zotero_artifact_paths import (
+    DeterministicArtifactPaths,
+    UnsafeZoteroArtifactPathError,
+    ensure_safe_publication_parent,
+    inspect_deterministic_artifact_paths,
+    revalidate_before_main_publication,
+)
 from paper_reader.zotero_candidate import _artifact_ref
 from paper_reader.zotero_lock import locked_zotero_parent
 from paper_reader.zotero_note_validation import NoteEvaluation, evaluate_note_snapshot
@@ -46,6 +53,41 @@ _PORTABLE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$")
 
 class ZoteroVerificationError(LocalPublicationError):
     pass
+
+
+def _verification_artifact_paths(
+    run_dir: Path,
+    authorization_id: str,
+    note_key: str,
+    *,
+    allow_existing_sidecar: bool,
+    allow_existing_main: bool,
+) -> DeterministicArtifactPaths:
+    try:
+        return inspect_deterministic_artifact_paths(
+            run_dir,
+            root_name="verifications",
+            parent_parts=(authorization_id,),
+            stem=note_key,
+            allow_existing_sidecar=allow_existing_sidecar,
+            allow_existing_main=allow_existing_main,
+        )
+    except UnsafeZoteroArtifactPathError as exc:
+        raise ZoteroVerificationError(exc.code, str(exc), data=exc.data) from exc
+
+
+def _ensure_verification_publication_parent(paths: DeterministicArtifactPaths) -> None:
+    try:
+        ensure_safe_publication_parent(paths)
+    except UnsafeZoteroArtifactPathError as exc:
+        raise ZoteroVerificationError(exc.code, str(exc), data=exc.data) from exc
+
+
+def _revalidate_verification_main_parent(paths: DeterministicArtifactPaths) -> None:
+    try:
+        revalidate_before_main_publication(paths)
+    except UnsafeZoteroArtifactPathError as exc:
+        raise ZoteroVerificationError(exc.code, str(exc), data=exc.data) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,13 +190,15 @@ def _existing_verification(
     note_key: str,
 ) -> VerifiedZoteroNote | None:
     run_dir = loaded.manifest_path.resolve(strict=True).parent
-    verification_path = (
-        run_dir
-        / "verifications"
-        / bound.authorization.authorization_id
-        / f"{note_key}.json"
+    artifact_paths = _verification_artifact_paths(
+        run_dir,
+        bound.authorization.authorization_id,
+        note_key,
+        allow_existing_sidecar=True,
+        allow_existing_main=True,
     )
-    verification_dir = verification_path.with_suffix("")
+    verification_path = artifact_paths.main
+    verification_dir = artifact_paths.sidecar
     recovery_record = verification_dir / "record.json"
     if not verification_path.exists() and not recovery_record.exists():
         return None
@@ -177,6 +221,7 @@ def _existing_verification(
         note_key=note_key,
     )
     if not verification_path.exists():
+        _revalidate_verification_main_parent(artifact_paths)
         try:
             publish_file_no_replace(recovery_record, verification_path)
         except Exception as exc:
@@ -275,13 +320,15 @@ def publish_verification_locked(
         note_key=note_key,
     )
     verification_id = new_random_id("verification")
-    verification_path = (
-        run_dir
-        / "verifications"
-        / bound.authorization.authorization_id
-        / f"{note_key}.json"
+    artifact_paths = _verification_artifact_paths(
+        run_dir,
+        bound.authorization.authorization_id,
+        note_key,
+        allow_existing_sidecar=False,
+        allow_existing_main=False,
     )
-    verification_dir = verification_path.with_suffix("")
+    verification_path = artifact_paths.main
+    verification_dir = artifact_paths.sidecar
     staging = run_dir / f".{verification_id}.{new_uuid()}.staging"
     staging.mkdir()
     try:
@@ -364,13 +411,21 @@ def publish_verification_locked(
                 str(exc),
                 data={"run_size_bytes": exc.actual_bytes, "max_bytes": exc.max_bytes},
             ) from exc
+        _ensure_verification_publication_parent(artifact_paths)
         try:
             atomic_publish_tree(staged_sidecar, verification_dir)
-            publish_file_no_replace(staged_verification_path, verification_path)
         except Exception as exc:
             raise ZoteroVerificationError(
                 "verification_publication_failed",
                 f"immutable verification publication failed: {verification_dir}: {exc}",
+            ) from exc
+        _revalidate_verification_main_parent(artifact_paths)
+        try:
+            publish_file_no_replace(staged_verification_path, verification_path)
+        except Exception as exc:
+            raise ZoteroVerificationError(
+                "verification_publication_failed",
+                f"immutable verification main publication failed: {verification_path}: {exc}",
             ) from exc
         try:
             atomic_write_json(loaded.manifest_path, updated_run)
@@ -406,6 +461,13 @@ def verify_zotero_authorization(
         )
     except ZoteroAuthorizationBindingError as exc:
         raise ZoteroVerificationError(exc.code, str(exc), data=exc.data) from exc
+    _verification_artifact_paths(
+        run_dir,
+        inspected.authorization_id,
+        note_key,
+        allow_existing_sidecar=True,
+        allow_existing_main=True,
+    )
     resolved_provider = provider or LocalApiZoteroReadProvider()
     with locked_zotero_parent(run_dir, inspected.target.parent_key):
         with locked_v2_run(run_dir) as loaded:
@@ -420,6 +482,13 @@ def verify_zotero_authorization(
             )
             if replay is not None:
                 return replay
+            _verification_artifact_paths(
+                run_dir,
+                bound.authorization.authorization_id,
+                note_key,
+                allow_existing_sidecar=False,
+                allow_existing_main=False,
+            )
             try:
                 snapshot = resolved_provider.get_note(note_key)
             except Exception as exc:

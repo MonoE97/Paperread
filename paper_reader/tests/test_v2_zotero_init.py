@@ -313,6 +313,47 @@ def test_init_zotero_rejects_noncanonical_or_invalid_identifiers_before_any_root
     assert _tree_snapshot(skill_root) == before
 
 
+def test_init_zotero_cli_rejects_non_object_attachment_without_mutating_skill_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.zotero_lifecycle as module
+
+    pdf_path = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, pdf_path)
+    payload = _bundle(pdf_path)
+    selected = payload["selected_item"]
+    assert isinstance(selected, dict)
+    attachments = selected["attachments"]
+    assert isinstance(attachments, list)
+    attachments.append("not-an-object")
+    bundle_path = tmp_path / "discovery.json"
+    bundle_path.write_text(json.dumps(payload), encoding="utf-8")
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+    sentinel = skill_root / "sentinel.txt"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    before = _tree_snapshot(skill_root)
+    monkeypatch.setattr(module, "DEFAULT_SKILL_ROOT", skill_root)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "init-zotero",
+            "--raw-mcp-response",
+            str(bundle_path),
+            "--expected-item-key",
+            "PARENT1",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = _result_payload(result)
+    assert payload["code"] == "invalid_discovery_bundle"
+    assert _tree_snapshot(skill_root) == before
+
+
 def test_init_zotero_requires_readable_local_primary_pdf_before_allocation(tmp_path: Path) -> None:
     missing_pdf = tmp_path / "missing.pdf"
     bundle_path = tmp_path / "discovery.json"

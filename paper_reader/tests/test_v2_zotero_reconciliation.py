@@ -17,7 +17,13 @@ from paper_reader.contracts import (
 )
 from paper_reader.public_cli import app
 
-from test_v2_zotero_authorization import NOW, _authorize, _candidate
+from test_v2_zotero_authorization import (
+    NOW,
+    _authorize,
+    _candidate,
+    _filesystem_snapshot,
+    _install_unsafe_artifact_layout,
+)
 from test_v2_zotero_candidate import InMemoryZoteroProvider
 from test_v2_zotero_verification import _note_snapshot
 
@@ -81,6 +87,47 @@ def test_reconciliation_main_artifact_uses_authorization_topology(tmp_path: Path
     assert reconciled.reconciliation_path == expected
     assert expected.is_file()
     assert reconciled.reconciliation_dir == expected.with_suffix("")
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["root_symlink", "sidecar_symlink", "main_symlink", "main_hardlink"],
+)
+def test_reconcile_rejects_unsafe_deterministic_paths_before_provider_or_publication(
+    case: str,
+    tmp_path: Path,
+) -> None:
+    authorization_path, authorization = _authorized(tmp_path)
+    run_dir = authorization_path.parent.parent
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _install_unsafe_artifact_layout(
+        run_dir=run_dir,
+        outside=outside,
+        root_name="reconciliations",
+        parent_parts=(),
+        stem=authorization.authorization_id,
+        case=case,
+    )
+    run_before = _filesystem_snapshot(run_dir)
+    outside_before = _filesystem_snapshot(outside)
+
+    class ProviderSpy:
+        calls = 0
+
+        def get_children(self, _parent_key: str):
+            self.calls += 1
+            raise AssertionError("unsafe reconciliation path reached provider")
+
+    provider = ProviderSpy()
+
+    with pytest.raises(Exception) as exc_info:
+        _reconcile(authorization_path, provider)
+
+    assert getattr(exc_info.value, "code", None) == "unsafe_artifact_path"
+    assert provider.calls == 0
+    assert _filesystem_snapshot(run_dir) == run_before
+    assert _filesystem_snapshot(outside) == outside_before
 
 
 def test_reconcile_many_exact_matches_is_ambiguous_and_blocked(tmp_path: Path) -> None:

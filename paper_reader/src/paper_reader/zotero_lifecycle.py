@@ -296,13 +296,18 @@ def _validated_inventory(
     return normalized_inventory
 
 
-def _attachment_identity(selected: dict[str, Any]) -> tuple[str, LocalSourceIdentity, dict[str, Any]]:
+def _attachment_identity(
+    selected: dict[str, Any],
+) -> tuple[str, LocalSourceIdentity, dict[str, Any], dict[str, Any]]:
     attachments = selected.get("attachments", [])
-    attachment = select_pdf_attachment(
-        [item for item in attachments if isinstance(item, dict)]
-        if isinstance(attachments, list)
-        else []
-    )
+    if not isinstance(attachments, list) or not all(
+        isinstance(item, dict) for item in attachments
+    ):
+        raise ZoteroLifecycleError(
+            "invalid_discovery_bundle",
+            "selected_item attachments must be an array of objects",
+        )
+    attachment = select_pdf_attachment(attachments)
     if attachment is None:
         raise ZoteroLifecycleError(
             "zotero_pdf_unavailable",
@@ -325,7 +330,7 @@ def _attachment_identity(selected: dict[str, Any]) -> tuple[str, LocalSourceIden
     normalized_attachment = dict(attachment)
     normalized_attachment["key"] = attachment_key
     normalized_attachment["path"] = identity.resolved_path
-    return attachment_key, identity, normalized_attachment
+    return attachment_key, identity, normalized_attachment, attachment
 
 
 def _artifact_ref(path: str, role: str, content: bytes) -> ArtifactRef:
@@ -402,14 +407,19 @@ def initialize_zotero_run(
         selected=selected,
         expected_item_key=expected_item_key,
     )
-    attachment_key, attachment_identity, normalized_attachment = _attachment_identity(selected)
+    (
+        attachment_key,
+        attachment_identity,
+        normalized_attachment,
+        selected_attachment,
+    ) = _attachment_identity(selected)
     title = display_title(selected["title"])
     doi = normalized_doi(selected.get("DOI", ""))
     parent_version = _non_negative_version(selected.get("version", 0), context="selected_item")
     selected_normalized = dict(selected)
     selected_normalized.update({"title": title, "DOI": doi, "version": parent_version})
     selected_normalized["attachments"] = [
-        normalized_attachment if item is select_pdf_attachment(selected.get("attachments", [])) else item
+        normalized_attachment if item is selected_attachment else item
         for item in selected.get("attachments", [])
     ]
     normalized_snapshot = {

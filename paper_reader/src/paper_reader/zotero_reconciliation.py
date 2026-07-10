@@ -38,6 +38,13 @@ from paper_reader.zotero_authorization_loader import (
     inspect_authorization_target,
     load_bound_authorization,
 )
+from paper_reader.zotero_artifact_paths import (
+    DeterministicArtifactPaths,
+    UnsafeZoteroArtifactPathError,
+    ensure_safe_publication_parent,
+    inspect_deterministic_artifact_paths,
+    revalidate_before_main_publication,
+)
 from paper_reader.zotero_candidate import _artifact_ref, _note_child_view
 from paper_reader.zotero_lock import locked_zotero_parent
 from paper_reader.zotero_note_validation import evaluate_note_snapshot
@@ -50,6 +57,40 @@ _PORTABLE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$")
 
 class ZoteroReconciliationError(LocalPublicationError):
     pass
+
+
+def _reconciliation_artifact_paths(
+    run_dir: Path,
+    authorization_id: str,
+    *,
+    allow_existing_sidecar: bool,
+    allow_existing_main: bool,
+) -> DeterministicArtifactPaths:
+    try:
+        return inspect_deterministic_artifact_paths(
+            run_dir,
+            root_name="reconciliations",
+            parent_parts=(),
+            stem=authorization_id,
+            allow_existing_sidecar=allow_existing_sidecar,
+            allow_existing_main=allow_existing_main,
+        )
+    except UnsafeZoteroArtifactPathError as exc:
+        raise ZoteroReconciliationError(exc.code, str(exc), data=exc.data) from exc
+
+
+def _ensure_reconciliation_publication_parent(paths: DeterministicArtifactPaths) -> None:
+    try:
+        ensure_safe_publication_parent(paths)
+    except UnsafeZoteroArtifactPathError as exc:
+        raise ZoteroReconciliationError(exc.code, str(exc), data=exc.data) from exc
+
+
+def _revalidate_reconciliation_main_parent(paths: DeterministicArtifactPaths) -> None:
+    try:
+        revalidate_before_main_publication(paths)
+    except UnsafeZoteroArtifactPathError as exc:
+        raise ZoteroReconciliationError(exc.code, str(exc), data=exc.data) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,12 +182,14 @@ def _existing_reconciliation(
     bound: LoadedAuthorization,
 ) -> ReconciledZoteroWrite | None:
     run_dir = loaded.manifest_path.resolve(strict=True).parent
-    reconciliation_path = (
-        run_dir
-        / "reconciliations"
-        / f"{bound.authorization.authorization_id}.json"
+    artifact_paths = _reconciliation_artifact_paths(
+        run_dir,
+        bound.authorization.authorization_id,
+        allow_existing_sidecar=True,
+        allow_existing_main=True,
     )
-    reconciliation_dir = reconciliation_path.with_suffix("")
+    reconciliation_path = artifact_paths.main
+    reconciliation_dir = artifact_paths.sidecar
     recovery_record = reconciliation_dir / "record.json"
     if not reconciliation_path.exists() and not recovery_record.exists():
         return None
@@ -168,6 +211,7 @@ def _existing_reconciliation(
         bound=bound,
     )
     if not reconciliation_path.exists():
+        _revalidate_reconciliation_main_parent(artifact_paths)
         try:
             publish_file_no_replace(recovery_record, reconciliation_path)
         except Exception as exc:
@@ -379,12 +423,14 @@ def _publish_reconciliation_locked(
         gate = _verification_gate(evaluation)
 
     reconciliation_id = new_random_id("reconciliation")
-    reconciliation_path = (
-        run_dir
-        / "reconciliations"
-        / f"{bound.authorization.authorization_id}.json"
+    artifact_paths = _reconciliation_artifact_paths(
+        run_dir,
+        bound.authorization.authorization_id,
+        allow_existing_sidecar=False,
+        allow_existing_main=False,
     )
-    reconciliation_dir = reconciliation_path.with_suffix("")
+    reconciliation_path = artifact_paths.main
+    reconciliation_dir = artifact_paths.sidecar
     staging = run_dir / f".{reconciliation_id}.{new_uuid()}.staging"
     staging.mkdir()
     try:
@@ -506,13 +552,21 @@ def _publish_reconciliation_locked(
                 str(exc),
                 data={"run_size_bytes": exc.actual_bytes, "max_bytes": exc.max_bytes},
             ) from exc
+        _ensure_reconciliation_publication_parent(artifact_paths)
         try:
             atomic_publish_tree(staged_sidecar, reconciliation_dir)
-            publish_file_no_replace(staged_reconciliation_path, reconciliation_path)
         except Exception as exc:
             raise ZoteroReconciliationError(
                 "reconciliation_publication_failed",
                 f"immutable reconciliation publication failed: {reconciliation_dir}: {exc}",
+            ) from exc
+        _revalidate_reconciliation_main_parent(artifact_paths)
+        try:
+            publish_file_no_replace(staged_reconciliation_path, reconciliation_path)
+        except Exception as exc:
+            raise ZoteroReconciliationError(
+                "reconciliation_publication_failed",
+                f"immutable reconciliation main publication failed: {reconciliation_path}: {exc}",
             ) from exc
         try:
             atomic_write_json(loaded.manifest_path, updated_run)
@@ -545,6 +599,12 @@ def reconcile_zotero_authorization(
         )
     except ZoteroAuthorizationBindingError as exc:
         raise ZoteroReconciliationError(exc.code, str(exc), data=exc.data) from exc
+    _reconciliation_artifact_paths(
+        run_dir,
+        inspected.authorization_id,
+        allow_existing_sidecar=True,
+        allow_existing_main=True,
+    )
     resolved_provider = provider or LocalApiZoteroReadProvider()
     with locked_zotero_parent(run_dir, inspected.target.parent_key):
         with locked_v2_run(run_dir) as loaded:
@@ -558,6 +618,12 @@ def reconcile_zotero_authorization(
             )
             if replay is not None:
                 return replay
+            _reconciliation_artifact_paths(
+                run_dir,
+                bound.authorization.authorization_id,
+                allow_existing_sidecar=False,
+                allow_existing_main=False,
+            )
             children, children_bytes = _captured_children(
                 resolved_provider,
                 parent_key=bound.authorization.target.parent_key,

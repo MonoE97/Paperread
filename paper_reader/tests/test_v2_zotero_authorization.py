@@ -4,6 +4,8 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import os
+import stat
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -28,6 +30,74 @@ from test_v2_zotero_candidate import (
 
 
 NOW = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _filesystem_snapshot(root: Path) -> dict[str, tuple[int, int, int, int, str]]:
+    snapshot: dict[str, tuple[int, int, int, int, str]] = {}
+    for current_root, directories, filenames in os.walk(root, followlinks=False):
+        current = Path(current_root)
+        for name in (".", *sorted(directories), *sorted(filenames)):
+            path = current if name == "." else current / name
+            relative = "." if path == root else path.relative_to(root).as_posix()
+            if relative in snapshot:
+                continue
+            metadata = os.lstat(path)
+            if stat.S_ISLNK(metadata.st_mode):
+                content = f"symlink:{os.readlink(path)}"
+            elif stat.S_ISREG(metadata.st_mode):
+                content = hashlib.sha256(path.read_bytes()).hexdigest()
+            else:
+                content = "directory" if stat.S_ISDIR(metadata.st_mode) else "other"
+            snapshot[relative] = (
+                metadata.st_mode,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_nlink,
+                content,
+            )
+    return snapshot
+
+
+def _install_unsafe_artifact_layout(
+    *,
+    run_dir: Path,
+    outside: Path,
+    root_name: str,
+    parent_parts: tuple[str, ...],
+    stem: str,
+    case: str,
+) -> None:
+    root = run_dir / root_name
+    if case == "root_symlink":
+        root.symlink_to(outside, target_is_directory=True)
+        return
+    root.mkdir()
+    parent = root
+    for index, part in enumerate(parent_parts):
+        candidate = parent / part
+        if case == "intermediate_symlink" and index == len(parent_parts) - 1:
+            target = outside / "intermediate"
+            target.mkdir()
+            candidate.symlink_to(target, target_is_directory=True)
+            return
+        candidate.mkdir()
+        parent = candidate
+    sidecar = parent / stem
+    main = parent / f"{stem}.json"
+    if case == "sidecar_symlink":
+        target = outside / "sidecar"
+        target.mkdir()
+        sidecar.symlink_to(target, target_is_directory=True)
+    elif case == "main_symlink":
+        target = outside / "main.json"
+        target.write_text("outside-main", encoding="utf-8")
+        main.symlink_to(target)
+    elif case == "main_hardlink":
+        target = outside / "main.json"
+        target.write_text("outside-main", encoding="utf-8")
+        os.link(target, main)
+    else:
+        raise AssertionError(case)
 
 
 def _module():
@@ -128,6 +198,62 @@ def test_authorization_main_artifact_uses_required_topology(tmp_path: Path) -> N
     assert authorized.authorization_path == expected
     assert expected.is_file()
     assert authorized.authorization_dir == expected.with_suffix("")
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["root_symlink", "sidecar_symlink", "main_symlink", "main_hardlink"],
+)
+def test_authorize_rejects_unsafe_deterministic_paths_before_provider_or_publication(
+    case: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, _provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    authorization_id = "authorization_fixed"
+    original_new_random_id = module.new_random_id
+
+    def deterministic_id(prefix: str) -> str:
+        if prefix == "authorization":
+            return authorization_id
+        return original_new_random_id(prefix)
+
+    monkeypatch.setattr(module, "new_random_id", deterministic_id)
+    _install_unsafe_artifact_layout(
+        run_dir=run_dir,
+        outside=outside,
+        root_name="authorizations",
+        parent_parts=(),
+        stem=authorization_id,
+        case=case,
+    )
+    run_before = _filesystem_snapshot(run_dir)
+    outside_before = _filesystem_snapshot(outside)
+
+    class ProviderSpy:
+        calls = 0
+
+        def get_parent(self, _item_key: str):
+            self.calls += 1
+            raise AssertionError("unsafe authorization path reached provider")
+
+        def get_children(self, _parent_key: str):
+            self.calls += 1
+            raise AssertionError("unsafe authorization path reached provider")
+
+    provider = ProviderSpy()
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider)
+
+    assert getattr(exc_info.value, "code", None) == "unsafe_artifact_path"
+    assert provider.calls == 0
+    assert _filesystem_snapshot(run_dir) == run_before
+    assert _filesystem_snapshot(outside) == outside_before
 
 
 def test_batch_authorization_preserves_both_external_identities(tmp_path: Path) -> None:
