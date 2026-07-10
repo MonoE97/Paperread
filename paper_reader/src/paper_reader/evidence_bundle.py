@@ -21,9 +21,15 @@ from paper_reader.evidence_manifest import (
     EvidenceManifest,
     build_evidence_manifest,
 )
-from paper_reader.pdf_extract import extract_pdf
+from paper_reader.pdf_extract import ExtractedTextLimitError, extract_pdf
 from paper_reader.pdf_workflow import build_pdf_metadata
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
+from paper_reader.run_lock import locked_v2_run
+from paper_reader.run_size import (
+    RunSizeLimitError,
+    enforce_projected_run_size,
+    projected_run_size,
+)
 from paper_reader.storage import (
     atomic_publish_tree,
     atomic_write_json,
@@ -33,7 +39,7 @@ from paper_reader.storage import (
     new_uuid,
     sha256_file,
 )
-from paper_reader.v2_loader import LoadedRun, load_v2_run
+from paper_reader.v2_loader import LoadedRun
 from paper_reader.workflow import (
     build_context_markdown,
     build_section_context_markdown,
@@ -108,10 +114,6 @@ def _artifact_ref(run_dir: Path, path: Path, role: str, media_type: str) -> Arti
     )
 
 
-def _tree_size(root: Path) -> int:
-    return sum(path.stat().st_size for path in root.rglob("*") if path.is_file() and not path.is_symlink())
-
-
 def _secondary_sources(metadata: dict) -> dict:
     return {
         "item_key": "",
@@ -154,7 +156,20 @@ def prepare_local_evidence(
     preview_pages: int | None = None,
     figure_limit: int | None = None,
 ) -> PreparedEvidence:
-    loaded = load_v2_run(run_path)
+    with locked_v2_run(run_path) as loaded:
+        return _prepare_local_evidence_locked(
+            loaded,
+            preview_pages=preview_pages,
+            figure_limit=figure_limit,
+        )
+
+
+def _prepare_local_evidence_locked(
+    loaded: LoadedRun,
+    *,
+    preview_pages: int | None,
+    figure_limit: int | None,
+) -> PreparedEvidence:
     run_dir = _run_root(loaded)
     source = _verify_local_source(loaded)
     resolved_figure_limit = (
@@ -176,7 +191,21 @@ def prepare_local_evidence(
             data={"page_count": page_count, "max_pages": V2_RESOURCE_POLICY.pdf_max_pages},
         )
 
-    extraction = extract_pdf(source_path, max_pages=preview_pages)
+    try:
+        extraction = extract_pdf(
+            source_path,
+            max_pages=preview_pages,
+            max_chars=V2_RESOURCE_POLICY.extracted_text_max_chars,
+        )
+    except ExtractedTextLimitError as exc:
+        raise EvidenceBundleError(
+            "extracted_text_limit_exceeded",
+            f"extracted text exceeded {exc.max_chars} characters during page iteration",
+            data={
+                "extracted_chars": exc.actual_chars,
+                "max_chars": exc.max_chars,
+            },
+        ) from exc
     extracted_chars = len(str(extraction.get("text", "")))
     if extracted_chars > V2_RESOURCE_POLICY.extracted_text_max_chars:
         raise EvidenceBundleError(
@@ -245,8 +274,6 @@ def prepare_local_evidence(
             )
             for staged_path, future_path, role, media_type in artifact_specs
         )
-        existing_without_staging = _tree_size(run_dir) - _tree_size(staging)
-        base_without_run_manifest = existing_without_staging - loaded.manifest_path.stat().st_size
         manifest = build_evidence_manifest(
             evidence_id=evidence_id,
             run_id=loaded.run.run_id,
@@ -277,10 +304,12 @@ def prepare_local_evidence(
                 update={"path": (future_dir / "evidence.json").relative_to(run_dir).as_posix()}
             )
             updated_run = _updated_run(loaded, manifest_ref)
-            next_size = (
-                base_without_run_manifest
-                + _tree_size(staging)
-                + len(canonical_json_bytes(updated_run))
+            next_size = projected_run_size(
+                run_dir,
+                staging_dir=staging,
+                replacements={
+                    loaded.manifest_path: canonical_json_bytes(updated_run),
+                },
             )
             current_size = next(
                 int(item.actual)
@@ -303,15 +332,24 @@ def prepare_local_evidence(
                 "prepared run size accounting did not converge",
                 data={"run_id": loaded.run.run_id},
             )
-        if predicted_size > V2_RESOURCE_POLICY.run_max_bytes:
-            raise EvidenceBundleError(
-                "run_size_limit_exceeded",
-                f"prepared run would use {predicted_size} bytes; limit is {V2_RESOURCE_POLICY.run_max_bytes}",
-                data={
-                    "run_size_bytes": predicted_size,
-                    "max_bytes": V2_RESOURCE_POLICY.run_max_bytes,
+        try:
+            enforce_projected_run_size(
+                run_dir,
+                max_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+                staging_dir=staging,
+                replacements={
+                    loaded.manifest_path: canonical_json_bytes(updated_run),
                 },
             )
+        except RunSizeLimitError as exc:
+            raise EvidenceBundleError(
+                "run_size_limit_exceeded",
+                str(exc),
+                data={
+                    "run_size_bytes": exc.actual_bytes,
+                    "max_bytes": exc.max_bytes,
+                },
+            ) from exc
 
         destination = run_dir / "evidence" / evidence_id
         try:
@@ -323,7 +361,17 @@ def prepare_local_evidence(
                 data={"run_id": loaded.run.run_id, "evidence_dir": str(destination)},
             ) from exc
         published_manifest = destination / "evidence.json"
-        atomic_write_json(loaded.manifest_path, updated_run)
+        try:
+            atomic_write_json(loaded.manifest_path, updated_run)
+        except Exception as exc:
+            raise EvidenceBundleError(
+                "evidence_status_update_failed",
+                f"evidence tree is durable but run binding failed: {exc}",
+                data={
+                    "run_id": loaded.run.run_id,
+                    "evidence_dir": str(destination),
+                },
+            ) from exc
         return PreparedEvidence(
             run_dir=run_dir,
             evidence_dir=destination,

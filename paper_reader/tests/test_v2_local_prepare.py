@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import fcntl
+import multiprocessing
+import queue
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -17,6 +20,19 @@ from paper_reader.public_cli import app
 
 
 FIXTURE_PDF = Path(__file__).parent / "fixtures" / "minimal.pdf"
+
+
+def _process_prepare_local(run_dir: str, start, messages) -> None:
+    from paper_reader.evidence_bundle import prepare_local_evidence
+
+    messages.put(("ready", None))
+    start.wait(timeout=10)
+    try:
+        prepared = prepare_local_evidence(Path(run_dir), figure_limit=0)
+    except Exception as exc:
+        messages.put(("error", f"{type(exc).__name__}: {exc}"))
+    else:
+        messages.put(("done", str(prepared.evidence_dir)))
 
 
 def _invoke(arguments: list[str]):
@@ -89,6 +105,35 @@ def test_prepare_builds_one_immutable_complete_pdf_evidence_bundle(tmp_path: Pat
         if path.is_file() and not path.is_symlink()
     )
     assert resource_checks["run_size_bytes"]["actual"] == final_run_size
+
+
+def test_prepare_reloads_inside_the_shared_run_advisory_lock(tmp_path: Path) -> None:
+    source = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, source)
+    initialized = _invoke(["run", "init-local", str(source)])
+    run_dir = Path(_result_payload(initialized)["data"]["run_dir"])
+    lock_path = run_dir / ".run.lock"
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    messages = context.Queue()
+
+    with lock_path.open("a+b") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        process = context.Process(
+            target=_process_prepare_local,
+            args=(str(run_dir), start, messages),
+        )
+        process.start()
+        assert messages.get(timeout=10) == ("ready", None)
+        start.set()
+        with pytest.raises(queue.Empty):
+            messages.get(timeout=1.5)
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+    status, detail = messages.get(timeout=10)
+    process.join(timeout=10)
+    assert process.exitcode == 0
+    assert status == "done", detail
 
 
 def test_prepare_extracts_default_figures_without_enabling_arxiv_network(
@@ -313,6 +358,48 @@ def test_prepare_atomic_publication_fault_leaves_run_unprepared_and_no_partial_e
     assert not list(run_dir.glob(".*.staging"))
 
 
+def test_prepare_run_update_fault_leaves_only_unbound_orphan_and_retry_is_safe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.evidence_bundle as evidence_bundle
+
+    source = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, source)
+    initialized = _invoke(["run", "init-local", str(source)])
+    run_dir = Path(_result_payload(initialized)["data"]["run_dir"])
+    run_before = (run_dir / "run.json").read_bytes()
+    original_write = evidence_bundle.atomic_write_json
+    failed = False
+
+    def fail_once(path: Path, value):
+        nonlocal failed
+        if Path(path).name == "run.json" and not failed:
+            failed = True
+            raise OSError("injected failure after evidence tree publication")
+        return original_write(path, value)
+
+    monkeypatch.setattr(evidence_bundle, "atomic_write_json", fail_once)
+
+    first = _invoke(["run", "prepare", str(run_dir), "--figure-limit", "0"])
+
+    assert first.exit_code == 1
+    assert _result_payload(first)["code"] == "evidence_status_update_failed"
+    assert (run_dir / "run.json").read_bytes() == run_before
+    orphan_dirs = tuple((run_dir / "evidence").iterdir())
+    assert len(orphan_dirs) == 1
+
+    second = _invoke(["run", "prepare", str(run_dir), "--figure-limit", "0"])
+
+    assert second.exit_code == 0, second.stderr
+    run = json.loads((run_dir / "run.json").read_text())
+    bound_paths = {
+        item["path"] for item in run["artifacts"] if item["role"] == "evidence_manifest"
+    }
+    assert len(bound_paths) == 1
+    assert not any(path.startswith(orphan_dirs[0].relative_to(run_dir).as_posix()) for path in bound_paths)
+
+
 def test_explicit_preview_pages_always_produces_incomplete_evidence(tmp_path: Path) -> None:
     source = tmp_path / "paper.pdf"
     shutil.copyfile(FIXTURE_PDF, source)
@@ -456,6 +543,35 @@ def test_prepare_blocks_text_and_run_size_caps_without_prepared_false_positive(
         assert _result_payload(result)["code"] == expected_code
         assert (run_dir / "run.json").read_bytes() == run_before
         assert not (run_dir / "evidence").exists()
+
+
+def test_repeat_prepare_counts_existing_evidence_before_publishing_another_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.evidence_bundle as evidence_bundle
+
+    source = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, source)
+    initialized = _invoke(["run", "init-local", str(source)])
+    run_dir = Path(_result_payload(initialized)["data"]["run_dir"])
+    first = _invoke(["run", "prepare", str(run_dir), "--figure-limit", "0"])
+    assert first.exit_code == 0, first.stderr
+    run_before = (run_dir / "run.json").read_bytes()
+    evidence_before = sorted(path.name for path in (run_dir / "evidence").iterdir())
+    current_size = sum(path.stat().st_size for path in run_dir.rglob("*") if path.is_file())
+    monkeypatch.setattr(
+        evidence_bundle,
+        "V2_RESOURCE_POLICY",
+        replace(evidence_bundle.V2_RESOURCE_POLICY, run_max_bytes=current_size + 1),
+    )
+
+    second = _invoke(["run", "prepare", str(run_dir), "--figure-limit", "0"])
+
+    assert second.exit_code == 1
+    assert _result_payload(second)["code"] == "run_size_limit_exceeded"
+    assert (run_dir / "run.json").read_bytes() == run_before
+    assert sorted(path.name for path in (run_dir / "evidence").iterdir()) == evidence_before
 
 
 def test_prepare_revalidates_initialized_source_before_mutation(tmp_path: Path) -> None:

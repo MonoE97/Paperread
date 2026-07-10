@@ -283,3 +283,16 @@ def test_file_publish_is_atomic_no_replace_and_does_not_hardlink_candidate(tmp_p
     with pytest.raises(FileExistsError):
         storage.publish_file_no_replace(replacement, target)
     assert target.read_bytes() == b"immutable candidate"
+
+
+def test_bytes_publish_is_atomic_no_replace_without_reopening_a_source_path(tmp_path: Path) -> None:
+    storage = _storage_module()
+    target = tmp_path / "published.md"
+
+    storage.publish_bytes_no_replace(b"captured verified bytes", target)
+
+    assert target.read_bytes() == b"captured verified bytes"
+    with pytest.raises(FileExistsError):
+        storage.publish_bytes_no_replace(b"replacement", target)
+    assert target.read_bytes() == b"captured verified bytes"
+    assert not list(tmp_path.glob(".*.tmp"))

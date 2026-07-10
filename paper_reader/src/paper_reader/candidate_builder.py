@@ -33,6 +33,9 @@ from paper_reader.evidence_manifest import (
     load_bound_evidence,
 )
 from paper_reader.note import build_note_labels
+from paper_reader.resource_policy import V2_RESOURCE_POLICY
+from paper_reader.run_lock import locked_v2_run
+from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
     atomic_publish_tree,
     atomic_write_json,
@@ -43,7 +46,7 @@ from paper_reader.storage import (
     rfc3339_utc,
     sha256_file,
 )
-from paper_reader.v2_loader import LoadedRun, load_v2_run
+from paper_reader.v2_loader import LoadedRun
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +57,9 @@ class BuiltLocalCandidate:
     candidate_digest: str
 
 
-def _latest_review_package(loaded: LoadedRun) -> tuple[PaperReaderReviewPackage, Path]:
+def _latest_review_package(
+    loaded: LoadedRun,
+) -> tuple[PaperReaderReviewPackage, Path, bytes]:
     refs = [item for item in loaded.run.artifacts if item.role == "review_package"]
     if not refs:
         raise LocalPublicationError("sealed_review_missing", "run does not bind a sealed review package")
@@ -71,13 +76,14 @@ def _latest_review_package(loaded: LoadedRun) -> tuple[PaperReaderReviewPackage,
         raise LocalPublicationError("invalid_sealed_review", "sealed review package is not canonical")
     if package.run_id != loaded.run.run_id or package.gate.status != "passed" or package.gate.blockers:
         raise LocalPublicationError("invalid_sealed_review", "sealed review package did not pass its gate")
-    return package, package_path
+    return package, package_path, package_bytes
 
 
 def _sealed_snapshots(
     loaded: LoadedRun,
     package: PaperReaderReviewPackage,
     package_path: Path,
+    package_bytes: bytes,
 ) -> dict[str, bytes]:
     run_dir = loaded.manifest_path.resolve(strict=True).parent
     package_dir = package_path.parent
@@ -125,7 +131,7 @@ def _sealed_snapshots(
         raise LocalPublicationError("invalid_sealed_review", "sealed validation contains blockers")
     if validation.get("rendered_note_sha256") != hashlib.sha256(snapshots["note.md"]).hexdigest():
         raise LocalPublicationError("sealed_artifact_tampered", "sealed note hash mismatch")
-    snapshots["review-package.json"] = package_path.read_bytes()
+    snapshots["review-package.json"] = package_bytes
     return snapshots
 
 
@@ -161,7 +167,11 @@ def _updated_run(loaded: LoadedRun, candidate_ref: ArtifactRef, gate: GateState)
 
 
 def build_local_candidate(run_path: Path) -> BuiltLocalCandidate:
-    loaded = load_v2_run(run_path)
+    with locked_v2_run(run_path) as loaded:
+        return _build_local_candidate_locked(loaded)
+
+
+def _build_local_candidate_locked(loaded: LoadedRun) -> BuiltLocalCandidate:
     run_dir = loaded.manifest_path.resolve(strict=True).parent
     source = loaded.run.source
     target = loaded.run.target
@@ -172,8 +182,8 @@ def build_local_candidate(run_path: Path) -> BuiltLocalCandidate:
         )
     verify_local_source(source)
     verify_local_target(target, source)
-    package, package_path = _latest_review_package(loaded)
-    snapshots = _sealed_snapshots(loaded, package, package_path)
+    package, package_path, package_bytes = _latest_review_package(loaded)
+    snapshots = _sealed_snapshots(loaded, package, package_path, package_bytes)
     try:
         load_bound_evidence(loaded, package.evidence_digest)
     except EvidenceManifestError as exc:
@@ -189,7 +199,7 @@ def build_local_candidate(run_path: Path) -> BuiltLocalCandidate:
     staging = run_dir / f".{candidate_id}.{new_uuid()}.staging"
     staging.mkdir()
     try:
-        files = {"run.json": loaded.manifest_path.read_bytes(), "source.json": source_bytes, **snapshots}
+        files = {"run.json": loaded.manifest_bytes, "source.json": source_bytes, **snapshots}
         for name, content in files.items():
             (staging / name).write_bytes(content)
         specs = {
@@ -239,7 +249,39 @@ def build_local_candidate(run_path: Path) -> BuiltLocalCandidate:
             live_preflight=None,
         )
         digest = candidate_core_digest(candidate)
-        (staging / "candidate.json").write_bytes(canonical_json_bytes(candidate))
+        staged_candidate_path = staging / "candidate.json"
+        candidate_bytes = canonical_json_bytes(candidate)
+        staged_candidate_path.write_bytes(candidate_bytes)
+        candidate_path = candidate_dir / "candidate.json"
+        candidate_ref = _artifact_ref(
+            run_dir,
+            staged_candidate_path,
+            candidate_path,
+            "candidate",
+            "application/json",
+        )
+        if candidate_ref.sha256 != digest:
+            raise LocalPublicationError(
+                "candidate_digest_mismatch",
+                "canonical candidate core digest does not match candidate.json bytes",
+            )
+        updated_run = _updated_run(loaded, candidate_ref, gate)
+        try:
+            enforce_projected_run_size(
+                run_dir,
+                max_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+                staging_dir=staging,
+                replacements={loaded.manifest_path: canonical_json_bytes(updated_run)},
+            )
+        except RunSizeLimitError as exc:
+            raise LocalPublicationError(
+                "run_size_limit_exceeded",
+                str(exc),
+                data={
+                    "run_size_bytes": exc.actual_bytes,
+                    "max_bytes": exc.max_bytes,
+                },
+            ) from exc
         verify_local_target(target, source)
         try:
             atomic_publish_tree(staging, candidate_dir)
@@ -248,20 +290,13 @@ def build_local_candidate(run_path: Path) -> BuiltLocalCandidate:
                 "candidate_publication_failed",
                 f"immutable candidate publication failed: {candidate_dir}: {exc}",
             ) from exc
-        candidate_path = candidate_dir / "candidate.json"
-        candidate_ref = ArtifactRef(
-            role="candidate",
-            path=candidate_path.relative_to(run_dir).as_posix(),
-            sha256=sha256_file(candidate_path),
-            size_bytes=candidate_path.stat().st_size,
-            media_type="application/json",
-        )
-        if candidate_ref.sha256 != digest:
+        try:
+            atomic_write_json(loaded.manifest_path, updated_run)
+        except Exception as exc:
             raise LocalPublicationError(
-                "candidate_digest_mismatch",
-                "canonical candidate core digest does not match candidate.json bytes",
-            )
-        atomic_write_json(loaded.manifest_path, _updated_run(loaded, candidate_ref, gate))
+                "candidate_status_update_failed",
+                f"candidate tree is durable but run binding failed: {exc}",
+            ) from exc
         return BuiltLocalCandidate(run_dir, candidate_dir, candidate, digest)
     finally:
         if staging.exists():

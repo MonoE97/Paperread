@@ -102,3 +102,36 @@ def test_extract_pdf_page_records_warn_for_empty_pages(tmp_path: Path) -> None:
     assert result["pages"][0]["page"] == 1
     assert "empty_page_text" in result["pages"][0]["warnings"]
     assert result["pages"][0]["char_count"] == 0
+
+
+def test_extract_pdf_aborts_during_page_iteration_when_text_budget_is_exceeded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.pdf_extract as pdf_extract
+
+    pdf_path = tmp_path / "paper.pdf"
+    make_pdf(pdf_path, ["first page has enough text", "second page", "third page"])
+    real_open = pdf_extract.fitz.open
+    loaded_pages: list[int] = []
+
+    class CountingDocument:
+        def __init__(self, path: Path) -> None:
+            self._document = real_open(path)
+            self.page_count = self._document.page_count
+
+        def load_page(self, index: int):
+            loaded_pages.append(index)
+            return self._document.load_page(index)
+
+        def close(self) -> None:
+            self._document.close()
+
+    monkeypatch.setattr(pdf_extract.fitz, "open", lambda path: CountingDocument(path))
+
+    with pytest.raises(pdf_extract.ExtractedTextLimitError) as exc_info:
+        extract_pdf(pdf_path, max_chars=10)
+
+    assert exc_info.value.max_chars == 10
+    assert exc_info.value.actual_chars > 10
+    assert loaded_pages == [0]

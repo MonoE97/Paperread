@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -138,6 +139,25 @@ def test_review_validate_is_read_only_and_accepts_fully_bound_chinese_render(tmp
     assert _tree_snapshot(run_dir) == before
 
 
+def test_review_validation_retains_verified_evidence_bytes_after_path_overwrite(
+    tmp_path: Path,
+) -> None:
+    from paper_reader.review_package import validate_review_run
+
+    run_dir, evidence_digest = _prepared_run(tmp_path)
+    _write_summary_and_review(run_dir, evidence_digest)
+    validation = validate_review_run(run_dir)
+    assert validation.blockers == ()
+    assert validation.evidence is not None
+    metadata = validation.evidence.artifacts_by_role["metadata"][0]
+    expected = metadata.raw_bytes
+
+    metadata.path.write_bytes(b"metadata overwritten after validation")
+
+    assert metadata.raw_bytes == expected
+    assert metadata.raw_bytes != metadata.path.read_bytes()
+
+
 def _blocker_codes(result) -> set[str]:
     payload = _result_payload(result)
     assert payload["code"] == "review_blocked"
@@ -228,8 +248,8 @@ def test_review_validate_rehashes_every_bound_evidence_file(tmp_path: Path) -> N
 def test_review_seal_atomically_publishes_immutable_snapshots_and_validation(tmp_path: Path) -> None:
     run_dir, evidence_digest = _prepared_run(tmp_path)
     summary, review = _write_summary_and_review(run_dir, evidence_digest)
-    summary_before = (run_dir / "summary.json").read_bytes()
-    review_before = (run_dir / "review.json").read_bytes()
+    summary_before = canonical_json_bytes(summary)
+    review_before = canonical_json_bytes(review)
     run_before = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     evidence_ref = next(item for item in run_before["artifacts"] if item["role"] == "evidence_manifest")
     evidence_before = (run_dir / evidence_ref["path"]).read_bytes()
@@ -279,6 +299,41 @@ def test_review_seal_atomically_publishes_immutable_snapshots_and_validation(tmp
     assert not list(run_dir.glob(".*.staging"))
 
 
+def test_review_seal_uses_only_bytes_captured_by_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.review_package as review_package
+
+    run_dir, evidence_digest = _prepared_run(tmp_path)
+    _write_summary_and_review(run_dir, evidence_digest)
+    original_validate = review_package.validate_review_run
+    captured: dict[str, object] = {}
+
+    def validate_then_overwrite(run_path: Path):
+        validation = original_validate(run_path)
+        captured["validation"] = validation
+        validation.summary_path.write_bytes(b"summary swapped after validation")
+        validation.review_path.write_bytes(b"review swapped after validation")
+        assert validation.evidence is not None
+        validation.evidence.artifacts_by_role["metadata"][0].path.write_bytes(
+            b"metadata swapped after validation"
+        )
+        return validation
+
+    monkeypatch.setattr(review_package, "validate_review_run", validate_then_overwrite)
+
+    result = _invoke(["review", "seal", str(run_dir)])
+
+    assert result.exit_code == 0, result.stderr
+    validation = captured["validation"]
+    package_dir = Path(_result_payload(result)["data"]["review_package_dir"])
+    assert (package_dir / "summary.json").read_bytes() == validation.summary_bytes
+    assert (package_dir / "review.json").read_bytes() == validation.review_bytes
+    assert (package_dir / "note.md").read_bytes() == validation.rendered_note_bytes
+    assert (package_dir / "note.html").read_bytes() == validation.rendered_html_bytes
+
+
 def test_review_seal_publication_fault_leaves_no_half_package_or_reviewed_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -299,6 +354,71 @@ def test_review_seal_publication_fault_leaves_no_half_package_or_reviewed_status
     assert (run_dir / "run.json").read_bytes() == run_before
     assert not (run_dir / "reviews").exists()
     assert not list(run_dir.glob(".*.staging"))
+
+
+def test_review_seal_blocks_projected_run_size_before_package_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.review_package as review_package
+    from paper_reader.resource_policy import V2_RESOURCE_POLICY
+
+    run_dir, evidence_digest = _prepared_run(tmp_path)
+    _write_summary_and_review(run_dir, evidence_digest)
+    run_before = (run_dir / "run.json").read_bytes()
+    monkeypatch.setattr(
+        review_package,
+        "V2_RESOURCE_POLICY",
+        replace(V2_RESOURCE_POLICY, run_max_bytes=1),
+        raising=False,
+    )
+
+    result = _invoke(["review", "seal", str(run_dir)])
+
+    assert result.exit_code == 1
+    assert _result_payload(result)["code"] == "run_size_limit_exceeded"
+    assert (run_dir / "run.json").read_bytes() == run_before
+    assert not (run_dir / "reviews").exists()
+
+
+def test_review_run_update_fault_leaves_unbound_orphan_and_retry_binds_new_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.review_package as review_package
+
+    run_dir, evidence_digest = _prepared_run(tmp_path)
+    _write_summary_and_review(run_dir, evidence_digest)
+    run_before = (run_dir / "run.json").read_bytes()
+    original_write = review_package.atomic_write_json
+    failed = False
+
+    def fail_once(path: Path, value):
+        nonlocal failed
+        if Path(path).name == "run.json" and not failed:
+            failed = True
+            raise OSError("injected failure after review package publication")
+        return original_write(path, value)
+
+    monkeypatch.setattr(review_package, "atomic_write_json", fail_once)
+
+    first = _invoke(["review", "seal", str(run_dir)])
+
+    assert first.exit_code == 1
+    assert _result_payload(first)["code"] == "review_status_update_failed"
+    assert (run_dir / "run.json").read_bytes() == run_before
+    orphan_dirs = tuple((run_dir / "reviews").iterdir())
+    assert len(orphan_dirs) == 1
+
+    second = _invoke(["review", "seal", str(run_dir)])
+
+    assert second.exit_code == 0, second.stderr
+    run = json.loads((run_dir / "run.json").read_text())
+    bound_paths = {
+        item["path"] for item in run["artifacts"] if item["role"] == "review_package"
+    }
+    assert len(bound_paths) == 1
+    assert not any(path.startswith(orphan_dirs[0].relative_to(run_dir).as_posix()) for path in bound_paths)
 
 
 def test_review_seal_refuses_preview_without_creating_a_package(tmp_path: Path) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import os
 import shutil
 import stat
@@ -10,6 +11,7 @@ import fitz
 
 from paper_reader.contracts import (
     ArtifactRef,
+    GateBlocker,
     GateState,
     LocalPublicationTarget,
     LocalSourceIdentity,
@@ -19,6 +21,7 @@ from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.storage import (
     PublishConflictError,
     atomic_publish_tree,
+    atomic_write_json,
     canonical_json_bytes,
     new_random_id,
     new_uuid,
@@ -170,6 +173,59 @@ def _stage_initialized_run(
 def initialize_local_run(source_pdf: Path) -> InitializedLocalRun:
     source = _local_source_identity(Path(source_pdf))
     resolved_source = Path(source.resolved_path)
+    try:
+        lock_handle = resolved_source.open("rb")
+    except OSError as exc:
+        raise LocalLifecycleError(
+            "source_changed",
+            f"local PDF source became unavailable before allocation: {resolved_source}: {exc}",
+            data={"source_pdf": str(source_pdf)},
+        ) from exc
+    with lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            locked_stat = os.fstat(lock_handle.fileno())
+            if (locked_stat.st_dev, locked_stat.st_ino) != (source.device, source.inode):
+                raise LocalLifecycleError(
+                    "source_changed",
+                    "local PDF source inode changed before allocation",
+                    data={"source_pdf": str(source_pdf)},
+                )
+            return _allocate_local_run(source_pdf=Path(source_pdf), source=source)
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def _blocked_target_run(run: PaperReaderRun, target_path: Path) -> PaperReaderRun:
+    return PaperReaderRun(
+        schema_version="paper_reader.run.v2",
+        run_id=run.run_id,
+        created_at=run.created_at,
+        source=run.source,
+        target=run.target,
+        status="blocked",
+        artifacts=run.artifacts,
+        gate=GateState(
+            status="blocked",
+            evaluated_at=rfc3339_utc(),
+            checks=("fixed_local_target",),
+            blockers=(
+                GateBlocker(
+                    code="local_target_conflict",
+                    message=f"fixed local target became occupied during allocation: {target_path}",
+                ),
+            ),
+        ),
+        live_preflight=run.live_preflight,
+    )
+
+
+def _allocate_local_run(
+    *,
+    source_pdf: Path,
+    source: LocalSourceIdentity,
+) -> InitializedLocalRun:
+    resolved_source = Path(source.resolved_path)
     parent = resolved_source.parent
     stem = resolved_source.stem
     parent_device = parent.stat().st_dev
@@ -205,6 +261,23 @@ def initialize_local_run(source_pdf: Path) -> InitializedLocalRun:
                         "run_dir": str(destination),
                     },
                 ) from exc
+            if os.path.lexists(target_path):
+                try:
+                    atomic_write_json(
+                        destination / "run.json",
+                        _blocked_target_run(run, target_path),
+                    )
+                except Exception as exc:
+                    raise LocalLifecycleError(
+                        "initialization_failed",
+                        f"reserved run could not record a raced target conflict: {destination}: {exc}",
+                        data={
+                            "source_pdf": str(source_pdf),
+                            "run_dir": str(destination),
+                        },
+                    ) from exc
+                version += 1
+                continue
             return InitializedLocalRun(run_dir=destination, target_path=target_path, run=run)
         finally:
             if staging.exists():

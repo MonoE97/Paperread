@@ -130,6 +130,23 @@ class CaptionBackfill(TypedDict):
     caption_index: int | None
 
 
+class PendingFigure(TypedDict):
+    page: fitz.Page
+    page_number: int
+    figure_index: int
+    caption: CaptionBlock
+    bbox: fitz.Rect
+    source: str
+    caption_confidence: float | None
+
+
+class FigureCandidateLimitError(ValueError):
+    def __init__(self, *, actual: int, limit: int) -> None:
+        super().__init__(f"figure candidate count {actual} exceeds {limit}")
+        self.actual = actual
+        self.limit = limit
+
+
 class TextLine(TypedDict):
     text: str
     rect: fitz.Rect
@@ -173,6 +190,7 @@ def extract_figures(
     item_details: dict[str, Any] | None = None,
     enable_ocr_fallback: bool = False,
     allow_network_source: bool = True,
+    max_candidates: int | None = None,
 ) -> dict[str, Any]:
     resolved = Path(pdf_path).expanduser()
     if not resolved.exists():
@@ -202,10 +220,17 @@ def extract_figures(
             {"stage": "resolve", "status": "skipped", "reason": "network_disabled"}
         )
         source_candidates = []
+    if max_candidates is not None and len(source_candidates) > max_candidates:
+        raise FigureCandidateLimitError(
+            actual=len(source_candidates),
+            limit=max_candidates,
+        )
     pdf_candidates = _extract_pdf_candidates(
         pdf_path=resolved,
         output_root=output_root,
         max_pages=max_pages,
+        max_candidates=max_candidates,
+        existing_candidates=len(source_candidates),
     )
 
     ranking_pool = _dedupe_candidates(source_candidates + pdf_candidates)
@@ -578,10 +603,12 @@ def _extract_pdf_candidates(
     pdf_path: Path,
     output_root: Path,
     max_pages: int | None,
+    max_candidates: int | None = None,
+    existing_candidates: int = 0,
 ) -> list[FigureExtraction]:
     with fitz.open(pdf_path) as doc:
         page_limit = doc.page_count if max_pages is None else min(doc.page_count, max_pages)
-        results: list[FigureExtraction] = []
+        pending: list[PendingFigure] = []
         for page_index in range(page_limit):
             page = doc.load_page(page_index)
             captions = _detect_captions(page)
@@ -601,19 +628,19 @@ def _extract_pdf_candidates(
                     continue
                 used_regions.append(bbox)
                 claimed_caption_indices.add(caption_index)
-                results.append(
-                    _rasterize_figure(
+                pending.append(
+                    PendingFigure(
                         page=page,
                         page_number=page_index + 1,
                         figure_index=caption_index + 1,
                         caption=caption,
                         bbox=bbox,
-                        output_root=output_root,
                         source="deterministic-pdf",
+                        caption_confidence=None,
                     )
                 )
 
-            results.extend(
+            pending.extend(
                 _supplement_embedded_images(
                     page=page,
                     page_number=page_index + 1,
@@ -624,8 +651,25 @@ def _extract_pdf_candidates(
                     output_root=output_root,
                 )
             )
-
-    return results
+        actual_candidates = existing_candidates + len(pending)
+        if max_candidates is not None and actual_candidates > max_candidates:
+            raise FigureCandidateLimitError(
+                actual=actual_candidates,
+                limit=max_candidates,
+            )
+        return [
+            _rasterize_figure(
+                page=item["page"],
+                page_number=item["page_number"],
+                figure_index=item["figure_index"],
+                caption=item["caption"],
+                bbox=item["bbox"],
+                output_root=output_root,
+                source=item["source"],
+                caption_confidence=item["caption_confidence"],
+            )
+            for item in pending
+        ]
 
 
 def _supplement_embedded_images(
@@ -636,8 +680,8 @@ def _supplement_embedded_images(
     claimed_caption_indices: set[int],
     used_regions: list[fitz.Rect],
     output_root: Path,
-) -> list[FigureExtraction]:
-    supplements: list[FigureExtraction] = []
+) -> list[PendingFigure]:
+    supplements: list[PendingFigure] = []
     supplement_index = 1
     for region in image_regions:
         if any(_rect_overlap_ratio(region, used) > 0.8 for used in used_regions):
@@ -648,13 +692,12 @@ def _supplement_embedded_images(
             claimed_caption_indices=claimed_caption_indices,
         )
         supplements.append(
-            _rasterize_figure(
+            PendingFigure(
                 page=page,
                 page_number=page_number,
                 figure_index=1000 + supplement_index,
                 caption=backfill["block"],
                 bbox=region,
-                output_root=output_root,
                 source="embedded-image",
                 caption_confidence=backfill["confidence"],
             )

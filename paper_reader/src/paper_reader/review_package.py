@@ -24,6 +24,9 @@ from paper_reader.evidence_manifest import (
     locator_membership_error,
 )
 from paper_reader.note import render_note, render_note_html, validate_note, validate_trusted_summary
+from paper_reader.resource_policy import V2_RESOURCE_POLICY
+from paper_reader.run_lock import locked_v2_run
+from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
     atomic_publish_tree,
     atomic_write_json,
@@ -47,10 +50,14 @@ class ReviewValidation:
     evidence: BoundEvidence | None
     summary_path: Path
     review_path: Path
+    summary_bytes: bytes | None
+    review_bytes: bytes | None
     summary_sha256: str | None
     review_sha256: str | None
     rendered_note: str | None
     rendered_html: str | None
+    rendered_note_bytes: bytes | None
+    rendered_html_bytes: bytes | None
     rendered_note_sha256: str | None
     blockers: tuple[GateBlocker, ...]
 
@@ -70,7 +77,7 @@ class ReviewSealError(ValueError):
         message: str,
         *,
         blockers: tuple[GateBlocker, ...] = (),
-        data: dict[str, str] | None = None,
+        data: dict[str, str | int] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -82,11 +89,15 @@ def _blocker(code: str, message: str, artifact_path: str | None = None) -> GateB
     return GateBlocker(code=code, message=message, artifact_path=artifact_path)
 
 
-def _load_summary(path: Path, blockers: list[GateBlocker]) -> PaperReaderSummary | None:
+def _load_summary(
+    path: Path,
+    blockers: list[GateBlocker],
+) -> tuple[PaperReaderSummary | None, bytes | None]:
     try:
-        return PaperReaderSummary.model_validate_json(path.read_bytes())
+        summary = PaperReaderSummary.model_validate_json(path.read_bytes())
     except FileNotFoundError:
         blockers.append(_blocker("summary_missing", "summary.json is required", "summary.json"))
+        return None, None
     except (OSError, ValidationError) as exc:
         blockers.append(
             _blocker(
@@ -95,14 +106,19 @@ def _load_summary(path: Path, blockers: list[GateBlocker]) -> PaperReaderSummary
                 "summary.json",
             )
         )
-    return None
+        return None, None
+    return summary, canonical_json_bytes(summary)
 
 
-def _load_review(path: Path, blockers: list[GateBlocker]) -> PaperReaderReview | None:
+def _load_review(
+    path: Path,
+    blockers: list[GateBlocker],
+) -> tuple[PaperReaderReview | None, bytes | None]:
     try:
-        return PaperReaderReview.model_validate_json(path.read_bytes())
+        review = PaperReaderReview.model_validate_json(path.read_bytes())
     except FileNotFoundError:
         blockers.append(_blocker("review_missing", "review.json is required", "review.json"))
+        return None, None
     except (OSError, ValidationError) as exc:
         blockers.append(
             _blocker(
@@ -111,7 +127,8 @@ def _load_review(path: Path, blockers: list[GateBlocker]) -> PaperReaderReview |
                 "review.json",
             )
         )
-    return None
+        return None, None
+    return review, canonical_json_bytes(review)
 
 
 def _validate_locator_bindings(
@@ -165,13 +182,15 @@ def validate_review_run(run_path: Path) -> ReviewValidation:
     summary_path = run_dir / "summary.json"
     review_path = run_dir / "review.json"
     blockers: list[GateBlocker] = []
-    summary = _load_summary(summary_path, blockers)
-    review = _load_review(review_path, blockers)
+    summary, summary_bytes = _load_summary(summary_path, blockers)
+    review, review_bytes = _load_review(review_path, blockers)
     summary_sha256 = canonical_json_sha256(summary) if summary is not None else None
     review_sha256 = canonical_json_sha256(review) if review is not None else None
     evidence: BoundEvidence | None = None
     rendered_note: str | None = None
     rendered_html: str | None = None
+    rendered_note_bytes: bytes | None = None
+    rendered_html_bytes: bytes | None = None
     rendered_note_sha256: str | None = None
 
     if summary is not None:
@@ -234,8 +253,8 @@ def validate_review_run(run_path: Path) -> ReviewValidation:
 
     if summary is not None and evidence is not None:
         try:
-            metadata_path = evidence.artifacts_by_role["metadata"][0]
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata_artifact = evidence.artifacts_by_role["metadata"][0]
+            metadata = json.loads(metadata_artifact.raw_bytes)
             if not isinstance(metadata, dict):
                 raise ValueError("metadata must be an object")
             rendered_note = render_note(
@@ -244,7 +263,9 @@ def validate_review_run(run_path: Path) -> ReviewValidation:
                 generated_date=loaded.run.created_at[:10],
             )
             rendered_html = render_note_html(rendered_note)
-            rendered_note_sha256 = hashlib.sha256(rendered_note.encode("utf-8")).hexdigest()
+            rendered_note_bytes = rendered_note.encode("utf-8")
+            rendered_html_bytes = rendered_html.encode("utf-8")
+            rendered_note_sha256 = hashlib.sha256(rendered_note_bytes).hexdigest()
         except Exception as exc:
             blockers.append(_blocker("note_render_failed", f"note rendering failed: {exc}"))
         else:
@@ -261,10 +282,14 @@ def validate_review_run(run_path: Path) -> ReviewValidation:
         evidence=evidence,
         summary_path=summary_path,
         review_path=review_path,
+        summary_bytes=summary_bytes,
+        review_bytes=review_bytes,
         summary_sha256=summary_sha256,
         review_sha256=review_sha256,
         rendered_note=rendered_note,
         rendered_html=rendered_html,
+        rendered_note_bytes=rendered_note_bytes,
+        rendered_html_bytes=rendered_html_bytes,
         rendered_note_sha256=rendered_note_sha256,
         blockers=tuple(blockers),
     )
@@ -306,6 +331,11 @@ def _reviewed_run(
 
 
 def seal_review_run(run_path: Path) -> SealedReview:
+    with locked_v2_run(run_path):
+        return _seal_review_run_locked(run_path)
+
+
+def _seal_review_run_locked(run_path: Path) -> SealedReview:
     validation = validate_review_run(run_path)
     if validation.blockers:
         raise ReviewSealError(
@@ -318,10 +348,12 @@ def seal_review_run(run_path: Path) -> SealedReview:
         validation.summary is None
         or validation.review is None
         or validation.evidence is None
+        or validation.summary_bytes is None
+        or validation.review_bytes is None
         or validation.summary_sha256 is None
         or validation.review_sha256 is None
-        or validation.rendered_note is None
-        or validation.rendered_html is None
+        or validation.rendered_note_bytes is None
+        or validation.rendered_html_bytes is None
         or validation.rendered_note_sha256 is None
     ):
         raise ReviewSealError("review_blocked", "validated review inputs are incomplete")
@@ -332,11 +364,11 @@ def seal_review_run(run_path: Path) -> SealedReview:
     staging.mkdir()
     try:
         snapshot_bytes = {
-            "summary.json": validation.summary_path.read_bytes(),
-            "review.json": validation.review_path.read_bytes(),
+            "summary.json": validation.summary_bytes,
+            "review.json": validation.review_bytes,
             "evidence.json": validation.evidence.manifest_bytes,
-            "note.md": validation.rendered_note.encode("utf-8"),
-            "note.html": validation.rendered_html.encode("utf-8"),
+            "note.md": validation.rendered_note_bytes,
+            "note.html": validation.rendered_html_bytes,
         }
         validation_payload = {
             "format": "paper_reader.review-validation.v2-internal",
@@ -345,9 +377,7 @@ def seal_review_run(run_path: Path) -> SealedReview:
             "review_sha256": validation.review_sha256,
             "evidence_digest": validation.evidence.digest,
             "rendered_note_sha256": validation.rendered_note_sha256,
-            "rendered_html_sha256": hashlib.sha256(
-                validation.rendered_html.encode("utf-8")
-            ).hexdigest(),
+            "rendered_html_sha256": hashlib.sha256(validation.rendered_html_bytes).hexdigest(),
             "checks": [
                 "summary_schema",
                 "review_schema",
@@ -407,7 +437,35 @@ def seal_review_run(run_path: Path) -> SealedReview:
             artifacts=tuple(refs.values()),
             gate=gate,
         )
-        (staging / "review-package.json").write_bytes(canonical_json_bytes(review_package))
+        staged_package_path = staging / "review-package.json"
+        staged_package_path.write_bytes(canonical_json_bytes(review_package))
+        package_path = package_dir / "review-package.json"
+        package_ref = _artifact_ref(
+            validation.run_dir,
+            staged_package_path,
+            package_path,
+            "review_package",
+            "application/json",
+        )
+        updated_run = _reviewed_run(validation, package_ref, gate)
+        try:
+            enforce_projected_run_size(
+                validation.run_dir,
+                max_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+                staging_dir=staging,
+                replacements={
+                    validation.loaded_run.manifest_path: canonical_json_bytes(updated_run),
+                },
+            )
+        except RunSizeLimitError as exc:
+            raise ReviewSealError(
+                "run_size_limit_exceeded",
+                str(exc),
+                data={
+                    "run_size_bytes": exc.actual_bytes,
+                    "max_bytes": exc.max_bytes,
+                },
+            ) from exc
         try:
             atomic_publish_tree(staging, package_dir)
         except Exception as exc:
@@ -416,18 +474,14 @@ def seal_review_run(run_path: Path) -> SealedReview:
                 f"immutable review package publication failed: {package_dir}: {exc}",
                 data={"run_id": validation.loaded_run.run.run_id},
             ) from exc
-        package_path = package_dir / "review-package.json"
-        package_ref = ArtifactRef(
-            role="review_package",
-            path=package_path.relative_to(validation.run_dir).as_posix(),
-            sha256=sha256_file(package_path),
-            size_bytes=package_path.stat().st_size,
-            media_type="application/json",
-        )
-        atomic_write_json(
-            validation.loaded_run.manifest_path,
-            _reviewed_run(validation, package_ref, gate),
-        )
+        try:
+            atomic_write_json(validation.loaded_run.manifest_path, updated_run)
+        except Exception as exc:
+            raise ReviewSealError(
+                "review_status_update_failed",
+                f"review package is durable but run binding failed: {exc}",
+                data={"run_id": validation.loaded_run.run.run_id},
+            ) from exc
         return SealedReview(
             run_dir=validation.run_dir,
             package_dir=package_dir,

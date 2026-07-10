@@ -1628,3 +1628,57 @@ def test_extract_figures_does_not_let_low_value_source_stats_dominate_real_pdf_f
 
     captions = [figure["caption"] for figure in _selected(payload)]
     assert captions[0] == "Figure 1. Proposed pipeline for the full workflow."
+
+
+def test_pdf_candidate_cap_is_checked_before_any_rasterization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.figures as figures
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"placeholder")
+    page = type("FakePage", (), {"rect": fitz.Rect(0, 0, 400, 600)})()
+
+    class FakeDocument:
+        page_count = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def load_page(self, index: int):
+            assert index == 0
+            return page
+
+    captions = [
+        {"caption": f"Figure {index}.", "rect": fitz.Rect(10, 10, 100, 30)}
+        for index in range(201)
+    ]
+    monkeypatch.setattr(figures.fitz, "open", lambda _path: FakeDocument())
+    monkeypatch.setattr(figures, "_detect_captions", lambda _page: captions)
+    monkeypatch.setattr(figures, "_detect_graphic_regions", lambda _page: [fitz.Rect(10, 40, 200, 200)])
+    monkeypatch.setattr(figures, "_detect_embedded_image_regions", lambda _page: [])
+    monkeypatch.setattr(
+        figures,
+        "_select_owned_bbox",
+        lambda *args, **kwargs: fitz.Rect(10, 40, 200, 200),
+    )
+
+    def forbidden_raster(*args, **kwargs):
+        pytest.fail("candidate cap was checked only after rasterization")
+
+    monkeypatch.setattr(figures, "_rasterize_figure", forbidden_raster)
+
+    with pytest.raises(figures.FigureCandidateLimitError) as exc_info:
+        figures._extract_pdf_candidates(
+            pdf_path,
+            tmp_path / "figures",
+            max_pages=None,
+            max_candidates=200,
+        )
+
+    assert exc_info.value.actual == 201
+    assert exc_info.value.limit == 200

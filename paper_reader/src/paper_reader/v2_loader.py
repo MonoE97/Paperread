@@ -15,6 +15,7 @@ from paper_reader.storage import canonical_json_sha256
 class LoadedRun:
     run: PaperReaderRun
     manifest_path: Path
+    manifest_bytes: bytes
     manifest_sha256: str
     canonical_digest: str
 
@@ -82,6 +83,7 @@ def load_v2_run(run_path: Path | str) -> LoadedRun:
     return LoadedRun(
         run=run,
         manifest_path=manifest_path,
+        manifest_bytes=raw_bytes,
         manifest_sha256=hashlib.sha256(raw_bytes).hexdigest(),
         canonical_digest=canonical_json_sha256(run),
     )

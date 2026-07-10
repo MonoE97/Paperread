@@ -58,6 +58,13 @@ NUMERIC_VALUE_RE = re.compile(r"(?<![A-Za-z])[-+]?\d+(?:\.\d+)?(?:\s*(?:%|x|eV|m
 NUMBERED_HEADING_RE = re.compile(r"^\s*(?:\d+(?:\.\d+)*\.?|[IVX]+\.?)\s+", flags=re.IGNORECASE)
 
 
+class ExtractedTextLimitError(ValueError):
+    def __init__(self, *, actual_chars: int, max_chars: int) -> None:
+        super().__init__(f"extracted text exceeds {max_chars} characters")
+        self.actual_chars = actual_chars
+        self.max_chars = max_chars
+
+
 def _normalize_heading_line(line: str) -> str:
     text = NUMBERED_HEADING_RE.sub("", line.strip())
     text = re.sub(r"[:.\s]+$", "", text)
@@ -204,13 +211,20 @@ def _build_table_candidates(pages: list[dict[str, Any]], sections: list[dict[str
     return candidates
 
 
-def extract_pdf(pdf_path: Path, max_pages: int | None = None) -> dict[str, Any]:
+def extract_pdf(
+    pdf_path: Path,
+    max_pages: int | None = None,
+    *,
+    max_chars: int | None = None,
+) -> dict[str, Any]:
     """Extract text and lightweight metadata from a PDF."""
     resolved = Path(pdf_path).expanduser()
     if not resolved.exists():
         raise FileNotFoundError(f"PDF not found: {resolved}")
     if not resolved.is_file():
         raise ValueError(f"PDF path is not a file: {resolved}")
+    if max_chars is not None and max_chars < 0:
+        raise ValueError("max_chars must be non-negative")
 
     warnings: list[str] = []
     doc = fitz.open(resolved)
@@ -221,9 +235,20 @@ def extract_pdf(pdf_path: Path, max_pages: int | None = None) -> dict[str, Any]:
             warnings.append(f"truncated_to_{max_pages}_pages")
 
         page_texts: list[str] = []
+        combined_chars = 0
         pages: list[dict[str, Any]] = []
         for index in range(limit):
             text = doc.load_page(index).get_text("text").strip()
+            if text:
+                fragment = f"\n\n<!-- page:{index + 1} -->\n{text}"
+                increment = len(fragment.strip()) if not page_texts else len(fragment)
+                projected_chars = combined_chars + increment
+                if max_chars is not None and projected_chars > max_chars:
+                    raise ExtractedTextLimitError(
+                        actual_chars=projected_chars,
+                        max_chars=max_chars,
+                    )
+                combined_chars = projected_chars
             pages.append(
                 {
                     "page": index + 1,
@@ -233,7 +258,7 @@ def extract_pdf(pdf_path: Path, max_pages: int | None = None) -> dict[str, Any]:
                 }
             )
             if text:
-                page_texts.append(f"\n\n<!-- page:{index + 1} -->\n{text}")
+                page_texts.append(fragment)
 
         combined = "".join(page_texts).strip()
         if not combined:

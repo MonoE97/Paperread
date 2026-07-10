@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import fcntl
+import multiprocessing
+import queue
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -17,6 +20,17 @@ from paper_reader.public_cli import app
 
 
 FIXTURE_PDF = Path(__file__).parent / "fixtures" / "minimal.pdf"
+
+
+def _process_initialize_local(source: str, start, messages) -> None:
+    messages.put(("ready", None))
+    start.wait(timeout=10)
+    try:
+        initialized = initialize_local_run(Path(source))
+    except Exception as exc:
+        messages.put(("error", f"{type(exc).__name__}: {exc}"))
+    else:
+        messages.put(("done", str(initialized.run_dir)))
 
 
 def _invoke(arguments: list[str]):
@@ -229,3 +243,75 @@ def test_concurrent_init_local_calls_reserve_unique_versions(tmp_path: Path) -> 
     for item in initialized:
         assert (item.run_dir / "run.json").is_file()
         assert (item.run_dir / "source" / "source.json").is_file()
+
+
+@pytest.mark.parametrize("alias_kind", ["symlink", "hardlink"])
+def test_init_local_honors_advisory_lock_on_the_source_inode(
+    alias_kind: str,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, source)
+    alias = tmp_path / "alias.pdf"
+    if alias_kind == "symlink":
+        alias.symlink_to(source)
+    else:
+        os.link(source, alias)
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    messages = context.Queue()
+
+    with source.open("rb") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        process = context.Process(
+            target=_process_initialize_local,
+            args=(str(alias), start, messages),
+        )
+        process.start()
+        assert messages.get(timeout=10) == ("ready", None)
+        start.set()
+        with pytest.raises(queue.Empty):
+            messages.get(timeout=1.5)
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+    status, detail = messages.get(timeout=10)
+    process.join(timeout=10)
+    assert process.exitcode == 0
+    assert status == "done", detail
+
+
+def test_init_local_blocks_raced_reservation_and_allocates_next_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.local_lifecycle as local_lifecycle
+
+    source = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, source)
+    target = tmp_path / "paper_note.md"
+    original_publish = local_lifecycle.atomic_publish_tree
+    injected = False
+
+    def publish_then_race(staging: Path, destination: Path) -> Path:
+        nonlocal injected
+        published = original_publish(staging, destination)
+        if destination.name == "paper_analysis" and not injected:
+            target.write_bytes(b"external competing note")
+            injected = True
+        return published
+
+    monkeypatch.setattr(local_lifecycle, "atomic_publish_tree", publish_then_race)
+
+    result = _invoke(["run", "init-local", str(source)])
+
+    assert result.exit_code == 0, result.stderr
+    payload = _result_payload(result)
+    assert payload["data"]["run_dir"] == str(tmp_path / "paper_analysis_v2")
+    blocked = json.loads((tmp_path / "paper_analysis" / "run.json").read_text())
+    assert blocked["status"] == "blocked"
+    assert blocked["gate"]["status"] == "blocked"
+    assert {item["code"] for item in blocked["gate"]["blockers"]} == {
+        "local_target_conflict"
+    }
+    assert target.read_bytes() == b"external competing note"
+    assert not (tmp_path / "paper_note_v2.md").exists()

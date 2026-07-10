@@ -63,13 +63,20 @@ class EvidenceManifest(StrictEvidenceModel):
 
 
 @dataclass(frozen=True, slots=True)
+class VerifiedEvidenceArtifact:
+    ref: ArtifactRef
+    path: Path
+    raw_bytes: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class BoundEvidence:
     manifest: EvidenceManifest
     manifest_ref: ArtifactRef
     manifest_path: Path
     manifest_bytes: bytes
     digest: str
-    artifacts_by_role: dict[str, tuple[Path, ...]]
+    artifacts_by_role: dict[str, tuple[VerifiedEvidenceArtifact, ...]]
 
 
 class EvidenceManifestError(ValueError):
@@ -224,16 +231,18 @@ def load_bound_evidence(loaded: LoadedRun, evidence_digest: str) -> BoundEvidenc
                 f"evidence manifest must bind exactly one {role} artifact",
             )
     manifest_dir = manifest_path.parent
-    artifacts_by_role: dict[str, list[Path]] = {}
+    artifacts_by_role: dict[str, list[VerifiedEvidenceArtifact]] = {}
     for artifact in manifest.files:
-        path, _raw = _verify_artifact(run_dir, artifact)
+        path, raw = _verify_artifact(run_dir, artifact)
         if not path.is_relative_to(manifest_dir):
             raise EvidenceManifestError(
                 "evidence_artifact_outside_bundle",
                 f"evidence member is outside its immutable bundle: {artifact.path}",
                 artifact_path=artifact.path,
             )
-        artifacts_by_role.setdefault(artifact.role, []).append(path)
+        artifacts_by_role.setdefault(artifact.role, []).append(
+            VerifiedEvidenceArtifact(ref=artifact, path=path, raw_bytes=raw)
+        )
     _validate_manifest_membership(manifest)
     return BoundEvidence(
         manifest=manifest,
@@ -334,6 +343,7 @@ __all__ = [
     "EvidenceResourceCheck",
     "EvidenceSectionMember",
     "EvidenceTableCandidateMember",
+    "VerifiedEvidenceArtifact",
     "build_evidence_manifest",
     "locator_membership_error",
     "load_bound_evidence",

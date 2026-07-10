@@ -98,7 +98,10 @@ def verify_local_source(source: LocalSourceIdentity) -> None:
         raise LocalPublicationError("source_changed", "local PDF source fingerprint changed")
 
 
-def verify_local_target(target: LocalPublicationTarget, source: LocalSourceIdentity) -> Path:
+def validate_local_target_location(
+    target: LocalPublicationTarget,
+    source: LocalSourceIdentity,
+) -> Path:
     target_path = Path(target.resolved_path)
     try:
         parent = target_path.parent.resolve(strict=True)
@@ -111,14 +114,19 @@ def verify_local_target(target: LocalPublicationTarget, source: LocalSourceIdent
         raise LocalPublicationError("invalid_local_target", "local target parent must be canonical")
     if parent.stat().st_dev != target.parent_device:
         raise LocalPublicationError("target_device_changed", "local target parent device changed")
+    if target_path == Path(source.resolved_path):
+        raise LocalPublicationError("invalid_local_target", "local target aliases the source path")
+    return target_path
+
+
+def verify_local_target(target: LocalPublicationTarget, source: LocalSourceIdentity) -> Path:
+    target_path = validate_local_target_location(target, source)
     if os.path.lexists(target_path):
         raise LocalPublicationError(
             "publish_conflict",
             f"fixed local target is already occupied: {target_path}",
             data={"target_path": str(target_path)},
         )
-    if target_path == Path(source.resolved_path):
-        raise LocalPublicationError("invalid_local_target", "local target aliases the source path")
     return target_path
 
 
@@ -135,6 +143,7 @@ __all__ = [
     "candidate_core_digest",
     "candidate_manifest_path",
     "markdown_note_title",
+    "validate_local_target_location",
     "verify_artifact_ref",
     "verify_local_source",
     "verify_local_target",

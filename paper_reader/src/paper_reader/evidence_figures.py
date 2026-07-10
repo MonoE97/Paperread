@@ -154,6 +154,7 @@ def prepare_figure_artifacts(
             max_pages=preview_pages,
             item_details=None,
             allow_network_source=False,
+            max_candidates=V2_RESOURCE_POLICY.figure_max_candidates,
         )
         selected = figures_payload.get("selected_figures", [])
         if not isinstance(selected, list):

@@ -342,6 +342,31 @@ def publish_file_no_replace(source: Path | str, destination: Path | str) -> Path
     return destination_path
 
 
+def publish_bytes_no_replace(content: bytes, destination: Path | str) -> Path:
+    destination_path = Path(destination).expanduser()
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination_path.parent / f".{destination_path.name}.{new_uuid()}.tmp"
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        with os.fdopen(descriptor, "wb") as target_handle:
+            descriptor = None
+            target_handle.write(content)
+            target_handle.flush()
+            os.fsync(target_handle.fileno())
+        os.link(temporary, destination_path)
+        fsync_directory(destination_path.parent)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+            fsync_directory(destination_path.parent)
+        except FileNotFoundError:
+            pass
+    return destination_path
+
+
 __all__ = [
     "AtomicNoReplaceUnsupportedError",
     "PublishConflictError",
@@ -358,6 +383,7 @@ __all__ = [
     "new_random_id",
     "new_uuid",
     "paths_alias",
+    "publish_bytes_no_replace",
     "publish_file_no_replace",
     "random_token",
     "resolve_artifact_path",

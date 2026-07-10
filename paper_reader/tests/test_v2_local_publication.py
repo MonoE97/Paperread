@@ -5,10 +5,12 @@ import json
 import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import paper_reader.local_publication as local_publication
+import paper_reader.local_publish as local_publish_module
 from paper_reader.contracts import PaperReaderCandidate
 
 from test_v2_review_package import (
@@ -85,7 +87,7 @@ def test_candidate_build_rehashes_sealed_inputs_and_publishes_immutable_local_ca
     assert forbidden == set()
 
 
-def test_candidate_build_blocks_sealed_snapshot_and_original_evidence_tamper(
+def test_candidate_build_blocks_sealed_snapshot_tamper(
     tmp_path: Path,
 ) -> None:
     sealed_case = tmp_path / "sealed"
@@ -102,6 +104,58 @@ def test_candidate_build_blocks_sealed_snapshot_and_original_evidence_tamper(
     assert _result_payload(sealed_result)["code"] == "sealed_artifact_tampered"
     assert not (run_dir / "candidates").exists()
 
+
+def test_candidate_build_uses_captured_review_package_bytes_after_path_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.candidate_builder as candidate_builder
+
+    run_dir = _sealed_run(tmp_path)
+    original_latest = candidate_builder._latest_review_package
+    captured: dict[str, bytes] = {}
+
+    def latest_then_swap(loaded):
+        result = original_latest(loaded)
+        package_path = result[1]
+        captured["package"] = package_path.read_bytes()
+        package_path.write_bytes(b"review package swapped after verification")
+        return result
+
+    monkeypatch.setattr(candidate_builder, "_latest_review_package", latest_then_swap)
+
+    result = _invoke(["candidate", "build", str(run_dir)])
+
+    assert result.exit_code == 0, result.stderr
+    candidate_dir = Path(_result_payload(result)["data"]["candidate_dir"])
+    assert (candidate_dir / "review-package.json").read_bytes() == captured["package"]
+
+
+def test_candidate_build_uses_loaded_run_manifest_bytes_after_path_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.candidate_builder as candidate_builder
+
+    run_dir = _sealed_run(tmp_path)
+    run_before = (run_dir / "run.json").read_bytes()
+    original_snapshots = candidate_builder._sealed_snapshots
+
+    def snapshots_then_swap(*args, **kwargs):
+        snapshots = original_snapshots(*args, **kwargs)
+        (run_dir / "run.json").write_bytes(b"run manifest swapped after loading")
+        return snapshots
+
+    monkeypatch.setattr(candidate_builder, "_sealed_snapshots", snapshots_then_swap)
+
+    result = _invoke(["candidate", "build", str(run_dir)])
+
+    assert result.exit_code == 0, result.stderr
+    candidate_dir = Path(_result_payload(result)["data"]["candidate_dir"])
+    assert (candidate_dir / "run.json").read_bytes() == run_before
+
+
+def test_candidate_build_blocks_original_evidence_tamper(tmp_path: Path) -> None:
     evidence_case = tmp_path / "evidence"
     evidence_case.mkdir()
     run_dir = _sealed_run(evidence_case)
@@ -156,6 +210,67 @@ def test_candidate_build_revalidates_source_target_and_atomic_publication(
     assert (run_dir / "run.json").read_bytes() == run_before
     assert not (run_dir / "candidates").exists()
     assert not list(run_dir.glob(".*.staging"))
+
+
+def test_candidate_build_blocks_projected_run_size_before_tree_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.candidate_builder as candidate_builder
+    from paper_reader.resource_policy import V2_RESOURCE_POLICY
+
+    run_dir = _sealed_run(tmp_path)
+    run_before = (run_dir / "run.json").read_bytes()
+    monkeypatch.setattr(
+        candidate_builder,
+        "V2_RESOURCE_POLICY",
+        replace(V2_RESOURCE_POLICY, run_max_bytes=1),
+        raising=False,
+    )
+
+    result = _invoke(["candidate", "build", str(run_dir)])
+
+    assert result.exit_code == 1
+    assert _result_payload(result)["code"] == "run_size_limit_exceeded"
+    assert (run_dir / "run.json").read_bytes() == run_before
+    assert not (run_dir / "candidates").exists()
+
+
+def test_candidate_run_update_fault_leaves_unbound_orphan_and_retry_binds_new_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.candidate_builder as candidate_builder
+
+    run_dir = _sealed_run(tmp_path)
+    run_before = (run_dir / "run.json").read_bytes()
+    original_write = candidate_builder.atomic_write_json
+    failed = False
+
+    def fail_once(path: Path, value):
+        nonlocal failed
+        if Path(path).name == "run.json" and not failed:
+            failed = True
+            raise OSError("injected failure after candidate tree publication")
+        return original_write(path, value)
+
+    monkeypatch.setattr(candidate_builder, "atomic_write_json", fail_once)
+
+    first = _invoke(["candidate", "build", str(run_dir)])
+
+    assert first.exit_code == 1
+    assert _result_payload(first)["code"] == "candidate_status_update_failed"
+    assert (run_dir / "run.json").read_bytes() == run_before
+    orphan_dirs = tuple((run_dir / "candidates").iterdir())
+    assert len(orphan_dirs) == 1
+
+    second = _invoke(["candidate", "build", str(run_dir)])
+
+    assert second.exit_code == 0, second.stderr
+    run = json.loads((run_dir / "run.json").read_text())
+    bound_paths = {item["path"] for item in run["artifacts"] if item["role"] == "candidate"}
+    assert len(bound_paths) == 1
+    assert not any(path.startswith(orphan_dirs[0].relative_to(run_dir).as_posix()) for path in bound_paths)
 
 
 @pytest.mark.parametrize("stage", ["candidate_build", "local_publish"])
@@ -234,6 +349,30 @@ def test_local_publish_revalidates_and_atomically_copies_exact_candidate_markdow
     assert not list(run_dir.rglob("*authorization*"))
 
 
+def test_local_publish_uses_captured_verified_bytes_after_candidate_note_path_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _run_dir, candidate_path = _built_candidate(tmp_path)
+    note_path = candidate_path.parent / "note.md"
+    verified_bytes = note_path.read_bytes()
+    original_load = local_publish_module._load_candidate
+
+    def load_then_overwrite(candidate_input: Path, **kwargs):
+        loaded = original_load(candidate_input, **kwargs)
+        note_path.write_bytes(b"attacker bytes after verification")
+        return loaded
+
+    monkeypatch.setattr(local_publish_module, "_load_candidate", load_then_overwrite)
+
+    result = _invoke(["local", "publish", str(candidate_path)])
+
+    assert result.exit_code == 0, result.stderr
+    target = tmp_path / "paper_note.md"
+    assert target.read_bytes() == verified_bytes
+    assert target.read_bytes() != note_path.read_bytes()
+
+
 @pytest.mark.parametrize(
     "relative_path",
     ["candidate.json", "note.md", "note.html", "summary.json", "validation.json"],
@@ -283,7 +422,7 @@ def test_local_publish_blocks_source_drift_and_fixed_target_conflict(tmp_path: P
     assert json.loads((run_dir / "run.json").read_text())["status"] == "candidate_built"
 
 
-def test_concurrent_local_publish_has_exactly_one_winner(tmp_path: Path) -> None:
+def test_concurrent_local_publish_converges_on_one_exact_publication(tmp_path: Path) -> None:
     _run_dir, candidate_path = _built_candidate(tmp_path)
 
     def publish():
@@ -296,11 +435,9 @@ def test_concurrent_local_publish_has_exactly_one_winner(tmp_path: Path) -> None
         outcomes = list(executor.map(lambda _index: publish(), range(2)))
 
     successes = [item for item in outcomes if isinstance(item, local_publication.PublishedLocalCandidate)]
-    failures = [item for item in outcomes if isinstance(item, Exception)]
-    assert len(successes) == 1
-    assert len(failures) == 1
-    assert isinstance(failures[0], local_publication.LocalPublicationError)
-    assert failures[0].code == "publish_conflict"
+    assert len(successes) == 2
+    assert not [item for item in outcomes if isinstance(item, Exception)]
+    assert successes[0].receipt_path == successes[1].receipt_path
     assert (tmp_path / "paper_note.md").read_bytes() == (candidate_path.parent / "note.md").read_bytes()
 
 
@@ -311,10 +448,10 @@ def test_local_publish_fault_before_no_replace_leaves_target_and_status_untouche
     run_dir, candidate_path = _built_candidate(tmp_path)
     run_before = (run_dir / "run.json").read_bytes()
 
-    def injected_failure(_source: Path, _target: Path) -> Path:
+    def injected_failure(_content: bytes, _target: Path) -> Path:
         raise OSError("injected file publication failure")
 
-    monkeypatch.setattr("paper_reader.local_publish.publish_file_no_replace", injected_failure)
+    monkeypatch.setattr("paper_reader.local_publish.publish_bytes_no_replace", injected_failure, raising=False)
 
     result = _invoke(["local", "publish", str(candidate_path)])
 
@@ -323,3 +460,147 @@ def test_local_publish_fault_before_no_replace_leaves_target_and_status_untouche
     assert not (tmp_path / "paper_note.md").exists()
     assert (run_dir / "run.json").read_bytes() == run_before
     assert not (run_dir / "receipts").exists()
+
+
+def test_local_publish_blocks_projected_run_size_before_target_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from paper_reader.resource_policy import V2_RESOURCE_POLICY
+
+    run_dir, candidate_path = _built_candidate(tmp_path)
+    run_before = (run_dir / "run.json").read_bytes()
+    monkeypatch.setattr(
+        local_publish_module,
+        "V2_RESOURCE_POLICY",
+        replace(V2_RESOURCE_POLICY, run_max_bytes=1),
+        raising=False,
+    )
+
+    result = _invoke(["local", "publish", str(candidate_path)])
+
+    assert result.exit_code == 1
+    assert _result_payload(result)["code"] == "run_size_limit_exceeded"
+    assert not (tmp_path / "paper_note.md").exists()
+    assert not (run_dir / "receipts").exists()
+    assert (run_dir / "run.json").read_bytes() == run_before
+
+
+def test_local_publish_recovers_exact_preexisting_target_without_rewriting_it(
+    tmp_path: Path,
+) -> None:
+    run_dir, candidate_path = _built_candidate(tmp_path)
+    note_bytes = (candidate_path.parent / "note.md").read_bytes()
+    target = tmp_path / "paper_note.md"
+    target.write_bytes(note_bytes)
+    target_before = (target.stat().st_ino, target.stat().st_mtime_ns, target.read_bytes())
+
+    result = _invoke(["local", "publish", str(candidate_path)])
+
+    assert result.exit_code == 0, result.stderr
+    payload = _result_payload(result)
+    assert payload["code"] == "published"
+    assert (target.stat().st_ino, target.stat().st_mtime_ns, target.read_bytes()) == target_before
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "published"
+
+
+def test_local_publish_recovers_after_target_commit_before_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir, candidate_path = _built_candidate(tmp_path)
+    original = getattr(local_publish_module, "_publish_or_verify_receipt", None)
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("injected failure after target commit")
+        assert original is not None
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        local_publish_module,
+        "_publish_or_verify_receipt",
+        fail_once,
+        raising=False,
+    )
+
+    first = _invoke(["local", "publish", str(candidate_path)])
+
+    assert first.exit_code == 1
+    assert _result_payload(first)["code"] == "publication_recovery_required"
+    target = tmp_path / "paper_note.md"
+    target_before = (target.stat().st_ino, target.stat().st_mtime_ns, target.read_bytes())
+    assert not (run_dir / "receipts").exists()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "candidate_built"
+
+    second = _invoke(["local", "publish", str(candidate_path)])
+
+    assert second.exit_code == 0, second.stderr
+    assert (target.stat().st_ino, target.stat().st_mtime_ns, target.read_bytes()) == target_before
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "published"
+
+
+def test_local_publish_recovers_after_receipt_commit_before_run_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir, candidate_path = _built_candidate(tmp_path)
+    original_write = local_publish_module.atomic_write_json
+    failed = False
+
+    def fail_run_once(path: Path, value):
+        nonlocal failed
+        if Path(path).name == "run.json" and not failed:
+            failed = True
+            raise OSError("injected failure before run manifest update")
+        return original_write(path, value)
+
+    monkeypatch.setattr(local_publish_module, "atomic_write_json", fail_run_once)
+
+    first = _invoke(["local", "publish", str(candidate_path)])
+
+    assert first.exit_code == 1
+    assert _result_payload(first)["code"] == "publication_recovery_required"
+    target = tmp_path / "paper_note.md"
+    target_before = (target.stat().st_ino, target.stat().st_mtime_ns, target.read_bytes())
+    receipts = list((run_dir / "receipts").glob("*.json"))
+    assert len(receipts) == 1
+    receipt_before = receipts[0].read_bytes()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "candidate_built"
+
+    second = _invoke(["local", "publish", str(candidate_path)])
+
+    assert second.exit_code == 0, second.stderr
+    payload = _result_payload(second)
+    assert Path(payload["data"]["receipt_path"]) == receipts[0]
+    assert receipts[0].read_bytes() == receipt_before
+    assert (target.stat().st_ino, target.stat().st_mtime_ns, target.read_bytes()) == target_before
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "published"
+
+
+def test_local_publish_is_idempotent_after_published_run(
+    tmp_path: Path,
+) -> None:
+    run_dir, candidate_path = _built_candidate(tmp_path)
+    first = _invoke(["local", "publish", str(candidate_path)])
+    assert first.exit_code == 0, first.stderr
+    first_payload = _result_payload(first)
+    target = tmp_path / "paper_note.md"
+    receipt = Path(first_payload["data"]["receipt_path"])
+    snapshot = {
+        "target": (target.stat().st_ino, target.stat().st_mtime_ns, target.read_bytes()),
+        "receipt": (receipt.stat().st_ino, receipt.stat().st_mtime_ns, receipt.read_bytes()),
+        "run": (run_dir / "run.json").read_bytes(),
+    }
+
+    second = _invoke(["local", "publish", str(candidate_path)])
+
+    assert second.exit_code == 0, second.stderr
+    second_payload = _result_payload(second)
+    assert second_payload["data"]["receipt_path"] == str(receipt)
+    assert (target.stat().st_ino, target.stat().st_mtime_ns, target.read_bytes()) == snapshot["target"]
+    assert (receipt.stat().st_ino, receipt.stat().st_mtime_ns, receipt.read_bytes()) == snapshot["receipt"]
+    assert (run_dir / "run.json").read_bytes() == snapshot["run"]
