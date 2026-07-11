@@ -1,0 +1,356 @@
+{
+  "$defs": {
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "minLength": 1,
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "schema_version": {
+          "minLength": 1,
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 1,
+          "title": "Size Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "size_bytes",
+        "sha256",
+        "schema_version",
+        "artifact_id"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    },
+    "FileIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "device": {
+          "minimum": 0,
+          "title": "Device",
+          "type": "integer"
+        },
+        "inode": {
+          "minimum": 1,
+          "title": "Inode",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "device",
+        "inode"
+      ],
+      "title": "FileIdentity",
+      "type": "object"
+    },
+    "PdfSource": {
+      "additionalProperties": false,
+      "properties": {
+        "file_identity": {
+          "$ref": "#/$defs/FileIdentity"
+        },
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 1,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "source_type": {
+          "const": "pdf_path",
+          "default": "pdf_path",
+          "title": "Source Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "size_bytes",
+        "sha256",
+        "file_identity"
+      ],
+      "title": "PdfSource",
+      "type": "object"
+    },
+    "ResultError": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "ResultError",
+      "type": "object"
+    },
+    "ZoteroItemSource": {
+      "additionalProperties": false,
+      "properties": {
+        "collection_key": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Collection Key"
+        },
+        "inventory_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Inventory Sha256",
+          "type": "string"
+        },
+        "item_key": {
+          "minLength": 1,
+          "title": "Item Key",
+          "type": "string"
+        },
+        "source_type": {
+          "const": "zotero_item",
+          "default": "zotero_item",
+          "title": "Source Type",
+          "type": "string"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_key",
+        "title",
+        "inventory_sha256"
+      ],
+      "title": "ZoteroItemSource",
+      "type": "object"
+    },
+    "ZoteroTitleSource": {
+      "additionalProperties": false,
+      "properties": {
+        "inventory_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inventory Sha256"
+        },
+        "resolved_item_key": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolved Item Key"
+        },
+        "source_type": {
+          "const": "zotero_title",
+          "default": "zotero_title",
+          "title": "Source Type",
+          "type": "string"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "title": "ZoteroTitleSource",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "attempt_id": {
+      "title": "Attempt Id",
+      "type": "string"
+    },
+    "attempt_number": {
+      "minimum": 1,
+      "title": "Attempt Number",
+      "type": "integer"
+    },
+    "candidate": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "claim_id": {
+      "title": "Claim Id",
+      "type": "string"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResultError"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "item_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+      "title": "Item Id",
+      "type": "string"
+    },
+    "lease_token_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Lease Token Sha256",
+      "type": "string"
+    },
+    "local_publication": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "paper_reader_run": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "review_package": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "schema_version": {
+      "const": "paper_reader_batch.worker-result.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source": {
+      "discriminator": {
+        "mapping": {
+          "pdf_path": "#/$defs/PdfSource",
+          "zotero_item": "#/$defs/ZoteroItemSource",
+          "zotero_title": "#/$defs/ZoteroTitleSource"
+        },
+        "propertyName": "source_type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/PdfSource"
+        },
+        {
+          "$ref": "#/$defs/ZoteroItemSource"
+        },
+        {
+          "$ref": "#/$defs/ZoteroTitleSource"
+        }
+      ],
+      "title": "Source"
+    },
+    "status": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "blocked"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "worker_id": {
+      "minLength": 1,
+      "title": "Worker Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "manifest_sha256",
+    "item_id",
+    "worker_id",
+    "claim_id",
+    "attempt_id",
+    "attempt_number",
+    "lease_token_sha256",
+    "status",
+    "source"
+  ],
+  "title": "WorkerResult",
+  "type": "object"
+}

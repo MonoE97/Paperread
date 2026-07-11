@@ -1,0 +1,147 @@
+{
+  "$defs": {
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "minLength": 1,
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "schema_version": {
+          "minLength": 1,
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 1,
+          "title": "Size Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "size_bytes",
+        "sha256",
+        "schema_version",
+        "artifact_id"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "authorization_nonce_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Authorization Nonce Sha256",
+      "type": "string"
+    },
+    "authorization_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Authorization Sha256",
+      "type": "string"
+    },
+    "candidate_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Candidate Sha256",
+      "type": "string"
+    },
+    "canonical_html_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Canonical Html Sha256",
+      "type": "string"
+    },
+    "claim_id": {
+      "title": "Claim Id",
+      "type": "string"
+    },
+    "external_claim_id": {
+      "title": "External Claim Id",
+      "type": "string"
+    },
+    "item_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+      "title": "Item Id",
+      "type": "string"
+    },
+    "lease_token_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Lease Token Sha256",
+      "type": "string"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "note_key": {
+      "minLength": 1,
+      "title": "Note Key",
+      "type": "string"
+    },
+    "parent_key": {
+      "minLength": 1,
+      "title": "Parent Key",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "paper_reader_batch.write-result.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "started_event_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Started Event Sha256",
+      "type": "string"
+    },
+    "status": {
+      "const": "written",
+      "default": "written",
+      "title": "Status",
+      "type": "string"
+    },
+    "verification": {
+      "$ref": "#/$defs/ArtifactRef"
+    },
+    "write_attempt_id": {
+      "title": "Write Attempt Id",
+      "type": "string"
+    },
+    "writer_id": {
+      "minLength": 1,
+      "title": "Writer Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "manifest_sha256",
+    "item_id",
+    "writer_id",
+    "claim_id",
+    "write_attempt_id",
+    "lease_token_sha256",
+    "started_event_sha256",
+    "candidate_sha256",
+    "authorization_sha256",
+    "authorization_nonce_sha256",
+    "external_claim_id",
+    "note_key",
+    "parent_key",
+    "canonical_html_sha256",
+    "verification"
+  ],
+  "title": "WriteResult",
+  "type": "object"
+}

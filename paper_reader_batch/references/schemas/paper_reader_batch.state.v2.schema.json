@@ -1,0 +1,691 @@
+{
+  "$defs": {
+    "LeaseState": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "minLength": 1,
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "attempt_id": {
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "attempt_number": {
+          "minimum": 1,
+          "title": "Attempt Number",
+          "type": "integer"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "expires_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "issued_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+          "title": "Issued At",
+          "type": "string"
+        },
+        "lane": {
+          "enum": [
+            "worker",
+            "local_prepare"
+          ],
+          "title": "Lane",
+          "type": "string"
+        },
+        "lease_token_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lease Token Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "lane",
+        "actor_id",
+        "claim_id",
+        "attempt_id",
+        "attempt_number",
+        "lease_token_sha256",
+        "issued_at",
+        "expires_at"
+      ],
+      "title": "LeaseState",
+      "type": "object"
+    },
+    "StateItem": {
+      "additionalProperties": false,
+      "properties": {
+        "authorization_nonce_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Authorization Nonce Sha256"
+        },
+        "authorization_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Authorization Sha256"
+        },
+        "candidate_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Candidate Sha256"
+        },
+        "expected_output": {
+          "enum": [
+            "local_note",
+            "zotero_note_candidate"
+          ],
+          "title": "Expected Output",
+          "type": "string"
+        },
+        "external_claim_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Claim Id"
+        },
+        "input_type": {
+          "enum": [
+            "pdf_path",
+            "zotero_item",
+            "zotero_title"
+          ],
+          "title": "Input Type",
+          "type": "string"
+        },
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "local_prepare_attempt_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Local Prepare Attempt Count",
+          "type": "integer"
+        },
+        "local_prepare_coordination_device": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Prepare Coordination Device"
+        },
+        "local_prepare_coordination_fingerprint": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Prepare Coordination Fingerprint"
+        },
+        "local_prepare_coordination_inode": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Prepare Coordination Inode"
+        },
+        "local_prepare_coordination_request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Prepare Coordination Request Id"
+        },
+        "local_prepare_failure_code": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Prepare Failure Code"
+        },
+        "local_prepare_failure_message": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Prepare Failure Message"
+        },
+        "local_prepare_last_actor_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Prepare Last Actor Id"
+        },
+        "local_prepare_last_attempt_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Prepare Last Attempt Id"
+        },
+        "local_prepare_last_claim_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Prepare Last Claim Id"
+        },
+        "local_prepare_last_lease_token_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Prepare Last Lease Token Sha256"
+        },
+        "local_prepare_lease": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LeaseState"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "local_prepare_result_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Prepare Result Sha256"
+        },
+        "local_prepare_status": {
+          "enum": [
+            "not_applicable",
+            "queued",
+            "claimed",
+            "prepared",
+            "failed",
+            "blocked"
+          ],
+          "title": "Local Prepare Status",
+          "type": "string"
+        },
+        "reconciliation_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reconciliation Sha256"
+        },
+        "resolved_zotero_item_key": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolved Zotero Item Key"
+        },
+        "worker_attempt_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Worker Attempt Count",
+          "type": "integer"
+        },
+        "worker_failure_code": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Worker Failure Code"
+        },
+        "worker_failure_message": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Worker Failure Message"
+        },
+        "worker_last_actor_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Worker Last Actor Id"
+        },
+        "worker_last_attempt_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Worker Last Attempt Id"
+        },
+        "worker_last_claim_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Worker Last Claim Id"
+        },
+        "worker_last_lease_token_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Worker Last Lease Token Sha256"
+        },
+        "worker_lease": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LeaseState"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "worker_pending_attempt_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Worker Pending Attempt Id"
+        },
+        "worker_result_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Worker Result Sha256"
+        },
+        "worker_status": {
+          "default": "queued",
+          "enum": [
+            "queued",
+            "claimed",
+            "succeeded",
+            "failed",
+            "blocked"
+          ],
+          "title": "Worker Status",
+          "type": "string"
+        },
+        "write_attempt_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Write Attempt Count",
+          "type": "integer"
+        },
+        "write_failure_code": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Write Failure Code"
+        },
+        "write_failure_message": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Write Failure Message"
+        },
+        "write_lease": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WriteLeaseState"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "write_result_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Write Result Sha256"
+        },
+        "write_started_event_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Write Started Event Sha256"
+        },
+        "write_status": {
+          "enum": [
+            "not_applicable",
+            "awaiting_candidate",
+            "queued",
+            "claimed",
+            "started",
+            "prepared_only",
+            "written",
+            "uncertain",
+            "retry_confirmation_required",
+            "blocked"
+          ],
+          "title": "Write Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "input_type",
+        "expected_output",
+        "local_prepare_status",
+        "write_status"
+      ],
+      "title": "StateItem",
+      "type": "object"
+    },
+    "WriteLeaseState": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_number": {
+          "minimum": 1,
+          "title": "Attempt Number",
+          "type": "integer"
+        },
+        "candidate_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidate Sha256",
+          "type": "string"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "expires_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "issued_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+          "title": "Issued At",
+          "type": "string"
+        },
+        "lease_token_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lease Token Sha256",
+          "type": "string"
+        },
+        "write_attempt_id": {
+          "title": "Write Attempt Id",
+          "type": "string"
+        },
+        "writer_id": {
+          "minLength": 1,
+          "title": "Writer Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "writer_id",
+        "claim_id",
+        "write_attempt_id",
+        "attempt_number",
+        "lease_token_sha256",
+        "issued_at",
+        "expires_at",
+        "candidate_sha256"
+      ],
+      "title": "WriteLeaseState",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "batch_status": {
+      "enum": [
+        "corrupt",
+        "write_uncertain",
+        "running",
+        "needs_attention",
+        "awaiting_write",
+        "ready",
+        "succeeded"
+      ],
+      "title": "Batch Status",
+      "type": "string"
+    },
+    "initialized_at": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+      "title": "Initialized At",
+      "type": "string"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/StateItem"
+      },
+      "minItems": 1,
+      "title": "Items",
+      "type": "array"
+    },
+    "latest_event_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Latest Event Sha256",
+      "type": "string"
+    },
+    "lease_secret_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Lease Secret Sha256",
+      "type": "string"
+    },
+    "manifest_id": {
+      "title": "Manifest Id",
+      "type": "string"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "next_sequence": {
+      "minimum": 1,
+      "title": "Next Sequence",
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": "paper_reader_batch.state.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "updated_at": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "manifest_id",
+    "manifest_sha256",
+    "lease_secret_sha256",
+    "initialized_at",
+    "updated_at",
+    "next_sequence",
+    "latest_event_sha256",
+    "batch_status",
+    "items"
+  ],
+  "title": "BatchState",
+  "type": "object"
+}

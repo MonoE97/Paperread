@@ -27,6 +27,7 @@ tmp/
 docs/
 runs/
 paper_reader_batch/runs/
+paper_reader_batch/.paper_reader_batch/
 papers/
 *_analysis/
 *_analysis_v[0-9]*/

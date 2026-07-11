@@ -1,0 +1,177 @@
+{
+  "$defs": {
+    "ReportItem": {
+      "additionalProperties": false,
+      "properties": {
+        "failure_code": {
+          "title": "Failure Code",
+          "type": "string"
+        },
+        "failure_message": {
+          "title": "Failure Message",
+          "type": "string"
+        },
+        "input_type": {
+          "enum": [
+            "pdf_path",
+            "zotero_item",
+            "zotero_title"
+          ],
+          "title": "Input Type",
+          "type": "string"
+        },
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "claimed",
+            "succeeded",
+            "failed",
+            "blocked",
+            "prepared"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "takeaway_source_path": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Takeaway Source Path"
+        },
+        "takeaway_source_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Takeaway Source Sha256"
+        },
+        "takeaway_source_type": {
+          "title": "Takeaway Source Type",
+          "type": "string"
+        },
+        "thirty_second_takeaway": {
+          "title": "Thirty Second Takeaway",
+          "type": "string"
+        },
+        "write_status": {
+          "enum": [
+            "not_applicable",
+            "awaiting_candidate",
+            "queued",
+            "claimed",
+            "started",
+            "written",
+            "uncertain",
+            "retry_confirmation_required",
+            "blocked",
+            "prepared_only"
+          ],
+          "title": "Write Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "input_type",
+        "status",
+        "write_status",
+        "thirty_second_takeaway",
+        "takeaway_source_type",
+        "failure_code",
+        "failure_message"
+      ],
+      "title": "ReportItem",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "batch_status": {
+      "enum": [
+        "corrupt",
+        "write_uncertain",
+        "running",
+        "needs_attention",
+        "awaiting_write",
+        "ready",
+        "succeeded"
+      ],
+      "title": "Batch Status",
+      "type": "string"
+    },
+    "effective_write_policy": {
+      "enum": [
+        "zotero_write",
+        "prepare_only",
+        "local_only"
+      ],
+      "title": "Effective Write Policy",
+      "type": "string"
+    },
+    "generated_at": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+      "title": "Generated At",
+      "type": "string"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/ReportItem"
+      },
+      "minItems": 1,
+      "title": "Items",
+      "type": "array"
+    },
+    "manifest_id": {
+      "title": "Manifest Id",
+      "type": "string"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "paper_reader_batch.report.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "write_policy": {
+      "enum": [
+        "zotero_write",
+        "prepare_only"
+      ],
+      "title": "Write Policy",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "manifest_id",
+    "manifest_sha256",
+    "generated_at",
+    "batch_status",
+    "write_policy",
+    "effective_write_policy",
+    "items"
+  ],
+  "title": "BatchReport",
+  "type": "object"
+}

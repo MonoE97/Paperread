@@ -1,0 +1,1526 @@
+{
+  "$defs": {
+    "ClaimAssignment": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "minLength": 1,
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "attempt_id": {
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "attempt_number": {
+          "minimum": 1,
+          "title": "Attempt Number",
+          "type": "integer"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "expires_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "issued_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+          "title": "Issued At",
+          "type": "string"
+        },
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "lane": {
+          "enum": [
+            "worker",
+            "local_prepare"
+          ],
+          "title": "Lane",
+          "type": "string"
+        },
+        "lease_token_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lease Token Sha256",
+          "type": "string"
+        },
+        "source": {
+          "discriminator": {
+            "mapping": {
+              "pdf_path": "#/$defs/PdfSource",
+              "zotero_item": "#/$defs/ZoteroItemSource",
+              "zotero_title": "#/$defs/ZoteroTitleSource"
+            },
+            "propertyName": "source_type"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/PdfSource"
+            },
+            {
+              "$ref": "#/$defs/ZoteroItemSource"
+            },
+            {
+              "$ref": "#/$defs/ZoteroTitleSource"
+            }
+          ],
+          "title": "Source"
+        }
+      },
+      "required": [
+        "item_id",
+        "lane",
+        "actor_id",
+        "claim_id",
+        "attempt_id",
+        "attempt_number",
+        "lease_token_sha256",
+        "issued_at",
+        "expires_at",
+        "source"
+      ],
+      "title": "ClaimAssignment",
+      "type": "object"
+    },
+    "ClaimedData": {
+      "additionalProperties": false,
+      "properties": {
+        "assignments": {
+          "items": {
+            "$ref": "#/$defs/ClaimAssignment"
+          },
+          "minItems": 1,
+          "title": "Assignments",
+          "type": "array"
+        },
+        "kind": {
+          "enum": [
+            "worker.claimed",
+            "local_prepare.claimed"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "assignments"
+      ],
+      "title": "ClaimedData",
+      "type": "object"
+    },
+    "EventCommandResultSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "minLength": 1,
+          "title": "Command",
+          "type": "string"
+        },
+        "error": {
+          "const": null,
+          "default": null,
+          "title": "Error",
+          "type": "null"
+        },
+        "ok": {
+          "const": true,
+          "default": true,
+          "title": "Ok",
+          "type": "boolean"
+        },
+        "replayed": {
+          "const": false,
+          "default": false,
+          "title": "Replayed",
+          "type": "boolean"
+        },
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "paper_reader_batch.command-result.v2",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "semantic_result_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Semantic Result Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "command",
+        "request_id",
+        "semantic_result_sha256"
+      ],
+      "title": "EventCommandResultSnapshot",
+      "type": "object"
+    },
+    "FileIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "device": {
+          "minimum": 0,
+          "title": "Device",
+          "type": "integer"
+        },
+        "inode": {
+          "minimum": 1,
+          "title": "Inode",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "device",
+        "inode"
+      ],
+      "title": "FileIdentity",
+      "type": "object"
+    },
+    "FinishedData": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "minLength": 1,
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "attempt_id": {
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "attempt_number": {
+          "minimum": 1,
+          "title": "Attempt Number",
+          "type": "integer"
+        },
+        "candidate_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Candidate Sha256"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "failure_code": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failure Code"
+        },
+        "failure_message": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failure Message"
+        },
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "worker.finished",
+            "local_prepare.finished"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "lease_token_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lease Token Sha256",
+          "type": "string"
+        },
+        "resolved_zotero_item_key": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolved Zotero Item Key"
+        },
+        "result_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Result Sha256",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "succeeded",
+            "failed",
+            "blocked",
+            "prepared"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "item_id",
+        "actor_id",
+        "claim_id",
+        "attempt_id",
+        "attempt_number",
+        "lease_token_sha256",
+        "status",
+        "result_sha256"
+      ],
+      "title": "FinishedData",
+      "type": "object"
+    },
+    "LeaseMutationData": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "minLength": 1,
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "attempt_id": {
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "attempt_number": {
+          "minimum": 1,
+          "title": "Attempt Number",
+          "type": "integer"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires At"
+        },
+        "issued_at": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issued At"
+        },
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "worker.renewed",
+            "worker.released",
+            "worker.lease_expired",
+            "local_prepare.renewed",
+            "local_prepare.released",
+            "local_prepare.lease_expired"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "lease_token_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lease Token Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "item_id",
+        "actor_id",
+        "claim_id",
+        "attempt_id",
+        "attempt_number",
+        "lease_token_sha256"
+      ],
+      "title": "LeaseMutationData",
+      "type": "object"
+    },
+    "LocalPrepareCoordinationReservedData": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "minLength": 1,
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "attempt_id": {
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "attempt_number": {
+          "minimum": 1,
+          "title": "Attempt Number",
+          "type": "integer"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "coordinator_request_fingerprint": {
+          "minLength": 1,
+          "title": "Coordinator Request Fingerprint",
+          "type": "string"
+        },
+        "coordinator_request_id": {
+          "title": "Coordinator Request Id",
+          "type": "string"
+        },
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "local_prepare.coordination_reserved",
+          "default": "local_prepare.coordination_reserved",
+          "title": "Kind",
+          "type": "string"
+        },
+        "lease_token_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lease Token Sha256",
+          "type": "string"
+        },
+        "request_dir_device": {
+          "minimum": 0,
+          "title": "Request Dir Device",
+          "type": "integer"
+        },
+        "request_dir_inode": {
+          "minimum": 1,
+          "title": "Request Dir Inode",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "item_id",
+        "actor_id",
+        "claim_id",
+        "attempt_id",
+        "attempt_number",
+        "lease_token_sha256",
+        "coordinator_request_id",
+        "coordinator_request_fingerprint",
+        "request_dir_device",
+        "request_dir_inode"
+      ],
+      "title": "LocalPrepareCoordinationReservedData",
+      "type": "object"
+    },
+    "PdfSource": {
+      "additionalProperties": false,
+      "properties": {
+        "file_identity": {
+          "$ref": "#/$defs/FileIdentity"
+        },
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 1,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "source_type": {
+          "const": "pdf_path",
+          "default": "pdf_path",
+          "title": "Source Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "size_bytes",
+        "sha256",
+        "file_identity"
+      ],
+      "title": "PdfSource",
+      "type": "object"
+    },
+    "RecoveredLease": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "minLength": 1,
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "attempt_id": {
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "attempt_number": {
+          "minimum": 1,
+          "title": "Attempt Number",
+          "type": "integer"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "expires_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "lane": {
+          "enum": [
+            "worker",
+            "local_prepare"
+          ],
+          "title": "Lane",
+          "type": "string"
+        },
+        "lease_token_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lease Token Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "lane",
+        "actor_id",
+        "claim_id",
+        "attempt_id",
+        "attempt_number",
+        "lease_token_sha256",
+        "expires_at"
+      ],
+      "title": "RecoveredLease",
+      "type": "object"
+    },
+    "ResumedLocalPrepareLease": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "minLength": 1,
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "attempt_id": {
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "attempt_number": {
+          "minimum": 1,
+          "title": "Attempt Number",
+          "type": "integer"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "expires_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "issued_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+          "title": "Issued At",
+          "type": "string"
+        },
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "lane": {
+          "const": "local_prepare",
+          "default": "local_prepare",
+          "title": "Lane",
+          "type": "string"
+        },
+        "lease_token_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lease Token Sha256",
+          "type": "string"
+        },
+        "previous_expires_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+          "title": "Previous Expires At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "actor_id",
+        "claim_id",
+        "attempt_id",
+        "attempt_number",
+        "lease_token_sha256",
+        "previous_expires_at",
+        "issued_at",
+        "expires_at"
+      ],
+      "title": "ResumedLocalPrepareLease",
+      "type": "object"
+    },
+    "RetriedData": {
+      "additionalProperties": false,
+      "properties": {
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "worker.retried",
+          "default": "worker.retried",
+          "title": "Kind",
+          "type": "string"
+        },
+        "next_attempt_id": {
+          "title": "Next Attempt Id",
+          "type": "string"
+        },
+        "next_attempt_number": {
+          "minimum": 1,
+          "title": "Next Attempt Number",
+          "type": "integer"
+        },
+        "previous_actor_id": {
+          "minLength": 1,
+          "title": "Previous Actor Id",
+          "type": "string"
+        },
+        "previous_attempt_id": {
+          "title": "Previous Attempt Id",
+          "type": "string"
+        },
+        "previous_attempt_number": {
+          "minimum": 1,
+          "title": "Previous Attempt Number",
+          "type": "integer"
+        },
+        "previous_claim_id": {
+          "title": "Previous Claim Id",
+          "type": "string"
+        },
+        "previous_lease_token_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Previous Lease Token Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "previous_actor_id",
+        "previous_claim_id",
+        "previous_attempt_id",
+        "previous_attempt_number",
+        "previous_lease_token_sha256",
+        "next_attempt_id",
+        "next_attempt_number"
+      ],
+      "title": "RetriedData",
+      "type": "object"
+    },
+    "RunInitializedData": {
+      "additionalProperties": false,
+      "properties": {
+        "initialized_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+          "title": "Initialized At",
+          "type": "string"
+        },
+        "kind": {
+          "const": "run.initialized",
+          "default": "run.initialized",
+          "title": "Kind",
+          "type": "string"
+        },
+        "lease_secret_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lease Secret Sha256",
+          "type": "string"
+        },
+        "manifest_id": {
+          "title": "Manifest Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "manifest_id",
+        "initialized_at",
+        "lease_secret_sha256"
+      ],
+      "title": "RunInitializedData",
+      "type": "object"
+    },
+    "RunRecoveredData": {
+      "additionalProperties": false,
+      "properties": {
+        "expired_local_prepare_leases": {
+          "items": {
+            "$ref": "#/$defs/RecoveredLease"
+          },
+          "title": "Expired Local Prepare Leases",
+          "type": "array"
+        },
+        "expired_worker_leases": {
+          "items": {
+            "$ref": "#/$defs/RecoveredLease"
+          },
+          "title": "Expired Worker Leases",
+          "type": "array"
+        },
+        "kind": {
+          "const": "run.recovered",
+          "default": "run.recovered",
+          "title": "Kind",
+          "type": "string"
+        },
+        "resumed_local_prepare_leases": {
+          "items": {
+            "$ref": "#/$defs/ResumedLocalPrepareLease"
+          },
+          "title": "Resumed Local Prepare Leases",
+          "type": "array"
+        },
+        "snapshot_repaired": {
+          "title": "Snapshot Repaired",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "snapshot_repaired"
+      ],
+      "title": "RunRecoveredData",
+      "type": "object"
+    },
+    "WriteClaimedData": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_number": {
+          "minimum": 1,
+          "title": "Attempt Number",
+          "type": "integer"
+        },
+        "candidate_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidate Sha256",
+          "type": "string"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "expires_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "issued_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+          "title": "Issued At",
+          "type": "string"
+        },
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "write.claimed",
+          "default": "write.claimed",
+          "title": "Kind",
+          "type": "string"
+        },
+        "lease_token_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lease Token Sha256",
+          "type": "string"
+        },
+        "write_attempt_id": {
+          "title": "Write Attempt Id",
+          "type": "string"
+        },
+        "writer_id": {
+          "minLength": 1,
+          "title": "Writer Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "writer_id",
+        "claim_id",
+        "write_attempt_id",
+        "attempt_number",
+        "lease_token_sha256",
+        "issued_at",
+        "expires_at",
+        "candidate_sha256"
+      ],
+      "title": "WriteClaimedData",
+      "type": "object"
+    },
+    "WriteLeaseMutationData": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_number": {
+          "minimum": 1,
+          "title": "Attempt Number",
+          "type": "integer"
+        },
+        "candidate_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidate Sha256",
+          "type": "string"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires At"
+        },
+        "issued_at": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issued At"
+        },
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "write.renewed",
+            "write.released"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "lease_token_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lease Token Sha256",
+          "type": "string"
+        },
+        "write_attempt_id": {
+          "title": "Write Attempt Id",
+          "type": "string"
+        },
+        "writer_id": {
+          "minLength": 1,
+          "title": "Writer Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "item_id",
+        "writer_id",
+        "claim_id",
+        "write_attempt_id",
+        "attempt_number",
+        "lease_token_sha256",
+        "candidate_sha256"
+      ],
+      "title": "WriteLeaseMutationData",
+      "type": "object"
+    },
+    "WriteReconciledData": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_number": {
+          "minimum": 1,
+          "title": "Attempt Number",
+          "type": "integer"
+        },
+        "authorization_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Authorization Sha256",
+          "type": "string"
+        },
+        "candidate_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidate Sha256",
+          "type": "string"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "write.reconciled",
+          "default": "write.reconciled",
+          "title": "Kind",
+          "type": "string"
+        },
+        "lease_token_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lease Token Sha256",
+          "type": "string"
+        },
+        "outcome": {
+          "enum": [
+            "verified",
+            "not_found",
+            "ambiguous",
+            "blocked"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "reconciliation_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Reconciliation Sha256",
+          "type": "string"
+        },
+        "write_attempt_id": {
+          "title": "Write Attempt Id",
+          "type": "string"
+        },
+        "writer_id": {
+          "minLength": 1,
+          "title": "Writer Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "writer_id",
+        "claim_id",
+        "write_attempt_id",
+        "attempt_number",
+        "lease_token_sha256",
+        "candidate_sha256",
+        "authorization_sha256",
+        "reconciliation_sha256",
+        "outcome"
+      ],
+      "title": "WriteReconciledData",
+      "type": "object"
+    },
+    "WriteRetriedData": {
+      "additionalProperties": false,
+      "properties": {
+        "acknowledged_no_match": {
+          "title": "Acknowledged No Match",
+          "type": "boolean"
+        },
+        "authorization_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Authorization Sha256",
+          "type": "string"
+        },
+        "candidate_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidate Sha256",
+          "type": "string"
+        },
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "write.retried",
+          "default": "write.retried",
+          "title": "Kind",
+          "type": "string"
+        },
+        "previous_claim_id": {
+          "title": "Previous Claim Id",
+          "type": "string"
+        },
+        "previous_lease_token_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Previous Lease Token Sha256",
+          "type": "string"
+        },
+        "previous_write_attempt_id": {
+          "title": "Previous Write Attempt Id",
+          "type": "string"
+        },
+        "previous_writer_id": {
+          "minLength": 1,
+          "title": "Previous Writer Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "previous_writer_id",
+        "previous_claim_id",
+        "previous_write_attempt_id",
+        "previous_lease_token_sha256",
+        "candidate_sha256",
+        "authorization_sha256",
+        "acknowledged_no_match"
+      ],
+      "title": "WriteRetriedData",
+      "type": "object"
+    },
+    "WriteStartedData": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_number": {
+          "minimum": 1,
+          "title": "Attempt Number",
+          "type": "integer"
+        },
+        "authorization_nonce_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Authorization Nonce Sha256",
+          "type": "string"
+        },
+        "authorization_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Authorization Sha256",
+          "type": "string"
+        },
+        "candidate_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidate Sha256",
+          "type": "string"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "external_claim_id": {
+          "title": "External Claim Id",
+          "type": "string"
+        },
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "write.started",
+          "default": "write.started",
+          "title": "Kind",
+          "type": "string"
+        },
+        "lease_token_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lease Token Sha256",
+          "type": "string"
+        },
+        "started_at": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+          "title": "Started At",
+          "type": "string"
+        },
+        "write_attempt_id": {
+          "title": "Write Attempt Id",
+          "type": "string"
+        },
+        "writer_id": {
+          "minLength": 1,
+          "title": "Writer Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "writer_id",
+        "claim_id",
+        "write_attempt_id",
+        "attempt_number",
+        "lease_token_sha256",
+        "candidate_sha256",
+        "authorization_sha256",
+        "authorization_nonce_sha256",
+        "external_claim_id",
+        "started_at"
+      ],
+      "title": "WriteStartedData",
+      "type": "object"
+    },
+    "WriteUncertainData": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_number": {
+          "minimum": 1,
+          "title": "Attempt Number",
+          "type": "integer"
+        },
+        "authorization_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Authorization Sha256",
+          "type": "string"
+        },
+        "candidate_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidate Sha256",
+          "type": "string"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "write.marked_uncertain",
+            "write.lease_expired_uncertain"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "lease_token_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lease Token Sha256",
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "write_attempt_id": {
+          "title": "Write Attempt Id",
+          "type": "string"
+        },
+        "writer_id": {
+          "minLength": 1,
+          "title": "Writer Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "item_id",
+        "writer_id",
+        "claim_id",
+        "write_attempt_id",
+        "attempt_number",
+        "lease_token_sha256",
+        "candidate_sha256",
+        "authorization_sha256",
+        "reason"
+      ],
+      "title": "WriteUncertainData",
+      "type": "object"
+    },
+    "WriteWrittenData": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_number": {
+          "minimum": 1,
+          "title": "Attempt Number",
+          "type": "integer"
+        },
+        "authorization_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Authorization Sha256",
+          "type": "string"
+        },
+        "candidate_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidate Sha256",
+          "type": "string"
+        },
+        "canonical_html_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Canonical Html Sha256",
+          "type": "string"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "write.written",
+          "default": "write.written",
+          "title": "Kind",
+          "type": "string"
+        },
+        "lease_token_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lease Token Sha256",
+          "type": "string"
+        },
+        "note_key": {
+          "minLength": 1,
+          "title": "Note Key",
+          "type": "string"
+        },
+        "parent_key": {
+          "minLength": 1,
+          "title": "Parent Key",
+          "type": "string"
+        },
+        "result_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Result Sha256",
+          "type": "string"
+        },
+        "write_attempt_id": {
+          "title": "Write Attempt Id",
+          "type": "string"
+        },
+        "writer_id": {
+          "minLength": 1,
+          "title": "Writer Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "writer_id",
+        "claim_id",
+        "write_attempt_id",
+        "attempt_number",
+        "lease_token_sha256",
+        "candidate_sha256",
+        "authorization_sha256",
+        "result_sha256",
+        "note_key",
+        "parent_key",
+        "canonical_html_sha256"
+      ],
+      "title": "WriteWrittenData",
+      "type": "object"
+    },
+    "ZoteroItemSource": {
+      "additionalProperties": false,
+      "properties": {
+        "collection_key": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Collection Key"
+        },
+        "inventory_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Inventory Sha256",
+          "type": "string"
+        },
+        "item_key": {
+          "minLength": 1,
+          "title": "Item Key",
+          "type": "string"
+        },
+        "source_type": {
+          "const": "zotero_item",
+          "default": "zotero_item",
+          "title": "Source Type",
+          "type": "string"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_key",
+        "title",
+        "inventory_sha256"
+      ],
+      "title": "ZoteroItemSource",
+      "type": "object"
+    },
+    "ZoteroTitleSource": {
+      "additionalProperties": false,
+      "properties": {
+        "inventory_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inventory Sha256"
+        },
+        "resolved_item_key": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolved Item Key"
+        },
+        "source_type": {
+          "const": "zotero_title",
+          "default": "zotero_title",
+          "title": "Source Type",
+          "type": "string"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "title": "ZoteroTitleSource",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "command": {
+      "minLength": 1,
+      "title": "Command",
+      "type": "string"
+    },
+    "command_result": {
+      "$ref": "#/$defs/EventCommandResultSnapshot"
+    },
+    "data": {
+      "discriminator": {
+        "mapping": {
+          "local_prepare.claimed": "#/$defs/ClaimedData",
+          "local_prepare.coordination_reserved": "#/$defs/LocalPrepareCoordinationReservedData",
+          "local_prepare.finished": "#/$defs/FinishedData",
+          "local_prepare.lease_expired": "#/$defs/LeaseMutationData",
+          "local_prepare.released": "#/$defs/LeaseMutationData",
+          "local_prepare.renewed": "#/$defs/LeaseMutationData",
+          "run.initialized": "#/$defs/RunInitializedData",
+          "run.recovered": "#/$defs/RunRecoveredData",
+          "worker.claimed": "#/$defs/ClaimedData",
+          "worker.finished": "#/$defs/FinishedData",
+          "worker.lease_expired": "#/$defs/LeaseMutationData",
+          "worker.released": "#/$defs/LeaseMutationData",
+          "worker.renewed": "#/$defs/LeaseMutationData",
+          "worker.retried": "#/$defs/RetriedData",
+          "write.claimed": "#/$defs/WriteClaimedData",
+          "write.lease_expired_uncertain": "#/$defs/WriteUncertainData",
+          "write.marked_uncertain": "#/$defs/WriteUncertainData",
+          "write.reconciled": "#/$defs/WriteReconciledData",
+          "write.released": "#/$defs/WriteLeaseMutationData",
+          "write.renewed": "#/$defs/WriteLeaseMutationData",
+          "write.retried": "#/$defs/WriteRetriedData",
+          "write.started": "#/$defs/WriteStartedData",
+          "write.written": "#/$defs/WriteWrittenData"
+        },
+        "propertyName": "kind"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RunInitializedData"
+        },
+        {
+          "$ref": "#/$defs/ClaimedData"
+        },
+        {
+          "$ref": "#/$defs/LocalPrepareCoordinationReservedData"
+        },
+        {
+          "$ref": "#/$defs/LeaseMutationData"
+        },
+        {
+          "$ref": "#/$defs/FinishedData"
+        },
+        {
+          "$ref": "#/$defs/RetriedData"
+        },
+        {
+          "$ref": "#/$defs/RunRecoveredData"
+        },
+        {
+          "$ref": "#/$defs/WriteClaimedData"
+        },
+        {
+          "$ref": "#/$defs/WriteLeaseMutationData"
+        },
+        {
+          "$ref": "#/$defs/WriteStartedData"
+        },
+        {
+          "$ref": "#/$defs/WriteWrittenData"
+        },
+        {
+          "$ref": "#/$defs/WriteUncertainData"
+        },
+        {
+          "$ref": "#/$defs/WriteReconciledData"
+        },
+        {
+          "$ref": "#/$defs/WriteRetriedData"
+        }
+      ],
+      "title": "Data"
+    },
+    "event_id": {
+      "title": "Event Id",
+      "type": "string"
+    },
+    "event_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Event Sha256",
+      "type": "string"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "occurred_at": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+      "title": "Occurred At",
+      "type": "string"
+    },
+    "previous_event_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Previous Event Sha256"
+    },
+    "request_fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Request Fingerprint",
+      "type": "string"
+    },
+    "request_id": {
+      "title": "Request Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "paper_reader_batch.event.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "sequence": {
+      "minimum": 1,
+      "title": "Sequence",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "sequence",
+    "event_id",
+    "occurred_at",
+    "request_id",
+    "command",
+    "request_fingerprint",
+    "manifest_sha256",
+    "previous_event_sha256",
+    "data",
+    "command_result",
+    "event_sha256"
+  ],
+  "title": "BatchEvent",
+  "type": "object"
+}

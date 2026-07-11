@@ -1,0 +1,271 @@
+{
+  "$defs": {
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "minLength": 1,
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "schema_version": {
+          "minLength": 1,
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 1,
+          "title": "Size Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "size_bytes",
+        "sha256",
+        "schema_version",
+        "artifact_id"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    },
+    "FileIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "device": {
+          "minimum": 0,
+          "title": "Device",
+          "type": "integer"
+        },
+        "inode": {
+          "minimum": 1,
+          "title": "Inode",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "device",
+        "inode"
+      ],
+      "title": "FileIdentity",
+      "type": "object"
+    },
+    "PdfSource": {
+      "additionalProperties": false,
+      "properties": {
+        "file_identity": {
+          "$ref": "#/$defs/FileIdentity"
+        },
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 1,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "source_type": {
+          "const": "pdf_path",
+          "default": "pdf_path",
+          "title": "Source Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "size_bytes",
+        "sha256",
+        "file_identity"
+      ],
+      "title": "PdfSource",
+      "type": "object"
+    },
+    "ResultError": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "ResultError",
+      "type": "object"
+    },
+    "SkillRootIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "pyproject_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Pyproject Sha256",
+          "type": "string"
+        },
+        "runtime_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Runtime Sha256",
+          "type": "string"
+        },
+        "schemas_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Schemas Sha256",
+          "type": "string"
+        },
+        "skill_md_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Skill Md Sha256",
+          "type": "string"
+        },
+        "uv_lock_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Uv Lock Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "skill_md_sha256",
+        "pyproject_sha256",
+        "uv_lock_sha256",
+        "runtime_sha256",
+        "schemas_sha256"
+      ],
+      "title": "SkillRootIdentity",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "attempt_id": {
+      "title": "Attempt Id",
+      "type": "string"
+    },
+    "attempt_number": {
+      "minimum": 1,
+      "title": "Attempt Number",
+      "type": "integer"
+    },
+    "claim_id": {
+      "title": "Claim Id",
+      "type": "string"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResultError"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "evidence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "item_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+      "title": "Item Id",
+      "type": "string"
+    },
+    "lease_token_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Lease Token Sha256",
+      "type": "string"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "paper_reader_root": {
+      "$ref": "#/$defs/SkillRootIdentity"
+    },
+    "paper_reader_run": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "schema_version": {
+      "const": "paper_reader_batch.local-prepare-result.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/$defs/PdfSource"
+    },
+    "status": {
+      "enum": [
+        "prepared",
+        "failed",
+        "blocked"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "worker_id": {
+      "minLength": 1,
+      "title": "Worker Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "manifest_sha256",
+    "item_id",
+    "worker_id",
+    "claim_id",
+    "attempt_id",
+    "attempt_number",
+    "lease_token_sha256",
+    "status",
+    "source",
+    "paper_reader_root"
+  ],
+  "title": "LocalPrepareResult",
+  "type": "object"
+}

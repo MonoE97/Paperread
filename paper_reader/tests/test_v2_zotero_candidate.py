@@ -10,7 +10,9 @@ from pathlib import Path
 import pytest
 
 from paper_reader.contracts import PaperReaderCandidate
+from paper_reader.note import render_note_html
 from paper_reader.note_hash import canonicalize_note_html_for_hash, note_html_sha256
+from paper_reader.zotero_candidate import _markdown_literal_note_title, _rewrite_markdown_h1
 from paper_reader.zotero_live import _parse_headings
 
 from test_v2_review_package import _invoke, _result_payload, _write_summary_and_review
@@ -104,6 +106,45 @@ def _build(run_dir: Path, provider: InMemoryZoteroProvider):
     return candidate_builder.build_candidate(run_dir, provider=provider)
 
 
+@pytest.mark.parametrize(
+    ("paper_title", "markdown_h1", "rendered_h1"),
+    [
+        (
+            "A *B* Study",
+            r"# [Codex Summary] A \*B\* Study - 2026-07-10",
+            "<h1>[Codex Summary] A *B* Study - 2026-07-10</h1>",
+        ),
+        (
+            "A `B` Study",
+            r"# [Codex Summary] A \`B\` Study - 2026-07-10",
+            "<h1>[Codex Summary] A `B` Study - 2026-07-10</h1>",
+        ),
+    ],
+)
+def test_zotero_title_markdown_rendering_contract_for_batch_verifier(
+    paper_title: str,
+    markdown_h1: str,
+    rendered_h1: str,
+) -> None:
+    title = f"[Codex Summary] {paper_title} - 2026-07-10"
+    sealed = (
+        "# old\n\n"
+        "## 0. 阅读结论\n\n正文\n\n"
+        "## 1. 速读信息\n\n正文\n\n"
+        "## 2. 论文主张\n\n正文\n\n"
+        "## 3. 方法与设计\n\n正文\n\n"
+        "## 4. 图表导读\n\n正文\n\n"
+        "## 5. 边界与机会\n\n正文\n\n"
+        "Tags: codex-summary, paper-summary\n"
+    )
+    rewritten = _rewrite_markdown_h1(sealed.encode(), title)
+
+    rendered = render_note_html(rewritten.decode())
+    assert rewritten.decode().splitlines()[0] == markdown_h1
+    assert rendered.splitlines()[0] == rendered_h1
+    assert _parse_headings(rendered)[0] == title
+
+
 def test_zotero_candidate_uses_fresh_children_for_exact_title_and_canonical_html(
     tmp_path: Path,
 ) -> None:
@@ -132,7 +173,8 @@ def test_zotero_candidate_uses_fresh_children_for_exact_title_and_canonical_html
     assert candidate.live_preflight.children_snapshot in candidate.artifacts
     note_md = (built.candidate_dir / "note.md").read_text(encoding="utf-8")
     note_html = (built.candidate_dir / "note.html").read_text(encoding="utf-8")
-    assert note_md.splitlines()[0] == f"# {base} (v3)"
+    assert note_md.splitlines()[0] == f"# {_markdown_literal_note_title(f'{base} (v3)')}"
+    assert _parse_headings(note_html)[0] == candidate.note_title
     html_title, _headings = _parse_headings(note_html)
     assert html_title == f"{base} (v3)"
     canonical_html = canonicalize_note_html_for_hash(note_html)
