@@ -22,6 +22,11 @@ from paper_reader_batch.v2_contracts import (
     FinishedData,
     LocalPrepareResult,
     WorkerResult,
+    WriteClaimedData,
+    WriteReconciledData,
+    WriteRetriedData,
+    WriteStartedData,
+    WriteWrittenData,
 )
 from paper_reader_batch.v2_errors import BatchRuntimeError
 from paper_reader_batch.v2_json import (
@@ -44,7 +49,7 @@ from paper_reader_batch.v2_json import (
 )
 from paper_reader_batch.v2_manifest import load_manifest
 from paper_reader_batch.v2_receipts import FaultHook, RequestOutcome, validate_request_id
-from paper_reader_batch.v2_reducer import apply_event, replay
+from paper_reader_batch.v2_reducer import apply_event, initial_state
 
 
 @dataclass(frozen=True)
@@ -117,6 +122,7 @@ def _command_for_kind(kind: str) -> str:
         "write.claimed": "write.claim",
         "write.renewed": "write.renew",
         "write.released": "write.release",
+        "write.lease_expired": "run.recover",
         "write.started": "write.begin",
         "write.written": "write.commit",
         "write.marked_uncertain": "write.mark-uncertain",
@@ -166,6 +172,70 @@ def _load_event(path: Path, *, expected_sequence: int, manifest_sha256: str, pre
     return event
 
 
+def _validate_identity_history(events: list[BatchEvent]) -> None:
+    claim_ids: set[str] = set()
+    attempt_ids: set[str] = set()
+    lease_tokens: set[str] = set()
+    reservations: dict[str, tuple[str, str]] = {}
+    authorization_sha256s: set[str] = set()
+    authorization_nonces: set[str] = set()
+    for event in events:
+        data = event.data
+        if data.kind in {"worker.claimed", "local_prepare.claimed"}:
+            for assignment in data.assignments:
+                reservation = (assignment.lane, assignment.item_id)
+                reserved = reservations.get(assignment.attempt_id) == reservation
+                if (
+                    assignment.claim_id in claim_ids
+                    or (assignment.attempt_id in attempt_ids and not reserved)
+                    or assignment.lease_token_sha256 in lease_tokens
+                ):
+                    raise BatchRuntimeError(
+                        "journal_corrupt",
+                        "claim, attempt, or lease token identity is reused in journal history",
+                    )
+                if reserved:
+                    del reservations[assignment.attempt_id]
+                claim_ids.add(assignment.claim_id)
+                attempt_ids.add(assignment.attempt_id)
+                lease_tokens.add(assignment.lease_token_sha256)
+        elif data.kind == "worker.retried":
+            if data.next_attempt_id in attempt_ids:
+                raise BatchRuntimeError("journal_corrupt", "retry-bound attempt identity is reused")
+            attempt_ids.add(data.next_attempt_id)
+            reservations[data.next_attempt_id] = ("worker", data.item_id)
+        elif isinstance(data, WriteClaimedData):
+            reservation = ("write", data.item_id)
+            reserved = reservations.get(data.write_attempt_id) == reservation
+            if (
+                data.claim_id in claim_ids
+                or (data.write_attempt_id in attempt_ids and not reserved)
+                or data.lease_token_sha256 in lease_tokens
+            ):
+                raise BatchRuntimeError(
+                    "journal_corrupt",
+                    "write claim, attempt, or lease token identity is reused in journal history",
+                )
+            if reserved:
+                del reservations[data.write_attempt_id]
+            claim_ids.add(data.claim_id)
+            attempt_ids.add(data.write_attempt_id)
+            lease_tokens.add(data.lease_token_sha256)
+        elif isinstance(data, WriteRetriedData):
+            if data.next_write_attempt_id in attempt_ids:
+                raise BatchRuntimeError("journal_corrupt", "write retry-bound attempt identity is reused")
+            attempt_ids.add(data.next_write_attempt_id)
+            reservations[data.next_write_attempt_id] = ("write", data.item_id)
+        elif isinstance(data, WriteStartedData):
+            if (
+                data.authorization_sha256 in authorization_sha256s
+                or data.authorization_nonce_sha256 in authorization_nonces
+            ):
+                raise BatchRuntimeError("journal_corrupt", "write authorization or nonce is reused")
+            authorization_sha256s.add(data.authorization_sha256)
+            authorization_nonces.add(data.authorization_nonce_sha256)
+
+
 def _load_events(
     run_dir: Path,
     manifest_sha256: str,
@@ -191,9 +261,6 @@ def _load_events(
     previous: str | None = None
     request_ids: set[str] = set()
     event_ids: set[str] = set()
-    claim_ids: set[str] = set()
-    attempt_ids: set[str] = set()
-    retry_reserved_attempt_ids: set[str] = set()
     for sequence, name in enumerate(event_names, start=1):
         event = _load_event(
             events_dir / name,
@@ -207,22 +274,9 @@ def _load_events(
             raise BatchRuntimeError("journal_corrupt", f"event id appears more than once: {event.event_id}")
         request_ids.add(event.request_id)
         event_ids.add(event.event_id)
-        if event.data.kind in {"worker.claimed", "local_prepare.claimed"}:
-            for assignment in event.data.assignments:
-                reserved_retry = assignment.lane == "worker" and assignment.attempt_id in retry_reserved_attempt_ids
-                if assignment.claim_id in claim_ids or (assignment.attempt_id in attempt_ids and not reserved_retry):
-                    raise BatchRuntimeError("journal_corrupt", "claim or attempt identity is reused in journal history")
-                if reserved_retry:
-                    retry_reserved_attempt_ids.remove(assignment.attempt_id)
-                claim_ids.add(assignment.claim_id)
-                attempt_ids.add(assignment.attempt_id)
-        elif event.data.kind == "worker.retried":
-            if event.data.next_attempt_id in attempt_ids:
-                raise BatchRuntimeError("journal_corrupt", "retry-bound attempt identity is reused")
-            attempt_ids.add(event.data.next_attempt_id)
-            retry_reserved_attempt_ids.add(event.data.next_attempt_id)
         events.append(event)
         previous = event.event_sha256
+    _validate_identity_history(events)
 
     def validate_pending_event(staged: BatchEvent, raw: bytes, *, label: str) -> None:
         if (
@@ -238,21 +292,7 @@ def _load_events(
             or staged.event_id in event_ids
         ):
             raise BatchRuntimeError("journal_corrupt", f"{label} is not a valid next event")
-        if staged.data.kind in {"worker.claimed", "local_prepare.claimed"}:
-            for assignment in staged.data.assignments:
-                reserved_retry = (
-                    assignment.lane == "worker"
-                    and assignment.attempt_id in retry_reserved_attempt_ids
-                )
-                if assignment.claim_id in claim_ids or (
-                    assignment.attempt_id in attempt_ids and not reserved_retry
-                ):
-                    raise BatchRuntimeError(
-                        "journal_corrupt",
-                        f"{label} reuses claim or attempt identity",
-                    )
-        elif staged.data.kind == "worker.retried" and staged.data.next_attempt_id in attempt_ids:
-            raise BatchRuntimeError("journal_corrupt", f"{label} reuses an attempt identity")
+        _validate_identity_history([*events, staged])
 
     next_name = f"{len(events) + 1:020d}.json"
     pending: PendingEvent | None = None
@@ -382,6 +422,107 @@ def _validate_finished_event_result(
     _validate_finished_payload(manifest, event, raw, full_external=full_external)
 
 
+def _validation_view(
+    *,
+    run_dir: Path,
+    manifest: BatchManifest,
+    manifest_raw: bytes,
+    manifest_sha256: str,
+    events: list[BatchEvent],
+    state: BatchState,
+) -> RunView:
+    return RunView(
+        run_dir=run_dir,
+        manifest=manifest,
+        manifest_raw=manifest_raw,
+        manifest_sha256=manifest_sha256,
+        events=list(events),
+        state=state,
+        snapshot_raw=None,
+        snapshot_status="validation",
+        lease_secret=b"",
+    )
+
+
+def _validate_write_event_result(
+    view: RunView,
+    event: BatchEvent,
+    *,
+    raw: bytes | None = None,
+    committed: bool,
+) -> None:
+    data = event.data
+    if isinstance(data, WriteStartedData):
+        from paper_reader_batch.v2_write import validate_write_started_artifacts
+
+        try:
+            validate_write_started_artifacts(view, data)
+        except BatchRuntimeError as exc:
+            if not committed or exc.code == "unsupported_run_schema":
+                raise
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "committed write.started no longer closes over its authorization artifacts",
+            ) from exc
+        return
+    if isinstance(data, WriteWrittenData):
+        lane = "write"
+        digest = data.result_sha256
+        from paper_reader_batch.v2_write import validate_write_result_payload
+
+        validator = validate_write_result_payload
+    elif isinstance(data, WriteReconciledData):
+        lane = "reconcile"
+        digest = data.reconciliation_sha256
+        from paper_reader_batch.v2_write import validate_reconciliation_result_payload
+
+        validator = validate_reconciliation_result_payload
+    else:
+        return
+    payload = raw
+    if payload is None:
+        payload = read_bytes(
+            view.run_dir / "results" / lane / f"{digest}.json",
+            code="journal_corrupt",
+        )
+    try:
+        validator(view, data, payload)
+    except BatchRuntimeError as exc:
+        if not committed or exc.code == "unsupported_run_schema":
+            raise
+        raise BatchRuntimeError(
+            "journal_corrupt",
+            f"committed {lane} result no longer closes over its event and external artifacts",
+        ) from exc
+
+
+def _replay_with_result_validation(
+    run_dir: Path,
+    manifest: BatchManifest,
+    manifest_raw: bytes,
+    manifest_sha256: str,
+    events: list[BatchEvent],
+) -> BatchState:
+    if not events:
+        raise BatchRuntimeError("journal_corrupt", "journal is empty")
+    state = initial_state(manifest, events[0])
+    prefix = [events[0]]
+    for event in events[1:]:
+        _validate_finished_event_result(run_dir, manifest, event)
+        prior = _validation_view(
+            run_dir=run_dir,
+            manifest=manifest,
+            manifest_raw=manifest_raw,
+            manifest_sha256=manifest_sha256,
+            events=prefix,
+            state=state,
+        )
+        _validate_write_event_result(prior, event, committed=True)
+        state = apply_event(state, manifest, event)
+        prefix.append(event)
+    return state
+
+
 def _load_snapshot(run_dir: Path) -> tuple[bytes | None, BatchState | None, str]:
     path = run_dir / "state.json"
     try:
@@ -441,11 +582,24 @@ def load_run_view(
         drift_context=True,
     )
     events, pending_event, incomplete_event_writes = _load_events(root, manifest_sha256)
-    for event in events:
-        _validate_finished_event_result(root, manifest, event)
-    state = replay(manifest, events)
+    state = _replay_with_result_validation(
+        root,
+        manifest,
+        manifest_raw,
+        manifest_sha256,
+        events,
+    )
     if pending_event is not None:
         _validate_finished_event_result(root, manifest, pending_event.event, full_external=True)
+        prior = _validation_view(
+            run_dir=root,
+            manifest=manifest,
+            manifest_raw=manifest_raw,
+            manifest_sha256=manifest_sha256,
+            events=events,
+            state=state,
+        )
+        _validate_write_event_result(prior, pending_event.event, committed=True)
         apply_event(state, manifest, pending_event.event)
     snapshot_raw, snapshot, snapshot_status = _load_snapshot(root)
     if snapshot_status == "loaded":
@@ -682,21 +836,50 @@ def append_transaction(
             ).model_dump(mode="json"),
         }
         event = BatchEvent(**event_base, event_sha256=canonical_sha256(event_base))
+        expected_lane: str | None = None
+        expected_digest: str | None = None
         if isinstance(event.data, FinishedData):
-            if transition.publication is None:
-                raise BatchRuntimeError("invalid_transition", "finish transition requires its exact result publication")
             expected_lane = "worker" if event.data.kind == "worker.finished" else "local-prepare"
-            expected_path = view.run_dir / "results" / expected_lane / f"{event.data.result_sha256}.json"
+            expected_digest = event.data.result_sha256
+        elif isinstance(event.data, WriteWrittenData):
+            expected_lane = "write"
+            expected_digest = event.data.result_sha256
+        elif isinstance(event.data, WriteReconciledData):
+            expected_lane = "reconcile"
+            expected_digest = event.data.reconciliation_sha256
+        if expected_lane is not None:
+            if transition.publication is None:
+                raise BatchRuntimeError(
+                    "invalid_transition",
+                    f"{event.data.kind} requires its exact result publication",
+                )
+            expected_path = view.run_dir / "results" / expected_lane / f"{expected_digest}.json"
             if normalized_absolute_path(transition.publication.path) != expected_path:
-                raise BatchRuntimeError("invalid_result_path", "finish result publication lane/path differs from event")
+                raise BatchRuntimeError(
+                    "invalid_result_path",
+                    f"{event.data.kind} result publication lane/path differs from event",
+                )
+        elif transition.publication is not None:
+            raise BatchRuntimeError("invalid_transition", "this event type cannot publish a result")
+        if isinstance(event.data, FinishedData):
+            assert transition.publication is not None
             _validate_finished_payload(
                 view.manifest,
                 event,
                 transition.publication.content,
                 full_external=True,
             )
-        elif transition.publication is not None:
-            raise BatchRuntimeError("invalid_transition", "only a Task 5 finish event may publish a result")
+        elif isinstance(event.data, (WriteWrittenData, WriteReconciledData)):
+            assert transition.publication is not None
+            _validate_write_event_result(
+                view,
+                event,
+                raw=transition.publication.content,
+                committed=False,
+            )
+        elif isinstance(event.data, WriteStartedData):
+            _validate_write_event_result(view, event, committed=False)
+        _validate_identity_history([*view.events, event])
         updated_state = apply_event(view.state, view.manifest, event)
         if transition.publication is not None:
             publication = transition.publication
@@ -709,12 +892,14 @@ def append_transaction(
             if (
                 len(relative.parts) != 3
                 or relative.parts[0] != "results"
-                or relative.parts[1] not in {"worker", "local-prepare"}
+                or relative.parts[1] not in {"worker", "local-prepare", "write", "reconcile"}
                 or relative.parts[2] != f"{publication_digest}.json"
+                or relative.parts[1] != expected_lane
+                or publication_digest != expected_digest
             ):
                 raise BatchRuntimeError(
                     "invalid_result_path",
-                    "Task 5 result must use results/{worker|local-prepare}/<sha256>.json",
+                    "result must use its event-bound results/<lane>/<sha256>.json path",
                 )
             try:
                 payload = json.loads(publication.content)

@@ -19,6 +19,7 @@ from paper_reader_batch.v2_contracts import (
     ReportItem,
     SkillRootIdentity,
     StateItem,
+    WriteResult,
     export_contract_schemas,
     schema_filename,
 )
@@ -158,6 +159,76 @@ def test_command_result_forbids_extra_fields_and_wrong_version() -> None:
 
     with pytest.raises(ValidationError, match="literal_error"):
         CommandResult.model_validate({**valid, "schema_version": "paper_reader_batch.command-result.v1"})
+
+
+def test_reconciliation_result_requires_distinct_exact_matches() -> None:
+    payload = {
+        "schema_version": "paper_reader_batch.reconciliation.v2",
+        "manifest_sha256": "1" * 64,
+        "item_id": "001",
+        "writer_id": "writer",
+        "claim_id": "11111111-1111-4111-8111-111111111111",
+        "lease_token_sha256": "2" * 64,
+        "write_attempt_id": "22222222-2222-4222-8222-222222222222",
+        "candidate_sha256": "3" * 64,
+        "authorization_sha256": "4" * 64,
+        "readback_sha256": "5" * 64,
+        "parent_key": "PARENT",
+        "exact_title": "[Codex Summary] Paper",
+        "canonical_html_sha256": "6" * 64,
+        "matched_note_keys": ["NOTE1", "NOTE1"],
+        "match_count": 2,
+        "outcome": "ambiguous",
+        "verification": None,
+        "matched_note_key": None,
+    }
+
+    with pytest.raises(ValidationError, match="distinct"):
+        ReconciliationResult.model_validate(payload)
+
+
+def test_write_result_contract_closes_external_claim_and_verification_schema() -> None:
+    payload = {
+        "schema_version": "paper_reader_batch.write-result.v2",
+        "manifest_sha256": "1" * 64,
+        "item_id": "001",
+        "writer_id": "writer",
+        "claim_id": "11111111-1111-4111-8111-111111111111",
+        "write_attempt_id": "22222222-2222-4222-8222-222222222222",
+        "lease_token_sha256": "2" * 64,
+        "started_event_sha256": "3" * 64,
+        "candidate_sha256": "4" * 64,
+        "authorization_sha256": "5" * 64,
+        "authorization_nonce_sha256": "6" * 64,
+        "external_claim_id": "11111111-1111-4111-8111-111111111111",
+        "note_key": "NOTE1",
+        "parent_key": "PARENT",
+        "canonical_html_sha256": "7" * 64,
+        "verification": {
+            "path": "/tmp/verification.json",
+            "size_bytes": 2,
+            "sha256": "8" * 64,
+            "schema_version": "paper_reader.verification.v2",
+            "artifact_id": "verification_NOTE1",
+        },
+        "status": "written",
+    }
+    assert WriteResult.model_validate(payload).external_claim_id == payload["claim_id"]
+
+    with pytest.raises(ValidationError, match="external_claim_id"):
+        WriteResult.model_validate(
+            {**payload, "external_claim_id": "33333333-3333-4333-8333-333333333333"}
+        )
+    with pytest.raises(ValidationError, match="verification"):
+        WriteResult.model_validate(
+            {
+                **payload,
+                "verification": {
+                    **payload["verification"],
+                    "schema_version": "paper_reader.verification.v99",
+                },
+            }
+        )
 
 
 def test_exported_event_and_state_contracts_are_final_for_task6_write_lane() -> None:

@@ -148,6 +148,16 @@
       "title": "Manifest Sha256",
       "type": "string"
     },
+    "report_generation_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Report Generation Id",
+      "type": "string"
+    },
+    "report_markdown_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Report Markdown Sha256",
+      "type": "string"
+    },
     "schema_version": {
       "const": "paper_reader_batch.report.v2",
       "title": "Schema Version",
@@ -167,6 +177,8 @@
     "manifest_id",
     "manifest_sha256",
     "generated_at",
+    "report_generation_id",
+    "report_markdown_sha256",
     "batch_status",
     "write_policy",
     "effective_write_policy",

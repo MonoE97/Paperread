@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+import json
 from pathlib import Path
 import re
 import secrets
+import subprocess
 import unicodedata
-from typing import Any
-from uuid import uuid4
+from typing import Any, Callable, Literal
+from uuid import UUID, uuid4, uuid5
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from paper_reader_batch.v2_contracts import (
     BatchEvent,
@@ -21,6 +24,9 @@ from paper_reader_batch.v2_contracts import (
     RunRecoveredData,
     StateItem,
     STATE_SCHEMA_VERSION,
+    WriteReconciledData,
+    WriteLeaseMutationData,
+    WriteUncertainData,
 )
 from paper_reader_batch.v2_errors import BatchRuntimeError
 from paper_reader_batch.v2_json import (
@@ -41,12 +47,179 @@ from paper_reader_batch.v2_json import (
 )
 from paper_reader_batch.v2_manifest import load_manifest
 from paper_reader_batch.v2_manifest import validate_manifest_sources
-from paper_reader_batch.v2_receipts import FaultHook, RequestOutcome, RequestReceiptStore
+from paper_reader_batch.v2_receipts import (
+    FaultHook,
+    RequestOutcome,
+    RequestReceiptStore,
+    validate_request_id,
+)
 from paper_reader_batch.v2_reducer import initial_state
 
 
 _SLUG_PATTERN = re.compile(r"[^a-z0-9]+")
 _RECOVERED_LOCAL_PREPARE_LEASE_SECONDS = 900
+_DEFAULT_RECONCILIATION_TIMEOUT_SECONDS = 60
+_MAX_RECONCILIATION_TIMEOUT_SECONDS = 600
+_RECONCILIATION_REQUEST_NAME = "paper_reader_batch.run-recover.reconcile.v2"
+
+
+class _ChildStrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+
+class _ChildReconciliationData(_ChildStrictModel):
+    reconciliation_path: str = Field(min_length=1)
+    reconciliation_id: str = Field(min_length=1)
+    authorization_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    outcome: Literal["verified", "not_found", "ambiguous", "blocked"]
+    match_count: int = Field(ge=0)
+    matched_note_keys: list[str]
+    retry_confirmation_required: bool
+    replayed: bool
+    verification_path: str | None
+
+
+class _ChildReconciliationEnvelope(_ChildStrictModel):
+    schema_version: Literal["paper_reader.command-result.v2"]
+    command: Literal["zotero reconcile"]
+    ok: bool
+    code: str = Field(min_length=1)
+    created_at: str = Field(min_length=1)
+    message: str | None = None
+    data: _ChildReconciliationData
+
+
+ReconciliationRunner = Callable[
+    [tuple[str, ...], Path, int],
+    subprocess.CompletedProcess[bytes],
+]
+
+
+def _default_reconciliation_runner(
+    argv: tuple[str, ...],
+    cwd: Path,
+    timeout_seconds: int,
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        argv,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout_seconds,
+        check=False,
+    )
+
+
+def _parse_reconciliation_child_result(
+    completed: subprocess.CompletedProcess[bytes],
+    *,
+    authorization_sha256: str,
+) -> _ChildReconciliationEnvelope:
+    raw = completed.stdout
+    if not isinstance(raw, bytes):
+        raise BatchRuntimeError(
+            "invalid_child_envelope",
+            "paper_reader reconciliation stdout must be bytes",
+        )
+    lines = raw.splitlines()
+    if len(lines) != 1 or not lines[0]:
+        raise BatchRuntimeError(
+            "invalid_child_envelope",
+            "paper_reader reconciliation stdout must contain exactly one JSON object",
+        )
+    try:
+        payload = json.loads(
+            lines[0],
+            parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        raise BatchRuntimeError(
+            "invalid_child_envelope",
+            "paper_reader reconciliation stdout is invalid JSON",
+        ) from exc
+    try:
+        envelope = _ChildReconciliationEnvelope.model_validate(payload)
+    except ValidationError as exc:
+        raise BatchRuntimeError(
+            "invalid_child_envelope",
+            "paper_reader reconciliation command-result failed strict validation",
+        ) from exc
+    if raw != canonical_json_bytes(envelope) + b"\n":
+        raise BatchRuntimeError(
+            "invalid_child_envelope",
+            "paper_reader reconciliation stdout must be one canonical JSON line",
+        )
+    try:
+        created_at = envelope.created_at
+        parsed = datetime.fromisoformat(created_at[:-1] + "+00:00")
+    except (ValueError, IndexError) as exc:
+        raise BatchRuntimeError(
+            "invalid_child_envelope",
+            "paper_reader reconciliation created_at is not RFC3339 UTC",
+        ) from exc
+    if not created_at.endswith("Z") or parsed.utcoffset() is None or parsed.utcoffset().total_seconds() != 0:
+        raise BatchRuntimeError(
+            "invalid_child_envelope",
+            "paper_reader reconciliation created_at must use UTC Z form",
+        )
+    if (completed.returncode == 0) != envelope.ok:
+        raise BatchRuntimeError(
+            "child_exit_mismatch",
+            "paper_reader reconciliation exit status disagrees with its command-result envelope",
+        )
+    expected_codes = {
+        "verified": (True, "reconciliation_verified"),
+        "not_found": (False, "reconciliation_not_found"),
+        "ambiguous": (False, "reconciliation_ambiguous"),
+        "blocked": (False, "reconciliation_blocked"),
+    }
+    if (envelope.ok, envelope.code) != expected_codes[envelope.data.outcome]:
+        raise BatchRuntimeError(
+            "invalid_child_envelope",
+            "paper_reader reconciliation outcome, ok flag, and code disagree",
+        )
+    data = envelope.data
+    if data.authorization_digest != authorization_sha256:
+        raise BatchRuntimeError(
+            "invalid_child_envelope",
+            "paper_reader reconciliation authorization digest differs from the uncertain write",
+        )
+    if len(set(data.matched_note_keys)) != len(data.matched_note_keys) or data.match_count != len(
+        data.matched_note_keys
+    ):
+        raise BatchRuntimeError(
+            "invalid_child_envelope",
+            "paper_reader reconciliation match count or note keys are inconsistent",
+        )
+    invariants = {
+        "verified": (
+            data.match_count == 1
+            and data.verification_path is not None
+            and not data.retry_confirmation_required
+        ),
+        "not_found": (
+            data.match_count == 0
+            and data.verification_path is None
+            and data.retry_confirmation_required
+        ),
+        "ambiguous": (
+            data.match_count > 1
+            and data.verification_path is None
+            and not data.retry_confirmation_required
+        ),
+        "blocked": (
+            data.match_count == 1
+            and data.verification_path is not None
+            and not data.retry_confirmation_required
+        ),
+    }
+    if not invariants[data.outcome] or not Path(data.reconciliation_path).is_absolute():
+        raise BatchRuntimeError(
+            "invalid_child_envelope",
+            "paper_reader reconciliation outcome fields or path are inconsistent",
+        )
+    return envelope
 
 
 def _slug(title: str) -> str:
@@ -309,11 +482,12 @@ def recover_run(
     run_dir: Path,
     *,
     request_id: str,
+    paper_reader_root: Path | None = None,
+    reconciliation_timeout_seconds: int = _DEFAULT_RECONCILIATION_TIMEOUT_SECONDS,
+    reconciliation_runner: ReconciliationRunner | None = None,
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
-    from datetime import datetime, timedelta
-
     from paper_reader_batch.v2_journal import ProposedTransition, append_transaction, load_run_view
     from paper_reader_batch.v2_local_prepare import local_prepare_attempt_has_execution_side_effects
 
@@ -323,6 +497,18 @@ def recover_run(
         except (ValueError, IndexError) as exc:
             raise BatchRuntimeError("invalid_timestamp", f"invalid recovery timestamp: {value}") from exc
 
+    canonical_request_id = validate_request_id(request_id)
+    if (
+        type(reconciliation_timeout_seconds) is not int
+        or not 1 <= reconciliation_timeout_seconds <= _MAX_RECONCILIATION_TIMEOUT_SECONDS
+    ):
+        raise BatchRuntimeError(
+            "invalid_timeout",
+            (
+                "reconciliation timeout must be between 1 and "
+                f"{_MAX_RECONCILIATION_TIMEOUT_SECONDS} seconds"
+            ),
+        )
     preflight = load_run_view(run_dir)
     fingerprint = canonical_sha256(
         {
@@ -354,8 +540,76 @@ def recover_run(
             "snapshot_repaired": data.snapshot_repaired,
         }
 
+    def write_result_for(view, data: WriteLeaseMutationData | WriteUncertainData) -> dict[str, Any]:
+        started = isinstance(data, WriteUncertainData)
+        result = {
+            "run_dir": str(view.run_dir),
+            "expired_write_claimed_items": [] if started else [data.item_id],
+            "expired_write_started_items": [data.item_id] if started else [],
+            "reconciliation_required": [],
+        }
+        if started:
+            result["reconciliation_required"] = [
+                {
+                    "item_id": data.item_id,
+                    "authorization_sha256": data.authorization_sha256,
+                    "next_action": "rerun run recover with an explicit --paper-reader-root",
+                }
+            ]
+        return result
+
     def propose(view, transaction_time: str) -> ProposedTransition:
         current = parse_timestamp(transaction_time)
+        expired_write_items = [
+            item
+            for item in view.state.items
+            if item.write_lease is not None
+            and parse_timestamp(item.write_lease.expires_at) <= current
+        ]
+        if expired_write_items:
+            item = expired_write_items[0]
+            lease = item.write_lease
+            assert lease is not None
+            if item.write_status == "claimed":
+                write_data: WriteLeaseMutationData | WriteUncertainData = WriteLeaseMutationData(
+                    kind="write.lease_expired",
+                    item_id=item.item_id,
+                    writer_id=lease.writer_id,
+                    claim_id=lease.claim_id,
+                    write_attempt_id=lease.write_attempt_id,
+                    attempt_number=lease.attempt_number,
+                    lease_token_sha256=lease.lease_token_sha256,
+                    candidate_sha256=lease.candidate_sha256,
+                    issued_at=None,
+                    expires_at=None,
+                )
+            elif item.write_status == "started":
+                if item.authorization_sha256 is None:
+                    raise BatchRuntimeError(
+                        "journal_corrupt",
+                        f"started write lacks authorization identity: {item.item_id}",
+                    )
+                write_data = WriteUncertainData(
+                    kind="write.lease_expired_uncertain",
+                    item_id=item.item_id,
+                    writer_id=lease.writer_id,
+                    claim_id=lease.claim_id,
+                    write_attempt_id=lease.write_attempt_id,
+                    attempt_number=lease.attempt_number,
+                    lease_token_sha256=lease.lease_token_sha256,
+                    candidate_sha256=lease.candidate_sha256,
+                    authorization_sha256=item.authorization_sha256,
+                    reason="started write lease expired before a verified outcome was committed",
+                )
+            else:  # strict state contract makes this unreachable
+                raise BatchRuntimeError(
+                    "journal_corrupt",
+                    f"write lease is attached to an invalid state: {item.item_id}",
+                )
+            return ProposedTransition(
+                data=write_data,
+                result=write_result_for(view, write_data),
+            )
         worker = [
             recovered(item.worker_lease, item.item_id)
             for item in view.state.items
@@ -402,13 +656,21 @@ def recover_run(
         return ProposedTransition(data=data, result=result_for(data))
 
     def reconstruct(_view, event) -> dict[str, Any]:
-        if not isinstance(event.data, RunRecoveredData):
-            raise BatchRuntimeError("journal_corrupt", "run recover request points to another event type")
-        return result_for(event.data)
+        if isinstance(event.data, RunRecoveredData):
+            return result_for(event.data)
+        if (
+            isinstance(event.data, WriteLeaseMutationData)
+            and event.data.kind == "write.lease_expired"
+        ) or (
+            isinstance(event.data, WriteUncertainData)
+            and event.data.kind == "write.lease_expired_uncertain"
+        ):
+            return write_result_for(_view, event.data)
+        raise BatchRuntimeError("journal_corrupt", "run recover request points to another event type")
 
-    return append_transaction(
+    recovered_outcome = append_transaction(
         run_dir,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="run.recover",
         request_fingerprint=fingerprint,
         occurred_at=now,
@@ -416,3 +678,128 @@ def recover_run(
         reconstruct=reconstruct,
         fault=fault,
     )
+    expired_started = recovered_outcome.result.get("expired_write_started_items", [])
+    if not expired_started or paper_reader_root is None:
+        return recovered_outcome
+    if len(expired_started) != 1 or not isinstance(expired_started[0], str):
+        raise BatchRuntimeError(
+            "journal_corrupt",
+            "run recovery result does not identify exactly one expired started write",
+        )
+
+    item_id = expired_started[0]
+    reconciliation_request_id = str(
+        uuid5(UUID(canonical_request_id), _RECONCILIATION_REQUEST_NAME)
+    )
+
+    def reconciliation_summary(data: WriteReconciledData) -> dict[str, Any]:
+        return {
+            "request_id": reconciliation_request_id,
+            "item_id": data.item_id,
+            "child_outcome": data.outcome,
+            "status": {
+                "verified": "written",
+                "not_found": "retry_confirmation_required",
+                "ambiguous": "blocked",
+                "blocked": "blocked",
+            }[data.outcome],
+        }
+
+    current_view = load_run_view(run_dir)
+    existing_reconciliation = next(
+        (
+            event
+            for event in current_view.events
+            if event.request_id == reconciliation_request_id
+        ),
+        None,
+    )
+    if existing_reconciliation is not None:
+        if not isinstance(existing_reconciliation.data, WriteReconciledData):
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "derived reconciliation request id points to another event type",
+            )
+        summary = reconciliation_summary(existing_reconciliation.data)
+    else:
+        state_item = next(
+            (item for item in current_view.state.items if item.item_id == item_id),
+            None,
+        )
+        if (
+            state_item is None
+            or state_item.write_status != "uncertain"
+            or state_item.authorization_sha256 is None
+        ):
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "expired started write is no longer the exact uncertain attempt",
+            )
+        from paper_reader_batch.v2_artifacts import paper_reader_root_identity
+        from paper_reader_batch.v2_write import (
+            _authorization_path_for_digest,
+            reconcile_write,
+        )
+
+        root = normalized_absolute_path(paper_reader_root)
+        root_identity = paper_reader_root_identity(root)
+        authorization_path = _authorization_path_for_digest(
+            current_view,
+            item_id=item_id,
+            authorization_sha256=state_item.authorization_sha256,
+        )
+        argv = (
+            "uv",
+            "run",
+            "--locked",
+            "paper_reader",
+            "zotero",
+            "reconcile",
+            str(authorization_path),
+        )
+        runner = reconciliation_runner or _default_reconciliation_runner
+        try:
+            completed = runner(argv, root, reconciliation_timeout_seconds)
+        except Exception as exc:
+            raise BatchRuntimeError(
+                "reconciliation_child_failed",
+                "paper_reader read-only reconciliation child failed before a valid result was accepted",
+            ) from exc
+        if not isinstance(completed, subprocess.CompletedProcess):
+            raise BatchRuntimeError(
+                "invalid_child_envelope",
+                "paper_reader reconciliation runner returned an invalid process result",
+            )
+        envelope = _parse_reconciliation_child_result(
+            completed,
+            authorization_sha256=state_item.authorization_sha256,
+        )
+        if paper_reader_root_identity(root) != root_identity:
+            raise BatchRuntimeError(
+                "paper_reader_root_drift",
+                "paper_reader root changed during read-only reconciliation",
+            )
+        reconciled = reconcile_write(
+            current_view.run_dir,
+            item_id,
+            readback_path=Path(envelope.data.reconciliation_path),
+            request_id=reconciliation_request_id,
+            now=envelope.created_at,
+            fault=fault,
+        )
+        if reconciled.result.get("outcome") != envelope.data.outcome:
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "batch reconciliation outcome differs from the accepted child envelope",
+            )
+        summary = {
+            "request_id": reconciliation_request_id,
+            "item_id": item_id,
+            "child_outcome": envelope.data.outcome,
+            "status": reconciled.result["status"],
+        }
+
+    combined = dict(recovered_outcome.result)
+    combined["reconciliation_required"] = []
+    combined["reconciliation"] = summary
+    return RequestOutcome(result=combined, replayed=recovered_outcome.replayed)

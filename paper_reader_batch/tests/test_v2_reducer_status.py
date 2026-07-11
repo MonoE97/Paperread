@@ -18,17 +18,20 @@ from paper_reader_batch.v2_worker import claim_worker
 
 
 def _item(item_id: str, *, worker: str = "succeeded", write: str = "not_applicable") -> StateItem:
+    zotero = write != "not_applicable"
     values = {
         "item_id": item_id,
-        "input_type": "pdf_path",
-        "expected_output": "local_note",
+        "input_type": "zotero_item" if zotero else "pdf_path",
+        "expected_output": "zotero_note_candidate" if zotero else "local_note",
         "worker_status": worker,
-        "local_prepare_status": "prepared",
-        "local_prepare_result_sha256": "1" * 64,
+        "local_prepare_status": "not_applicable" if zotero else "prepared",
+        "local_prepare_result_sha256": None if zotero else "1" * 64,
         "write_status": write,
     }
     if worker == "succeeded":
         values.update(worker_result_sha256="2" * 64, candidate_sha256="3" * 64)
+        if zotero:
+            values.update(resolved_zotero_item_key="PARENT1")
     elif worker == "claimed":
         values.update(
             worker_attempt_count=1,
@@ -47,6 +50,25 @@ def _item(item_id: str, *, worker: str = "succeeded", write: str = "not_applicab
                 "expires_at": "2026-07-10T00:15:00Z",
             },
         )
+    if write in {"uncertain", "blocked"}:
+        values.update(
+            write_attempt_count=1,
+            write_last_writer_id="writer",
+            write_last_claim_id="33333333-3333-4333-8333-333333333333",
+            write_last_attempt_id="44444444-4444-4444-8444-444444444444",
+            write_last_lease_token_sha256="5" * 64,
+            write_started_event_sha256="6" * 64,
+            authorization_sha256="7" * 64,
+            authorization_nonce_sha256="8" * 64,
+            external_claim_id="33333333-3333-4333-8333-333333333333",
+            write_last_authorization_sha256="7" * 64,
+            write_last_authorization_nonce_sha256="8" * 64,
+            write_last_external_claim_id="33333333-3333-4333-8333-333333333333",
+            write_failure_code="write_outcome_uncertain" if write == "uncertain" else "write_verification_blocked",
+            write_failure_message="attention required",
+        )
+    if write == "blocked":
+        values.update(reconciliation_sha256="9" * 64)
     return StateItem(**values)
 
 

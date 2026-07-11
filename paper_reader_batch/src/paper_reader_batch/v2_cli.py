@@ -20,6 +20,7 @@ from paper_reader_batch.v2_manifest import (
 )
 from paper_reader_batch.v2_receipts import RequestOutcome, validate_request_id
 from paper_reader_batch.v2_run import initialize_run, recover_run, run_status, validate_run
+from paper_reader_batch.v2_report import run_report as generate_report
 from paper_reader_batch.v2_worker import (
     claim_worker,
     finish_worker,
@@ -35,9 +36,20 @@ from paper_reader_batch.v2_local_prepare import (
     renew_local_prepare,
     run_local_prepare,
 )
+from paper_reader_batch.v2_write import (
+    begin_write,
+    claim_write,
+    commit_write,
+    mark_write_uncertain,
+    preview_write,
+    reconcile_write,
+    release_write,
+    renew_write,
+    retry_write,
+)
 
 
-PUBLIC_GROUPS = frozenset({"manifest", "run", "worker", "local-prepare"})
+PUBLIC_GROUPS = frozenset({"manifest", "run", "worker", "local-prepare", "write"})
 
 
 def _emit_result(result: CommandResult) -> None:
@@ -215,10 +227,17 @@ local_prepare_app = typer.Typer(
     add_completion=False,
     rich_markup_mode=None,
 )
+write_app = typer.Typer(
+    help="Recoverable Zotero write coordination.",
+    no_args_is_help=True,
+    add_completion=False,
+    rich_markup_mode=None,
+)
 app.add_typer(manifest_app, name="manifest")
 app.add_typer(run_app, name="run")
 app.add_typer(worker_app, name="worker")
 app.add_typer(local_prepare_app, name="local-prepare")
+app.add_typer(write_app, name="write")
 
 
 def _version_callback(value: bool) -> bool:
@@ -378,12 +397,29 @@ def run_status_command(run_dir: Path) -> None:
 def run_recover_command(
     run_dir: Path,
     request_id: str = typer.Option(..., "--request-id"),
+    paper_reader_root: Path | None = typer.Option(None, "--paper-reader-root"),
+    reconciliation_timeout_seconds: int = typer.Option(
+        60,
+        "--reconciliation-timeout-seconds",
+        min=1,
+        max=600,
+    ),
 ) -> None:
     _run_mutation(
         "run.recover",
         request_id,
-        lambda: recover_run(run_dir, request_id=request_id),
+        lambda: recover_run(
+            run_dir,
+            request_id=request_id,
+            paper_reader_root=paper_reader_root,
+            reconciliation_timeout_seconds=reconciliation_timeout_seconds,
+        ),
     )
+
+
+@run_app.command("report")
+def run_report_command(run_dir: Path) -> None:
+    _run_read("run.report", lambda: generate_report(run_dir))
 
 
 @worker_app.command("claim")
@@ -650,5 +686,217 @@ def local_prepare_run_command(
             paper_reader_root=paper_reader_root,
             request_id=request_id,
             timeout_seconds=timeout_seconds,
+        ),
+    )
+
+
+@write_app.command("claim")
+def write_claim_command(
+    run_dir: Path,
+    writer_id: str = typer.Option(..., "--writer-id"),
+    request_id: str = typer.Option(..., "--request-id"),
+    lease_seconds: int = typer.Option(120, "--lease-seconds", min=1, max=300),
+) -> None:
+    _run_mutation(
+        "write.claim",
+        request_id,
+        lambda: claim_write(
+            run_dir,
+            writer_id=writer_id,
+            request_id=request_id,
+            lease_seconds=lease_seconds,
+        ),
+    )
+
+
+@write_app.command("preview")
+def write_preview_command(
+    run_dir: Path,
+    item_id: str,
+    writer_id: str = typer.Option(..., "--writer-id"),
+    claim_id: str = typer.Option(..., "--claim-id"),
+    lease_token: str = typer.Option(..., "--lease-token"),
+    write_attempt_id: str = typer.Option(..., "--write-attempt-id"),
+) -> None:
+    _run_read(
+        "write.preview",
+        lambda: preview_write(
+            run_dir,
+            item_id,
+            writer_id=writer_id,
+            claim_id=claim_id,
+            lease_token=lease_token,
+            write_attempt_id=write_attempt_id,
+        ),
+    )
+
+
+@write_app.command("renew")
+def write_renew_command(
+    run_dir: Path,
+    item_id: str,
+    writer_id: str = typer.Option(..., "--writer-id"),
+    claim_id: str = typer.Option(..., "--claim-id"),
+    lease_token: str = typer.Option(..., "--lease-token"),
+    write_attempt_id: str = typer.Option(..., "--write-attempt-id"),
+    request_id: str = typer.Option(..., "--request-id"),
+    lease_seconds: int = typer.Option(120, "--lease-seconds", min=1, max=300),
+) -> None:
+    _run_mutation(
+        "write.renew",
+        request_id,
+        lambda: renew_write(
+            run_dir,
+            item_id,
+            writer_id=writer_id,
+            claim_id=claim_id,
+            lease_token=lease_token,
+            write_attempt_id=write_attempt_id,
+            request_id=request_id,
+            lease_seconds=lease_seconds,
+        ),
+    )
+
+
+@write_app.command("release")
+def write_release_command(
+    run_dir: Path,
+    item_id: str,
+    writer_id: str = typer.Option(..., "--writer-id"),
+    claim_id: str = typer.Option(..., "--claim-id"),
+    lease_token: str = typer.Option(..., "--lease-token"),
+    write_attempt_id: str = typer.Option(..., "--write-attempt-id"),
+    request_id: str = typer.Option(..., "--request-id"),
+) -> None:
+    _run_mutation(
+        "write.release",
+        request_id,
+        lambda: release_write(
+            run_dir,
+            item_id,
+            writer_id=writer_id,
+            claim_id=claim_id,
+            lease_token=lease_token,
+            write_attempt_id=write_attempt_id,
+            request_id=request_id,
+        ),
+    )
+
+
+@write_app.command("begin")
+def write_begin_command(
+    run_dir: Path,
+    item_id: str,
+    writer_id: str = typer.Option(..., "--writer-id"),
+    claim_id: str = typer.Option(..., "--claim-id"),
+    lease_token: str = typer.Option(..., "--lease-token"),
+    write_attempt_id: str = typer.Option(..., "--write-attempt-id"),
+    authorization: Path = typer.Option(..., "--authorization"),
+    request_id: str = typer.Option(..., "--request-id"),
+) -> None:
+    _run_mutation(
+        "write.begin",
+        request_id,
+        lambda: begin_write(
+            run_dir,
+            item_id,
+            writer_id=writer_id,
+            claim_id=claim_id,
+            lease_token=lease_token,
+            write_attempt_id=write_attempt_id,
+            authorization_path=authorization,
+            request_id=request_id,
+        ),
+    )
+
+
+@write_app.command("commit")
+def write_commit_command(
+    run_dir: Path,
+    item_id: str,
+    writer_id: str = typer.Option(..., "--writer-id"),
+    claim_id: str = typer.Option(..., "--claim-id"),
+    lease_token: str = typer.Option(..., "--lease-token"),
+    write_attempt_id: str = typer.Option(..., "--write-attempt-id"),
+    result: Path = typer.Option(..., "--result"),
+    request_id: str = typer.Option(..., "--request-id"),
+) -> None:
+    _run_mutation(
+        "write.commit",
+        request_id,
+        lambda: commit_write(
+            run_dir,
+            item_id,
+            writer_id=writer_id,
+            claim_id=claim_id,
+            lease_token=lease_token,
+            write_attempt_id=write_attempt_id,
+            result_path=result,
+            request_id=request_id,
+        ),
+    )
+
+
+@write_app.command("mark-uncertain")
+def write_mark_uncertain_command(
+    run_dir: Path,
+    item_id: str,
+    writer_id: str = typer.Option(..., "--writer-id"),
+    claim_id: str = typer.Option(..., "--claim-id"),
+    lease_token: str = typer.Option(..., "--lease-token"),
+    write_attempt_id: str = typer.Option(..., "--write-attempt-id"),
+    reason: str = typer.Option(..., "--reason"),
+    request_id: str = typer.Option(..., "--request-id"),
+) -> None:
+    _run_mutation(
+        "write.mark-uncertain",
+        request_id,
+        lambda: mark_write_uncertain(
+            run_dir,
+            item_id,
+            writer_id=writer_id,
+            claim_id=claim_id,
+            lease_token=lease_token,
+            write_attempt_id=write_attempt_id,
+            reason=reason,
+            request_id=request_id,
+        ),
+    )
+
+
+@write_app.command("reconcile")
+def write_reconcile_command(
+    run_dir: Path,
+    item_id: str,
+    readback: Path = typer.Option(..., "--readback"),
+    request_id: str = typer.Option(..., "--request-id"),
+) -> None:
+    _run_mutation(
+        "write.reconcile",
+        request_id,
+        lambda: reconcile_write(
+            run_dir,
+            item_id,
+            readback_path=readback,
+            request_id=request_id,
+        ),
+    )
+
+
+@write_app.command("retry")
+def write_retry_command(
+    run_dir: Path,
+    item_id: str,
+    acknowledge_no_match: bool = typer.Option(False, "--acknowledge-no-match"),
+    request_id: str = typer.Option(..., "--request-id"),
+) -> None:
+    _run_mutation(
+        "write.retry",
+        request_id,
+        lambda: retry_write(
+            run_dir,
+            item_id,
+            acknowledge_no_match=acknowledge_no_match,
+            request_id=request_id,
         ),
     )

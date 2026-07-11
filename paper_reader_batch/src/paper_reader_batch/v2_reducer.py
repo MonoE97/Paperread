@@ -23,11 +23,22 @@ from paper_reader_batch.v2_contracts import (
     ResumedLocalPrepareLease,
     StateItem,
     STATE_SCHEMA_VERSION,
+    WriteClaimedData,
+    WriteLeaseMutationData,
+    WriteLeaseState,
+    WriteReconciledData,
+    WriteRetriedData,
+    WriteStartedData,
+    WriteUncertainData,
+    WriteWrittenData,
+    ZoteroItemManifestItem,
+    ZoteroTitleManifestItem,
 )
 from paper_reader_batch.v2_errors import BatchRuntimeError
 
 
 MAX_TASK_LEASE_SECONDS = 3600
+MAX_WRITE_LEASE_SECONDS = 300
 
 
 def _corrupt(message: str) -> BatchRuntimeError:
@@ -217,6 +228,29 @@ def _same_lease(lease, data) -> bool:
     )
 
 
+def _same_write_lease(lease: WriteLeaseState | None, data) -> bool:
+    return bool(
+        lease
+        and lease.writer_id == data.writer_id
+        and lease.claim_id == data.claim_id
+        and lease.write_attempt_id == data.write_attempt_id
+        and lease.attempt_number == data.attempt_number
+        and lease.lease_token_sha256 == data.lease_token_sha256
+        and lease.candidate_sha256 == data.candidate_sha256
+    )
+
+
+def _same_last_write_identity(item: StateItem, data) -> bool:
+    return bool(
+        item.write_last_writer_id == data.writer_id
+        and item.write_last_claim_id == data.claim_id
+        and item.write_last_attempt_id == data.write_attempt_id
+        and item.write_attempt_count == data.attempt_number
+        and item.write_last_lease_token_sha256 == data.lease_token_sha256
+        and item.candidate_sha256 == data.candidate_sha256
+    )
+
+
 def _timestamp(value: str) -> datetime:
     try:
         return datetime.fromisoformat(value[:-1] + "+00:00")
@@ -358,6 +392,354 @@ def _apply_finished(state: BatchState, manifest: BatchManifest, event: BatchEven
     return _with_items(state, items, event)
 
 
+def _apply_write_claimed(
+    state: BatchState,
+    manifest: BatchManifest,
+    event: BatchEvent,
+    data: WriteClaimedData,
+) -> BatchState:
+    if manifest.write_policy != "zotero_write":
+        raise _corrupt("write claim is forbidden by manifest write policy")
+    manifest_item = _manifest_item(manifest, data.item_id)
+    if isinstance(manifest_item, PdfManifestItem):
+        raise _corrupt(f"write claim targets a local PDF item: {data.item_id}")
+    if any(item.write_status in {"claimed", "started", "uncertain"} for item in state.items):
+        raise _corrupt("write claim violates the serial write lane")
+
+    index = _state_item_index(state, data.item_id)
+    items = list(state.items)
+    item = items[index]
+    issued_at = _timestamp(data.issued_at)
+    expires_at = _timestamp(data.expires_at)
+    parent_identity_matches = (
+        isinstance(manifest_item, ZoteroItemManifestItem)
+        and item.resolved_zotero_item_key == manifest_item.source.item_key
+    ) or (
+        isinstance(manifest_item, ZoteroTitleManifestItem)
+        and (
+            manifest_item.source.resolved_item_key is None
+            or item.resolved_zotero_item_key == manifest_item.source.resolved_item_key
+        )
+    )
+    if (
+        item.write_status != "queued"
+        or item.write_lease is not None
+        or item.worker_status != "succeeded"
+        or item.resolved_zotero_item_key is None
+        or not parent_identity_matches
+        or item.candidate_sha256 is None
+        or data.candidate_sha256 != item.candidate_sha256
+        or data.attempt_number != item.write_attempt_count + 1
+        or data.issued_at != event.occurred_at
+        or expires_at <= issued_at
+        or expires_at - issued_at > timedelta(seconds=MAX_WRITE_LEASE_SECONDS)
+    ):
+        raise _corrupt(f"illegal or non-authoritative write claim: {data.item_id}")
+    if item.write_pending_attempt_id is not None and data.write_attempt_id != item.write_pending_attempt_id:
+        raise _corrupt(f"write claim does not consume the retry-bound attempt: {data.item_id}")
+    if item.write_started_event_sha256 is not None or item.authorization_sha256 is not None:
+        raise _corrupt(f"queued write retains an active authorization: {data.item_id}")
+    if (
+        data.claim_id == item.write_last_claim_id
+        or data.write_attempt_id == item.write_last_attempt_id
+        or data.lease_token_sha256 == item.write_last_lease_token_sha256
+    ):
+        raise _corrupt(f"write claim reuses the previous attempt identity: {data.item_id}")
+    for other in state.items:
+        if other.item_id == data.item_id:
+            continue
+        if (
+            data.claim_id == other.write_last_claim_id
+            or data.write_attempt_id == other.write_last_attempt_id
+            or data.lease_token_sha256 == other.write_last_lease_token_sha256
+        ):
+            raise _corrupt(f"write claim reuses another item's attempt identity: {data.item_id}")
+
+    lease = WriteLeaseState(
+        writer_id=data.writer_id,
+        claim_id=data.claim_id,
+        write_attempt_id=data.write_attempt_id,
+        attempt_number=data.attempt_number,
+        lease_token_sha256=data.lease_token_sha256,
+        issued_at=data.issued_at,
+        expires_at=data.expires_at,
+        candidate_sha256=data.candidate_sha256,
+    )
+    items[index] = item.model_copy(
+        update={
+            "write_status": "claimed",
+            "write_attempt_count": data.attempt_number,
+            "write_lease": lease,
+            "write_last_writer_id": data.writer_id,
+            "write_last_claim_id": data.claim_id,
+            "write_last_attempt_id": data.write_attempt_id,
+            "write_last_lease_token_sha256": data.lease_token_sha256,
+            "write_pending_attempt_id": None,
+            "write_result_sha256": None,
+            "reconciliation_sha256": None,
+            "write_failure_code": None,
+            "write_failure_message": None,
+        }
+    )
+    return _with_items(state, items, event)
+
+
+def _apply_write_lease_mutation(
+    state: BatchState,
+    event: BatchEvent,
+    data: WriteLeaseMutationData,
+) -> BatchState:
+    index = _state_item_index(state, data.item_id)
+    items = list(state.items)
+    item = items[index]
+    lease = item.write_lease
+    allowed_statuses = {"claimed", "started"} if data.kind == "write.renewed" else {"claimed"}
+    if item.write_status not in allowed_statuses or not _same_write_lease(lease, data):
+        raise _corrupt(f"write lease mutation identity mismatch: {data.item_id}")
+    assert lease is not None
+    occurred_at = _timestamp(event.occurred_at)
+    authoritative_expiry = _timestamp(lease.expires_at)
+
+    if data.kind == "write.renewed":
+        if data.issued_at is None or data.expires_at is None:
+            raise _corrupt("write renew event is missing lease times")
+        issued_at = _timestamp(data.issued_at)
+        expires_at = _timestamp(data.expires_at)
+        if (
+            data.issued_at != event.occurred_at
+            or occurred_at >= authoritative_expiry
+            or issued_at < _timestamp(lease.issued_at)
+            or expires_at <= issued_at
+            or expires_at <= authoritative_expiry
+            or expires_at - issued_at > timedelta(seconds=MAX_WRITE_LEASE_SECONDS)
+        ):
+            raise _corrupt("write renew event has non-authoritative lease times")
+        update = {
+            "write_lease": lease.model_copy(
+                update={"issued_at": data.issued_at, "expires_at": data.expires_at}
+            )
+        }
+    else:
+        if data.issued_at is not None or data.expires_at is not None:
+            raise _corrupt("write release/expiry event must not carry replacement lease times")
+        if data.kind == "write.lease_expired":
+            if occurred_at < authoritative_expiry:
+                raise _corrupt("write lease expiry event occurred before authoritative expiry")
+        elif occurred_at >= authoritative_expiry:
+            raise _corrupt("write release event occurred after authoritative expiry")
+        update = {"write_status": "queued", "write_lease": None}
+    items[index] = item.model_copy(update=update)
+    return _with_items(state, items, event)
+
+
+def _apply_write_started(
+    state: BatchState,
+    event: BatchEvent,
+    data: WriteStartedData,
+) -> BatchState:
+    index = _state_item_index(state, data.item_id)
+    items = list(state.items)
+    item = items[index]
+    lease = item.write_lease
+    if item.write_status != "claimed" or not _same_write_lease(lease, data):
+        raise _corrupt(f"write start identity mismatch: {data.item_id}")
+    assert lease is not None
+    if (
+        data.started_at != event.occurred_at
+        or not (_timestamp(lease.issued_at) <= _timestamp(event.occurred_at) < _timestamp(lease.expires_at))
+        or data.external_claim_id != data.claim_id
+        or item.authorization_sha256 is not None
+        or item.authorization_nonce_sha256 is not None
+        or item.external_claim_id is not None
+        or data.authorization_sha256 == item.write_last_authorization_sha256
+        or data.authorization_nonce_sha256 == item.write_last_authorization_nonce_sha256
+    ):
+        raise _corrupt(f"write start has stale authorization or non-authoritative time: {data.item_id}")
+    for other in state.items:
+        if other.item_id == data.item_id:
+            continue
+        if (
+            data.authorization_sha256 == other.write_last_authorization_sha256
+            or data.authorization_nonce_sha256 == other.write_last_authorization_nonce_sha256
+        ):
+            raise _corrupt(f"write start reuses another item's authorization: {data.item_id}")
+
+    items[index] = item.model_copy(
+        update={
+            "write_status": "started",
+            "write_started_event_sha256": event.event_sha256,
+            "authorization_sha256": data.authorization_sha256,
+            "authorization_nonce_sha256": data.authorization_nonce_sha256,
+            "external_claim_id": data.external_claim_id,
+            "write_last_authorization_sha256": data.authorization_sha256,
+            "write_last_authorization_nonce_sha256": data.authorization_nonce_sha256,
+            "write_last_external_claim_id": data.external_claim_id,
+            "write_failure_code": None,
+            "write_failure_message": None,
+        }
+    )
+    return _with_items(state, items, event)
+
+
+def _apply_write_written(
+    state: BatchState,
+    manifest: BatchManifest,
+    event: BatchEvent,
+    data: WriteWrittenData,
+) -> BatchState:
+    index = _state_item_index(state, data.item_id)
+    items = list(state.items)
+    item = items[index]
+    lease = item.write_lease
+    manifest_item = _manifest_item(manifest, data.item_id)
+    if item.write_status != "started" or not _same_write_lease(lease, data):
+        raise _corrupt(f"write commit identity mismatch: {data.item_id}")
+    assert lease is not None
+    if (
+        _timestamp(event.occurred_at) >= _timestamp(lease.expires_at)
+        or data.authorization_sha256 != item.authorization_sha256
+        or isinstance(manifest_item, PdfManifestItem)
+        or data.parent_key != item.resolved_zotero_item_key
+    ):
+        raise _corrupt(f"write commit has stale authorization, parent, or lease: {data.item_id}")
+    items[index] = item.model_copy(
+        update={
+            "write_status": "written",
+            "write_lease": None,
+            "write_result_sha256": data.result_sha256,
+            "reconciliation_sha256": None,
+            "write_failure_code": None,
+            "write_failure_message": None,
+        }
+    )
+    return _with_items(state, items, event)
+
+
+def _apply_write_uncertain(
+    state: BatchState,
+    event: BatchEvent,
+    data: WriteUncertainData,
+) -> BatchState:
+    index = _state_item_index(state, data.item_id)
+    items = list(state.items)
+    item = items[index]
+    lease = item.write_lease
+    if item.write_status != "started" or not _same_write_lease(lease, data):
+        raise _corrupt(f"write uncertain identity mismatch: {data.item_id}")
+    assert lease is not None
+    if data.authorization_sha256 != item.authorization_sha256:
+        raise _corrupt(f"write uncertain authorization mismatch: {data.item_id}")
+    occurred_at = _timestamp(event.occurred_at)
+    expires_at = _timestamp(lease.expires_at)
+    if data.kind == "write.lease_expired_uncertain":
+        if occurred_at < expires_at:
+            raise _corrupt("started write expiry event occurred before authoritative expiry")
+    elif occurred_at >= expires_at:
+        raise _corrupt("active write uncertain event occurred after authoritative expiry")
+    items[index] = item.model_copy(
+        update={
+            "write_status": "uncertain",
+            "write_lease": None,
+            "write_failure_code": "write_outcome_uncertain",
+            "write_failure_message": data.reason,
+        }
+    )
+    return _with_items(state, items, event)
+
+
+def _apply_write_reconciled(
+    state: BatchState,
+    event: BatchEvent,
+    data: WriteReconciledData,
+) -> BatchState:
+    index = _state_item_index(state, data.item_id)
+    items = list(state.items)
+    item = items[index]
+    if (
+        item.write_status != "uncertain"
+        or item.write_lease is not None
+        or not _same_last_write_identity(item, data)
+        or data.authorization_sha256 != item.authorization_sha256
+    ):
+        raise _corrupt(f"write reconciliation identity mismatch: {data.item_id}")
+    if data.outcome == "verified":
+        status = "written"
+        failure_code = None
+        failure_message = None
+    elif data.outcome == "not_found":
+        status = "retry_confirmation_required"
+        failure_code = "write_not_found"
+        failure_message = "read-only reconciliation found no exact note match"
+    elif data.outcome == "ambiguous":
+        status = "blocked"
+        failure_code = "write_reconciliation_ambiguous"
+        failure_message = "read-only reconciliation found multiple exact note matches"
+    else:
+        status = "blocked"
+        failure_code = "write_verification_blocked"
+        failure_message = "the unique located note failed full verification"
+    items[index] = item.model_copy(
+        update={
+            "write_status": status,
+            "reconciliation_sha256": data.reconciliation_sha256,
+            "write_failure_code": failure_code,
+            "write_failure_message": failure_message,
+        }
+    )
+    return _with_items(state, items, event)
+
+
+def _apply_write_retried(
+    state: BatchState,
+    event: BatchEvent,
+    data: WriteRetriedData,
+) -> BatchState:
+    index = _state_item_index(state, data.item_id)
+    items = list(state.items)
+    item = items[index]
+    if (
+        item.write_status != "retry_confirmation_required"
+        or item.write_lease is not None
+        or data.acknowledged_no_match is not True
+        or item.write_last_writer_id != data.previous_writer_id
+        or item.write_last_claim_id != data.previous_claim_id
+        or item.write_last_attempt_id != data.previous_write_attempt_id
+        or item.write_attempt_count != data.previous_attempt_number
+        or item.write_last_lease_token_sha256 != data.previous_lease_token_sha256
+        or item.candidate_sha256 != data.candidate_sha256
+        or item.authorization_sha256 != data.authorization_sha256
+        or item.authorization_nonce_sha256 != data.previous_authorization_nonce_sha256
+        or item.external_claim_id != data.previous_external_claim_id
+        or item.reconciliation_sha256 != data.reconciliation_sha256
+        or data.next_attempt_number != item.write_attempt_count + 1
+        or data.next_write_attempt_id == data.previous_write_attempt_id
+    ):
+        raise _corrupt(f"write retry does not bind an acknowledged no-match attempt: {data.item_id}")
+    for other in state.items:
+        if other.item_id == data.item_id:
+            continue
+        if data.next_write_attempt_id in {
+            other.write_last_attempt_id,
+            other.write_pending_attempt_id,
+        }:
+            raise _corrupt(f"write retry reuses another item's attempt identity: {data.item_id}")
+    items[index] = item.model_copy(
+        update={
+            "write_status": "queued",
+            "write_pending_attempt_id": data.next_write_attempt_id,
+            "write_started_event_sha256": None,
+            "authorization_sha256": None,
+            "authorization_nonce_sha256": None,
+            "external_claim_id": None,
+            "write_result_sha256": None,
+            "reconciliation_sha256": None,
+            "write_failure_code": None,
+            "write_failure_message": None,
+        }
+    )
+    return _with_items(state, items, event)
+
+
 def apply_event(state: BatchState, manifest: BatchManifest, event: BatchEvent) -> BatchState:
     if event.sequence != state.next_sequence or event.previous_event_sha256 != state.latest_event_sha256:
         raise _corrupt("event sequence or previous hash does not match reducer state")
@@ -372,6 +754,20 @@ def apply_event(state: BatchState, manifest: BatchManifest, event: BatchEvent) -
         return _apply_lease_mutation(state, event, data)
     if isinstance(data, FinishedData):
         return _apply_finished(state, manifest, event, data)
+    if isinstance(data, WriteClaimedData):
+        return _apply_write_claimed(state, manifest, event, data)
+    if isinstance(data, WriteLeaseMutationData):
+        return _apply_write_lease_mutation(state, event, data)
+    if isinstance(data, WriteStartedData):
+        return _apply_write_started(state, event, data)
+    if isinstance(data, WriteWrittenData):
+        return _apply_write_written(state, manifest, event, data)
+    if isinstance(data, WriteUncertainData):
+        return _apply_write_uncertain(state, event, data)
+    if isinstance(data, WriteReconciledData):
+        return _apply_write_reconciled(state, event, data)
+    if isinstance(data, WriteRetriedData):
+        return _apply_write_retried(state, event, data)
     if isinstance(data, RetriedData):
         items = list(state.items)
         index = _state_item_index(state, data.item_id)

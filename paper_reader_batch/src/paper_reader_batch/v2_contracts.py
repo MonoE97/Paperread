@@ -284,11 +284,19 @@ class StateItem(StrictModel):
     ]
     write_attempt_count: NonNegativeInt = 0
     write_lease: WriteLeaseState | None = None
+    write_last_writer_id: NonEmptyString | None = None
+    write_last_claim_id: UuidString | None = None
+    write_last_attempt_id: UuidString | None = None
+    write_last_lease_token_sha256: Sha256 | None = None
+    write_pending_attempt_id: UuidString | None = None
     candidate_sha256: Sha256 | None = None
     write_started_event_sha256: Sha256 | None = None
     authorization_sha256: Sha256 | None = None
     authorization_nonce_sha256: Sha256 | None = None
     external_claim_id: UuidString | None = None
+    write_last_authorization_sha256: Sha256 | None = None
+    write_last_authorization_nonce_sha256: Sha256 | None = None
+    write_last_external_claim_id: UuidString | None = None
     write_result_sha256: Sha256 | None = None
     reconciliation_sha256: Sha256 | None = None
     write_failure_code: NonEmptyString | None = None
@@ -309,6 +317,106 @@ class StateItem(StrictModel):
                 or self.local_prepare_lease.attempt_number != self.local_prepare_attempt_count
             ):
                 raise ValueError("local prepare lease lane/attempt must match local state")
+        write_active = self.write_status in {"claimed", "started"}
+        if write_active != (self.write_lease is not None):
+            raise ValueError("write claimed/started state and active lease must be present together")
+        write_last_identity = (
+            self.write_last_writer_id,
+            self.write_last_claim_id,
+            self.write_last_attempt_id,
+            self.write_last_lease_token_sha256,
+        )
+        if any(value is not None for value in write_last_identity) != all(
+            value is not None for value in write_last_identity
+        ):
+            raise ValueError("write last identity must be all present or all absent")
+        if self.write_lease is not None:
+            if (
+                self.write_lease.attempt_number != self.write_attempt_count
+                or self.write_lease.writer_id != self.write_last_writer_id
+                or self.write_lease.claim_id != self.write_last_claim_id
+                or self.write_lease.write_attempt_id != self.write_last_attempt_id
+                or self.write_lease.lease_token_sha256 != self.write_last_lease_token_sha256
+                or self.write_lease.candidate_sha256 != self.candidate_sha256
+            ):
+                raise ValueError("write lease identity/candidate must match write state")
+        if self.write_pending_attempt_id is not None:
+            if self.write_status != "queued" or self.write_lease is not None:
+                raise ValueError("pending write attempt requires queued state without an active lease")
+            if self.write_pending_attempt_id == self.write_last_attempt_id:
+                raise ValueError("pending write attempt must be new")
+        active_authorization = (
+            self.authorization_sha256,
+            self.authorization_nonce_sha256,
+            self.external_claim_id,
+            self.write_started_event_sha256,
+        )
+        if any(value is not None for value in active_authorization) != all(
+            value is not None for value in active_authorization
+        ):
+            raise ValueError("active write authorization binding must be all present or all absent")
+        last_authorization = (
+            self.write_last_authorization_sha256,
+            self.write_last_authorization_nonce_sha256,
+            self.write_last_external_claim_id,
+        )
+        if any(value is not None for value in last_authorization) != all(
+            value is not None for value in last_authorization
+        ):
+            raise ValueError("last write authorization binding must be all present or all absent")
+        if self.authorization_sha256 is not None:
+            if (
+                self.authorization_sha256 != self.write_last_authorization_sha256
+                or self.authorization_nonce_sha256 != self.write_last_authorization_nonce_sha256
+                or self.external_claim_id != self.write_last_external_claim_id
+                or self.external_claim_id != self.write_last_claim_id
+            ):
+                raise ValueError("active write authorization must match the current write claim")
+        if self.write_status == "started" and self.authorization_sha256 is None:
+            raise ValueError("started write state requires an active authorization binding")
+        write_failure = self.write_failure_code is not None or self.write_failure_message is not None
+        if self.write_result_sha256 is not None and self.reconciliation_sha256 is not None:
+            raise ValueError("write result and reconciliation result are mutually exclusive")
+        if self.write_status in {
+            "not_applicable",
+            "awaiting_candidate",
+            "queued",
+            "claimed",
+            "prepared_only",
+        }:
+            if (
+                self.authorization_sha256 is not None
+                or self.write_result_sha256 is not None
+                or self.reconciliation_sha256 is not None
+                or write_failure
+            ):
+                raise ValueError("pre-start write state forbids active authorization and terminal artifacts")
+        elif self.write_status == "started":
+            if self.write_result_sha256 is not None or self.reconciliation_sha256 is not None or write_failure:
+                raise ValueError("started write state forbids terminal artifacts and failure")
+        elif self.write_status == "uncertain":
+            if (
+                self.authorization_sha256 is None
+                or self.write_result_sha256 is not None
+                or self.reconciliation_sha256 is not None
+                or not write_failure
+            ):
+                raise ValueError("uncertain write state requires authorization and typed failure only")
+        elif self.write_status in {"retry_confirmation_required", "blocked"}:
+            if (
+                self.authorization_sha256 is None
+                or self.write_result_sha256 is not None
+                or self.reconciliation_sha256 is None
+                or not write_failure
+            ):
+                raise ValueError("reconciled write attention state requires authorization, result, and failure")
+        elif self.write_status == "written":
+            if (
+                self.authorization_sha256 is None
+                or (self.write_result_sha256 is None) == (self.reconciliation_sha256 is None)
+                or write_failure
+            ):
+                raise ValueError("written write state requires authorization and exactly one successful result")
         worker_failure = self.worker_failure_code is not None or self.worker_failure_message is not None
         local_failure = self.local_prepare_failure_code is not None or self.local_prepare_failure_message is not None
         coordination_binding = (
@@ -363,6 +471,32 @@ class BatchState(StrictModel):
         "succeeded",
     ]
     items: Annotated[list[StateItem], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def validate_cross_item_write_identities(self) -> "BatchState":
+        for field in (
+            "write_last_claim_id",
+            "write_last_attempt_id",
+            "write_last_lease_token_sha256",
+            "write_last_authorization_sha256",
+            "write_last_authorization_nonce_sha256",
+        ):
+            values = [getattr(item, field) for item in self.items if getattr(item, field) is not None]
+            if len(values) != len(set(values)):
+                raise ValueError(f"{field} must be unique across batch items")
+        pending = [
+            item.write_pending_attempt_id
+            for item in self.items
+            if item.write_pending_attempt_id is not None
+        ]
+        last_attempts = {
+            item.write_last_attempt_id
+            for item in self.items
+            if item.write_last_attempt_id is not None
+        }
+        if len(pending) != len(set(pending)) or set(pending) & last_attempts:
+            raise ValueError("pending write attempt ids must be globally new and unique")
+        return self
 
 
 class ClaimAssignment(StrictModel):
@@ -497,7 +631,7 @@ class WriteClaimedData(StrictModel):
 
 
 class WriteLeaseMutationData(StrictModel):
-    kind: Literal["write.renewed", "write.released"]
+    kind: Literal["write.renewed", "write.released", "write.lease_expired"]
     item_id: ItemId
     writer_id: NonEmptyString
     claim_id: UuidString
@@ -573,10 +707,16 @@ class WriteRetriedData(StrictModel):
     previous_writer_id: NonEmptyString
     previous_claim_id: UuidString
     previous_write_attempt_id: UuidString
+    previous_attempt_number: PositiveInt
     previous_lease_token_sha256: Sha256
     candidate_sha256: Sha256
     authorization_sha256: Sha256
+    previous_authorization_nonce_sha256: Sha256
+    previous_external_claim_id: UuidString
+    reconciliation_sha256: Sha256
     acknowledged_no_match: bool
+    next_write_attempt_id: UuidString
+    next_attempt_number: PositiveInt
 
 
 EventData: TypeAlias = Annotated[
@@ -713,6 +853,14 @@ class WriteResult(StrictModel):
     verification: ArtifactRef
     status: Literal["written"] = "written"
 
+    @model_validator(mode="after")
+    def validate_write_closure(self) -> "WriteResult":
+        if self.external_claim_id != self.claim_id:
+            raise ValueError("external_claim_id must equal the consumed batch claim_id")
+        if self.verification.schema_version != "paper_reader.verification.v2":
+            raise ValueError("verification must use paper_reader.verification.v2")
+        return self
+
 
 class ReconciliationResult(StrictModel):
     schema_version: Literal[RECONCILIATION_SCHEMA_VERSION]
@@ -738,6 +886,8 @@ class ReconciliationResult(StrictModel):
     def validate_match_outcome(self) -> "ReconciliationResult":
         if self.match_count != len(self.matched_note_keys):
             raise ValueError("match_count must equal len(matched_note_keys)")
+        if len(set(self.matched_note_keys)) != self.match_count:
+            raise ValueError("matched_note_keys must contain distinct exact matches")
         if self.outcome == "not_found":
             if self.match_count != 0 or self.matched_note_key is not None or self.verification is not None:
                 raise ValueError("not_found requires zero matches and no selected note or verification")
@@ -753,6 +903,8 @@ class ReconciliationResult(StrictModel):
                 raise ValueError(
                     f"{self.outcome} requires one matching selected note and a full verification artifact"
                 )
+            if self.verification.schema_version != "paper_reader.verification.v2":
+                raise ValueError("reconciliation verification must use paper_reader.verification.v2")
         return self
 
 
@@ -785,6 +937,8 @@ class BatchReport(StrictModel):
     manifest_id: UuidString
     manifest_sha256: Sha256
     generated_at: Rfc3339Utc
+    report_generation_id: Sha256
+    report_markdown_sha256: Sha256
     batch_status: Literal[
         "corrupt",
         "write_uncertain",

@@ -30,9 +30,10 @@ OLD_FLAT_COMMANDS = [
 ]
 PUBLIC_COMMANDS = {
     "manifest": ["from-pdf-folder", "from-pdf-paths", "from-zotero-titles", "from-zotero-collection", "validate"],
-    "run": ["init", "validate", "status", "recover"],
+    "run": ["init", "validate", "status", "recover", "report"],
     "worker": ["claim", "prompt", "renew", "finish", "release", "retry"],
     "local-prepare": ["claim", "renew", "finish", "release", "run"],
+    "write": ["claim", "preview", "renew", "release", "begin", "commit", "mark-uncertain", "reconcile", "retry"],
 }
 MUTATING_COMMANDS = {
     ("manifest", "from-pdf-folder"),
@@ -51,6 +52,14 @@ MUTATING_COMMANDS = {
     ("local-prepare", "finish"),
     ("local-prepare", "release"),
     ("local-prepare", "run"),
+    ("write", "claim"),
+    ("write", "renew"),
+    ("write", "release"),
+    ("write", "begin"),
+    ("write", "commit"),
+    ("write", "mark-uncertain"),
+    ("write", "reconcile"),
+    ("write", "retry"),
 }
 
 
@@ -75,9 +84,9 @@ def test_project_entrypoint_uses_only_v2_grouped_cli() -> None:
 
     help_result = runner.invoke(app, ["--help"], terminal_width=38)
     assert help_result.exit_code == 0, help_result.output
-    for group in ["manifest", "run", "worker", "local-prepare"]:
+    for group in ["manifest", "run", "worker", "local-prepare", "write"]:
         assert group in help_result.output
-    for forbidden in [*OLD_FLAT_COMMANDS, "write"]:
+    for forbidden in OLD_FLAT_COMMANDS:
         assert forbidden not in help_result.output
 
     for group, commands in PUBLIC_COMMANDS.items():
@@ -85,8 +94,6 @@ def test_project_entrypoint_uses_only_v2_grouped_cli() -> None:
         assert result.exit_code == 0, result.output
         for command in commands:
             assert command in result.output
-        if group == "run":
-            assert "report" not in result.output
 
 
 def test_version_is_the_only_non_json_operational_exception_besides_help() -> None:
@@ -94,6 +101,14 @@ def test_version_is_the_only_non_json_operational_exception_besides_help() -> No
     assert result.exit_code == 0, result.output
     assert result.stdout.startswith("paper_reader_batch ")
     assert len(result.stdout.splitlines()) == 1
+
+
+def test_run_recover_exposes_explicit_read_only_reconciliation_delegation() -> None:
+    result = runner.invoke(app, ["run", "recover", "--help"], terminal_width=200)
+
+    assert result.exit_code == 0, result.output
+    assert "--paper-reader-root" in result.output
+    assert "--reconciliation-timeout-seconds" in result.output
 
 
 def test_every_public_command_has_human_help_and_strict_required_arguments() -> None:
@@ -143,12 +158,12 @@ def test_old_flat_commands_are_unreachable_and_do_not_mutate(tmp_path: Path, mon
         assert _tree(tmp_path) == before
 
 
-def test_task5_does_not_expose_write_report_local_retry_or_hidden_now(tmp_path: Path) -> None:
+def test_v2_does_not_expose_flat_report_local_retry_or_hidden_now(tmp_path: Path) -> None:
     cases = [
-        ["write", "claim"],
-        ["run", "report", str(tmp_path)],
+        ["report", str(tmp_path)],
         ["local-prepare", "retry", str(tmp_path)],
         ["worker", "claim", str(tmp_path), "--now", "2026-07-10T00:00:00Z"],
+        ["write", "claim", str(tmp_path), "--writer-id", "writer", "--request-id", "11111111-1111-4111-8111-111111111111", "--now", "2026-07-10T00:00:00Z"],
     ]
     before = _tree(tmp_path)
     for arguments in cases:

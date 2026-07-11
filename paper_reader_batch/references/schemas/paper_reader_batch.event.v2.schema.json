@@ -873,7 +873,8 @@
         "kind": {
           "enum": [
             "write.renewed",
-            "write.released"
+            "write.released",
+            "write.lease_expired"
           ],
           "title": "Kind",
           "type": "string"
@@ -1012,8 +1013,31 @@
           "title": "Kind",
           "type": "string"
         },
+        "next_attempt_number": {
+          "minimum": 1,
+          "title": "Next Attempt Number",
+          "type": "integer"
+        },
+        "next_write_attempt_id": {
+          "title": "Next Write Attempt Id",
+          "type": "string"
+        },
+        "previous_attempt_number": {
+          "minimum": 1,
+          "title": "Previous Attempt Number",
+          "type": "integer"
+        },
+        "previous_authorization_nonce_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Previous Authorization Nonce Sha256",
+          "type": "string"
+        },
         "previous_claim_id": {
           "title": "Previous Claim Id",
+          "type": "string"
+        },
+        "previous_external_claim_id": {
+          "title": "Previous External Claim Id",
           "type": "string"
         },
         "previous_lease_token_sha256": {
@@ -1029,6 +1053,11 @@
           "minLength": 1,
           "title": "Previous Writer Id",
           "type": "string"
+        },
+        "reconciliation_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Reconciliation Sha256",
+          "type": "string"
         }
       },
       "required": [
@@ -1036,10 +1065,16 @@
         "previous_writer_id",
         "previous_claim_id",
         "previous_write_attempt_id",
+        "previous_attempt_number",
         "previous_lease_token_sha256",
         "candidate_sha256",
         "authorization_sha256",
-        "acknowledged_no_match"
+        "previous_authorization_nonce_sha256",
+        "previous_external_claim_id",
+        "reconciliation_sha256",
+        "acknowledged_no_match",
+        "next_write_attempt_id",
+        "next_attempt_number"
       ],
       "title": "WriteRetriedData",
       "type": "object"
@@ -1399,6 +1434,7 @@
           "worker.renewed": "#/$defs/LeaseMutationData",
           "worker.retried": "#/$defs/RetriedData",
           "write.claimed": "#/$defs/WriteClaimedData",
+          "write.lease_expired": "#/$defs/WriteLeaseMutationData",
           "write.lease_expired_uncertain": "#/$defs/WriteUncertainData",
           "write.marked_uncertain": "#/$defs/WriteUncertainData",
           "write.reconciled": "#/$defs/WriteReconciledData",

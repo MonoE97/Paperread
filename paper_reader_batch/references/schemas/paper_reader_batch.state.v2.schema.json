@@ -491,6 +491,94 @@
           "default": null,
           "title": "Write Failure Message"
         },
+        "write_last_attempt_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Write Last Attempt Id"
+        },
+        "write_last_authorization_nonce_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Write Last Authorization Nonce Sha256"
+        },
+        "write_last_authorization_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Write Last Authorization Sha256"
+        },
+        "write_last_claim_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Write Last Claim Id"
+        },
+        "write_last_external_claim_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Write Last External Claim Id"
+        },
+        "write_last_lease_token_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Write Last Lease Token Sha256"
+        },
+        "write_last_writer_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Write Last Writer Id"
+        },
         "write_lease": {
           "anyOf": [
             {
@@ -501,6 +589,18 @@
             }
           ],
           "default": null
+        },
+        "write_pending_attempt_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Write Pending Attempt Id"
         },
         "write_result_sha256": {
           "anyOf": [
