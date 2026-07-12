@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-import paper_reader.local_publication as local_publication
+import paper_reader.candidate_integrity as candidate_integrity
 import paper_reader.local_publish as local_publish_module
 from paper_reader.contracts import PaperReaderCandidate
 
@@ -56,8 +56,7 @@ def test_candidate_build_rehashes_sealed_inputs_and_publishes_immutable_local_ca
     candidate = PaperReaderCandidate.model_validate_json(
         (candidate_dir / "candidate.json").read_bytes()
     )
-    assert hasattr(local_publication, "candidate_core_digest")
-    assert payload["data"]["candidate_digest"] == local_publication.candidate_core_digest(candidate)
+    assert payload["data"]["candidate_digest"] == candidate_integrity.candidate_core_digest(candidate)
     assert payload["data"]["candidate_digest"] == hashlib.sha256(
         (candidate_dir / "candidate.json").read_bytes()
     ).hexdigest()
@@ -346,7 +345,7 @@ def test_local_publish_revalidates_and_atomically_copies_exact_candidate_markdow
         "format": "paper_reader.local-publication-intent.v2-internal",
         "run_id": candidate.run_id,
         "candidate_id": candidate.candidate_id,
-        "candidate_digest": local_publication.candidate_core_digest(candidate),
+        "candidate_digest": candidate_integrity.candidate_core_digest(candidate),
         "target_path": str(target),
         "content_sha256": candidate.content_sha256,
         "content_length": candidate.content_length,
@@ -354,7 +353,7 @@ def test_local_publish_revalidates_and_atomically_copies_exact_candidate_markdow
     receipt_path = Path(payload["data"]["receipt_path"])
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert receipt["format"] == "paper_reader.local-receipt.v2-internal"
-    assert receipt["candidate_digest"] == local_publication.candidate_core_digest(candidate)
+    assert receipt["candidate_digest"] == candidate_integrity.candidate_core_digest(candidate)
     assert receipt["intent_path"] == "publication-intent.json"
     assert receipt["intent_sha256"] == hashlib.sha256(intent_path.read_bytes()).hexdigest()
     assert receipt["content_sha256"] == candidate.content_sha256
@@ -441,14 +440,16 @@ def test_concurrent_local_publish_converges_on_one_exact_publication(tmp_path: P
 
     def publish():
         try:
-            return local_publication.publish_local_candidate(candidate_path)
+            return local_publish_module.publish_local_candidate(candidate_path)
         except Exception as exc:  # asserted below with the real exception preserved
             return exc
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         outcomes = list(executor.map(lambda _index: publish(), range(2)))
 
-    successes = [item for item in outcomes if isinstance(item, local_publication.PublishedLocalCandidate)]
+    successes = [
+        item for item in outcomes if isinstance(item, local_publish_module.PublishedLocalCandidate)
+    ]
     assert len(successes) == 2
     assert not [item for item in outcomes if isinstance(item, Exception)]
     assert successes[0].receipt_path == successes[1].receipt_path

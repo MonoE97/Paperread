@@ -4,7 +4,6 @@ import subprocess
 
 from typer.testing import CliRunner
 
-from paper_reader_batch import cli as legacy_cli
 from paper_reader_batch.v2_cli import app
 from paper_reader_batch.v2_contracts import COMMAND_RESULT_SCHEMA_VERSION
 from paper_reader_batch.v2_errors import BatchRuntimeError
@@ -81,6 +80,7 @@ def _invoke_json(arguments: list[str], *, expected_command: str, ok: bool) -> di
 def test_project_entrypoint_uses_only_v2_grouped_cli() -> None:
     pyproject = (BATCH_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert 'paper_reader_batch = "paper_reader_batch.v2_cli:app"' in pyproject
+    assert not (BATCH_ROOT / "src/paper_reader_batch/cli.py").exists()
 
     help_result = runner.invoke(app, ["--help"], terminal_width=38)
     assert help_result.exit_code == 0, help_result.output
@@ -137,11 +137,7 @@ def test_every_public_command_has_human_help_and_strict_required_arguments() -> 
             assert payload["error"]["code"] == "invalid_cli_usage"
 
 
-def test_old_flat_commands_are_unreachable_and_do_not_mutate(tmp_path: Path, monkeypatch) -> None:
-    def legacy_handler_must_not_run(*_args, **_kwargs):
-        raise AssertionError("legacy handler executed")
-
-    monkeypatch.setattr(legacy_cli, "init_command", legacy_handler_must_not_run)
+def test_old_flat_commands_are_unreachable_and_do_not_mutate(tmp_path: Path) -> None:
     before = _tree(tmp_path)
 
     for command in OLD_FLAT_COMMANDS:

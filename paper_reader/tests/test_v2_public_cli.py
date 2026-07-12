@@ -78,10 +78,13 @@ def _write_run(run_dir: Path, schema_version: str | None = "paper_reader.run.v2"
 
 
 def test_console_script_points_only_to_the_v2_public_cli() -> None:
-    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    skill_root = Path(__file__).parents[1]
+    pyproject = (skill_root / "pyproject.toml").read_text(encoding="utf-8")
 
     assert 'paper_reader = "paper_reader.public_cli:app"' in pyproject
     assert 'paper_reader = "paper_reader.cli:app"' not in pyproject
+    assert not (skill_root / "src/paper_reader/cli.py").exists()
+    assert importlib.util.find_spec("paper_reader.cli") is None
 
 
 def test_public_command_tree_contains_only_grouped_v2_surface() -> None:
