@@ -5,7 +5,7 @@ description: Use when the user asks to analyze a paper by Zotero title/title fra
 
 # paper_reader
 
-paper_reader is a self-contained paper reading skill. This file defines the Paper Reader 2.0 target contract and its grouped CLI. It is a binding public contract for staged implementation, not a claim that every grouped command is already present before the 2.0 runtime and release tasks finish. Run bundled commands from the installed skill root with `uv run paper_reader ...` after synchronization with `uv sync --locked`.
+paper_reader is a self-contained paper reading skill. This file defines the released Paper Reader 2.0 runtime contract and its grouped CLI. Run bundled commands from the installed skill root with `uv run paper_reader ...` after synchronization with `uv sync --locked`.
 
 ## Environment Setup
 

@@ -55,8 +55,13 @@ def test_skill_bundle_contains_required_runtime_assets() -> None:
         OPENAI_YAML,
         PYPROJECT,
         SKILL_ROOT / "uv.lock",
-        SKILL_ROOT / "src" / "paper_reader" / "cli.py",
-        SKILL_ROOT / "src" / "paper_reader" / "note.py",
+        SKILL_ROOT / "src" / "paper_reader" / "public_cli.py",
+        SKILL_ROOT / "src" / "paper_reader" / "contracts.py",
+        SKILL_ROOT / "src" / "paper_reader" / "storage.py",
+        SKILL_ROOT / "src" / "paper_reader" / "local_lifecycle.py",
+        SKILL_ROOT / "src" / "paper_reader" / "zotero_lifecycle.py",
+        SKILL_ROOT / "references" / "schemas" / "paper_reader.run.v2.schema.json",
+        SKILL_ROOT / "references" / "schemas" / "paper_reader.command-result.v2.schema.json",
         SKILL_ROOT / "templates" / "zotero_note.md.j2",
         ZOTERO_REFERENCE,
         PDF_REFERENCE,
@@ -99,7 +104,7 @@ def test_skill_body_routes_from_skill_root_and_preserves_boundaries() -> None:
     _metadata, body = parse_frontmatter(SKILL)
 
     for phrase in [
-        "Paper Reader 2.0 target contract",
+        "Paper Reader 2.0 runtime contract",
         "grouped CLI",
         "paper_reader.run.v2",
         "paper_reader.summary.v2",
@@ -167,12 +172,15 @@ def test_openai_agent_metadata_matches_skill() -> None:
         "allow_implicit_invocation: true",
         "Paper Reader 2.0",
         "grouped CLI",
+        "released",
         "historical-only",
     ]:
         assert phrase in text
 
     assert "icon" not in text
     assert "brand" not in text
+    assert "staged" not in text
+    assert "without treating this metadata as proof" not in text
 
 
 def test_project_metadata_is_skill_root_relative() -> None:
@@ -202,7 +210,7 @@ def test_references_use_skill_root_paths_and_workflow_terms() -> None:
 
     for text in [zotero, pdf, summary]:
         for phrase in [
-            "Paper Reader 2.0 Target Contract",
+            "Paper Reader 2.0 Runtime Contract",
             "historical-only",
             "unsupported_run_schema",
         ]:
@@ -440,7 +448,7 @@ def test_root_agents_defines_breaking_v2_public_contract() -> None:
 
     for phrase in [
         "Paper Reader 2.0",
-        "binding target contract",
+        "released runtime contract",
         "2.0.0",
         "grouped CLI",
         "paper_reader.run.v2",
@@ -466,6 +474,7 @@ def test_root_agents_defines_breaking_v2_public_contract() -> None:
         "direct_<uuid>",
         "both batch identity options must appear together",
         "write.lease_expired_uncertain",
+        "clean install",
     ]:
         assert phrase in text
 
@@ -498,6 +507,25 @@ def test_default_workflow_docs_pass_in_isolated_skill_copy(tmp_path: Path) -> No
     )
 
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+
+
+def test_root_readmes_publish_v2_clean_install_contract() -> None:
+    if not (REPO_ROOT / "README.md").exists():
+        pytest.skip("root documentation is validated only in the source repository")
+
+    for path in [REPO_ROOT / "README.md", REPO_ROOT / "README.zh-CN.md"]:
+        text = read(path)
+        for phrase in [
+            "Paper Reader 2.0",
+            "2.0.0",
+            "clean install",
+            "uv sync --locked",
+            "uv run paper_reader --version",
+            "uv run paper_reader_batch --version",
+            "uv run paper_reader maintenance extract-pdf tests/fixtures/minimal.pdf",
+            "unsupported_run_schema",
+        ]:
+            assert phrase in text
 
 
 def test_capture_secondary_script_is_in_skill_bundle() -> None:

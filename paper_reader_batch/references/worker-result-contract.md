@@ -1,6 +1,6 @@
-# Worker Result Contract — Paper Reader Batch 2.0 Target Contract
+# Worker Result Contract — Paper Reader Batch 2.0 Runtime Contract
 
-Worker, local-prepare, write and reconciliation results are durable handoff artifacts between the external agent, `$paper_reader`, and `paper_reader_batch`. This binding target contract requires strict Pydantic v2 models with `extra=forbid`, canonical JSON digests, absolute source/artifact paths and exact V2 identities. Results point to artifacts created by `$paper_reader`; batch never synthesizes single-paper conclusions.
+Worker, local-prepare, write and reconciliation results are durable handoff artifacts between the external agent, `$paper_reader`, and `paper_reader_batch`. This released runtime contract requires strict Pydantic v2 models with `extra=forbid`, canonical JSON digests, absolute source/artifact paths and exact V2 identities. Results point to artifacts created by `$paper_reader`; batch never synthesizes single-paper conclusions.
 
 Active schemas are only:
 

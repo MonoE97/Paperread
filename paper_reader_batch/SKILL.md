@@ -5,7 +5,7 @@ description: Use when the user asks to analyze multiple papers from Zotero colle
 
 # paper_reader_batch
 
-paper_reader_batch orchestrates multiple paper reads. This file defines the Paper Reader Batch 2.0 target contract and grouped CLI. It is binding for staged implementation and does not claim every grouped command is already present before the 2.0 runtime and release tasks finish. It does not perform deep
+paper_reader_batch orchestrates multiple paper reads. This file defines the released Paper Reader Batch 2.0 runtime contract and grouped CLI. It does not perform deep
 single-paper analysis itself. Each paper must be dispatched to `$paper_reader`,
 which remains the owner of extraction, evidence rules, summary schema, note
 rendering, immutable candidates/authorizations, and Zotero verification.
@@ -20,9 +20,10 @@ uv sync --locked
 uv run paper_reader_batch --help
 ```
 
-`$paper_reader` must also be installed and available. Batch validation checks the
-batch manifest, run directory, and configured `paper_reader` skill root before
-dispatch.
+`$paper_reader` must also be installed and available. `run validate` checks the
+batch manifest and journal-backed run. Commands that delegate deterministic
+single-paper work require an explicit `--paper-reader-root` and validate that
+root before launching the child CLI.
 
 For Zotero-backed batch items, Zotero Desktop and `zotero-mcp-plugin` must be
 installed and enabled before dispatch. Use the plugin's Streamable HTTP endpoint
@@ -96,4 +97,4 @@ The default write policy is `zotero_write`; pass `--write-policy prepare_only` o
 
 Batch authorization requires both --external-claim-id and --write-attempt-id, and both options must appear together. Partial input is rejected before mutation and batch authorization must not generate `direct_<uuid>` identities; direct identity generation belongs only to direct single-paper authorize.
 
-For a started write lease expiry, `run recover` holds `.run.lock`, identifies the exact `write_attempt_id`, and appends the unique `write.lease_expired_uncertain` event. The expired lease token is neither required nor accepted. The same recover request id replays idempotently; the attempt becomes uncertain, never returns queued and cannot begin again. `write mark-uncertain` accepts only an unexpired exact claim/token/write-attempt identity for active error reporting.
+For a started write lease expiry, `run recover` holds `.run.lock`, identifies the exact `write_attempt_id`, and appends the unique `write.lease_expired_uncertain` event. With explicit `--paper-reader-root <root>`, recovery then delegates read-only reconciliation to `uv run --locked paper_reader zotero reconcile`; it never imports the single package or sends `write_note`. The expired lease token is neither required nor accepted. The same recover request id replays idempotently; the attempt becomes uncertain, never returns queued and cannot begin again. One fully verified match becomes `written`, zero matches become `retry_confirmation_required`, and multiple matches become `blocked`. `write mark-uncertain` accepts only an unexpired exact claim/token/write-attempt identity for active error reporting.

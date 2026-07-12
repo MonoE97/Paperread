@@ -1,6 +1,6 @@
-# Zotero Workflow — Paper Reader 2.0 Target Contract
+# Zotero Workflow — Paper Reader 2.0 Runtime Contract
 
-Use this when the user provides a Zotero title or title fragment. This is the binding grouped-CLI target contract for staged Paper Reader 2.0 implementation; it does not claim runtime completion before the 2.0 implementation and release tasks finish. Run commands from the skill root. Local PDF path and directory path inputs skip Zotero lookup and duplicate checks. Existing local paths are not Zotero title fragments.
+Use this when the user provides a Zotero title or title fragment. This is the released grouped-CLI runtime contract for Paper Reader 2.0. Run commands from the skill root. Local PDF path and directory path inputs skip Zotero lookup and duplicate checks. Existing local paths are not Zotero title fragments.
 
 ## Setup
 

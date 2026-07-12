@@ -1,6 +1,6 @@
-# PDF Path Workflow — Paper Reader 2.0 Target Contract
+# PDF Path Workflow — Paper Reader 2.0 Runtime Contract
 
-Use this when the user provides a local PDF path. This is the binding grouped-CLI target contract for staged Paper Reader 2.0 implementation. Local PDF path and directory path inputs skip Zotero lookup and duplicate checks, including same-title or same-DOI checks. Existing local paths are not Zotero title fragments.
+Use this when the user provides a local PDF path. This is the released grouped-CLI runtime contract for Paper Reader 2.0. Local PDF path and directory path inputs skip Zotero lookup and duplicate checks, including same-title or same-DOI checks. Existing local paths are not Zotero title fragments.
 
 ## Setup
 

@@ -1,6 +1,6 @@
-# Summary And Review Shape — Paper Reader 2.0 Target Contract
+# Summary And Review Shape — Paper Reader 2.0 Runtime Contract
 
-This reference defines the binding Paper Reader 2.0 target schemas `paper_reader.summary.v2`, `paper_reader.review.v2`, and immutable `paper_reader.review-package.v2`. All use strict Pydantic v2 models with `extra=forbid`; unknown fields, implicit coercion, V1/unversioned artifacts and schema guessing are rejected. V1 artifacts are historical-only and fail with `unsupported_run_schema` before locks or mutation.
+This reference defines the released Paper Reader 2.0 runtime schemas `paper_reader.summary.v2`, `paper_reader.review.v2`, and immutable `paper_reader.review-package.v2`. All use strict Pydantic v2 models with `extra=forbid`; unknown fields, implicit coercion, V1/unversioned artifacts and schema guessing are rejected. V1 artifacts are historical-only and fail with `unsupported_run_schema` before locks or mutation.
 
 The summary separates fields that block review sealing from fields that improve the rendered note. The agent should fill both layers for high-quality notes, but only `gate-required` fields are mandatory for sealing. Review validation resolves every render fallback before Chinese-first prose lint, locator validation and sealing, so omitted optional fields cannot bypass checks.
 

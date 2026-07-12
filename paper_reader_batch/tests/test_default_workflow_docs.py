@@ -19,7 +19,7 @@ def read(path: Path) -> str:
 def test_batch_skill_declares_grouped_routing_and_safety() -> None:
     text = read(SKILL)
     for phrase in [
-        "Paper Reader Batch 2.0 target contract",
+        "Paper Reader Batch 2.0 runtime contract",
         "grouped CLI",
         "$paper_reader",
         "zotero_write",
@@ -195,6 +195,24 @@ def test_started_write_lease_expiry_uses_idempotent_recover() -> None:
     assert "Any crash/error/expiry after `write.started` uses" not in read(PARALLEL_DISPATCH)
 
 
+def test_recover_documents_read_only_single_reader_reconciliation() -> None:
+    for path in [SKILL, BATCH_WORKFLOW, PARALLEL_DISPATCH]:
+        text = read(path)
+        for phrase in [
+            "--paper-reader-root",
+            "uv run --locked paper_reader zotero reconcile",
+            "read-only",
+            "written",
+            "retry_confirmation_required",
+            "blocked",
+        ]:
+            assert phrase in text
+
+    workflow = read(BATCH_WORKFLOW)
+    assert "does not import `paper_reader`" in workflow
+    assert "cannot call `write_note`" in workflow
+
+
 def test_batch_docs_exclude_active_v1_commands() -> None:
     for path in [SKILL, BATCH_WORKFLOW, PARALLEL_DISPATCH, WORKER_RESULT_CONTRACT, OPENAI_YAML]:
         text = read(path)
@@ -211,18 +229,23 @@ def test_batch_docs_exclude_active_v1_commands() -> None:
             assert forbidden not in text
 
 
-def test_openai_metadata_marks_v2_as_staged_target() -> None:
+def test_openai_metadata_marks_v2_as_released_runtime() -> None:
     text = read(OPENAI_YAML)
     for phrase in [
         'display_name: "paper_reader_batch"',
-        "Paper Reader Batch 2.0 target grouped CLI contract",
-        "without treating this metadata as proof",
+        "Paper Reader Batch 2.0 released grouped CLI runtime",
         "local-only",
         "external agent",
+        "write begin",
+        "write.started",
+        "returned MCP write_note envelope at most once",
         "historical-only",
         "allow_implicit_invocation: true",
     ]:
         assert phrase in text
+
+    assert "staged" not in text
+    assert "without treating this metadata as proof" not in text
 
 
 def test_batch_v2_schema_contract_is_exhaustive() -> None:
@@ -290,20 +313,34 @@ def test_root_docs_describe_two_installable_skill_sources() -> None:
             assert phrase in text
 
 
-def test_root_readmes_do_not_claim_v2_release_during_contract_stage() -> None:
+def test_root_readmes_publish_v2_release_and_clean_install() -> None:
     if not (REPO_ROOT / "README.md").exists():
         pytest.skip("root documentation is validated only in the source repository")
 
     english = read(REPO_ROOT / "README.md")
     chinese = read(REPO_ROOT / "README.zh-CN.md")
 
-    agents = read(REPO_ROOT / "AGENTS.md")
     for text in [english, chinese]:
-        assert "Paper Reader 2.0" not in text
-        assert "2.0.0" not in text
+        for phrase in [
+            "Paper Reader 2.0",
+            "2.0.0",
+            "clean install",
+            "uv sync --locked",
+            "uv run paper_reader --version",
+            "uv run paper_reader_batch --version",
+            "unsupported_run_schema",
+        ]:
+            assert phrase in text
 
-    assert "不更新 public README release claims" in agents
-    assert "README 发布同步与 pyproject/lock 版本更新属于独立 release task" in agents
+        for phrase in [
+            "paper_reader zotero authorize <candidate.json> --external-claim-id <claim_id> --write-attempt-id <write_attempt_id>",
+            "paper_reader_batch write begin",
+            "write.started",
+            "paper_reader zotero verify",
+            "paper_reader_batch write commit",
+            "recovery",
+        ]:
+            assert phrase in text
 
 
 def test_batch_validator_tracks_required_runtime_modules() -> None:

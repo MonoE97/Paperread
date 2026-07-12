@@ -1,6 +1,6 @@
-# Batch Workflow — Paper Reader Batch 2.0 Target Contract
+# Batch Workflow — Paper Reader Batch 2.0 Runtime Contract
 
-Use this workflow when the user asks to analyze multiple papers. It is the binding grouped-CLI target contract for staged Paper Reader Batch 2.0 implementation, not a claim that the full runtime is already complete before the implementation and release tasks finish.
+Use this workflow when the user asks to analyze multiple papers. It is the released grouped-CLI runtime contract for Paper Reader Batch 2.0.
 
 paper_reader_batch is a scheduler and reporter. It must dispatch each paper to
 `$paper_reader` for single-paper analysis. It must not copy single-paper prompts,
@@ -100,12 +100,12 @@ Use grouped read/recovery commands after interruption:
 ```bash
 uv run paper_reader_batch run status <batch_run_dir>
 uv run paper_reader_batch run validate <batch_run_dir>
-uv run paper_reader_batch run recover <batch_run_dir> --request-id UUID
+uv run paper_reader_batch run recover <batch_run_dir> --request-id UUID --paper-reader-root <paper_reader_root>
 ```
 
 Recovery reconstructs state only from the validated manifest and event journal. It never imports orphan results by directory scan, stem or mtime and never treats a V1/unversioned file as recoverable state.
 
-For a started write lease expiry, `run recover` holds `.run.lock`, identifies the exact `write_attempt_id` whose `write.started` lease expired, and appends the unique `write.lease_expired_uncertain` event. The expired lease token is neither required nor accepted. The same recover request id replays idempotently; the attempt becomes uncertain, never queued; it never returns queued and cannot begin again. `write mark-uncertain` accepts only an unexpired exact claim/token/write-attempt identity for active error reporting.
+For a started write lease expiry, `run recover` holds `.run.lock`, identifies the exact `write_attempt_id` whose `write.started` lease expired, and appends the unique `write.lease_expired_uncertain` event. When `--paper-reader-root <paper_reader_root>` is explicit, it delegates the authorization to `uv run --locked paper_reader zotero reconcile` as a read-only subprocess, validates the single command-result envelope, and commits the exact reconciliation result; it does not import `paper_reader` and cannot call `write_note`. One fully verified match becomes `written`, zero matches become `retry_confirmation_required`, and multiple matches become `blocked`. Without a single root, recovery returns `reconciliation_required` after durably marking the attempt uncertain. The expired lease token is neither required nor accepted. The same recover request id replays idempotently; the attempt remains uncertain, never queued. It never returns queued and cannot begin again. `write mark-uncertain` accepts only an unexpired exact claim/token/write-attempt identity for active error reporting.
 
 ## Zotero Write Stage
 
