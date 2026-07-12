@@ -101,6 +101,7 @@ class LocalPublicationTarget(StrictContractModel):
     target_type: Literal["local"] = "local"
     resolved_path: AbsolutePath
     parent_device: NonNegativeInt
+    parent_inode: NonNegativeInt
 
 
 class ZoteroPublicationTarget(StrictContractModel):

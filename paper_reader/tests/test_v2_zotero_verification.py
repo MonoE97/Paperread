@@ -510,12 +510,12 @@ def test_verification_size_and_run_binding_faults_do_not_create_false_terminal_s
     original_write = module.atomic_write_json
     failed = False
 
-    def fail_once(path: Path, value):
+    def fail_once(path: Path, value, **kwargs):
         nonlocal failed
         if Path(path).name == "run.json" and not failed:
             failed = True
             raise OSError("injected verification run binding failure")
-        return original_write(path, value)
+        return original_write(path, value, **kwargs)
 
     monkeypatch.setattr(module, "atomic_write_json", fail_once)
 

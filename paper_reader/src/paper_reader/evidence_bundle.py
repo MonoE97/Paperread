@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import fitz
 
@@ -37,12 +36,17 @@ from paper_reader.run_size import (
 )
 from paper_reader.storage import (
     atomic_publish_tree,
+    atomic_write_bytes,
     atomic_write_json,
     canonical_json_bytes,
+    create_anchored_directory,
     fingerprint_resolved_source,
     new_random_id,
     new_uuid,
+    remove_anchored_tree,
     sha256_file,
+    tree_snapshot_from_hashes,
+    validate_directory_anchor,
 )
 from paper_reader.secondary_sources import build_secondary_sources
 from paper_reader.v2_loader import LoadedRun
@@ -77,7 +81,7 @@ class _PreparedSource:
 
 
 def _run_root(loaded: LoadedRun) -> Path:
-    return loaded.manifest_path.resolve(strict=True).parent
+    return loaded.manifest_path.parent
 
 
 def _verify_pdf_identity(
@@ -132,7 +136,11 @@ def _verify_source(loaded: LoadedRun) -> _PreparedSource:
     pdf = _verify_pdf_identity(source.attachment, run_id=loaded.run.run_id)
     run_dir = _run_root(loaded)
     try:
-        _snapshot_path, snapshot_bytes = verify_artifact_ref(run_dir, source.normalized_source)
+        _snapshot_path, snapshot_bytes = verify_artifact_ref(
+            run_dir,
+            source.normalized_source,
+            anchor=loaded.run_directory_anchor,
+        )
     except LocalPublicationError as exc:
         raise EvidenceBundleError(
             "source_snapshot_tampered",
@@ -309,7 +317,13 @@ def _prepare_local_evidence_locked(
     complete = preview_pages is None
     evidence_id = new_random_id("evidence")
     staging = run_dir / f".{evidence_id}.{new_uuid()}.staging"
-    staging.mkdir()
+    run_anchor = loaded.run_directory_anchor
+    if run_anchor is None:
+        raise EvidenceBundleError(
+            "run_directory_changed",
+            "evidence preparation requires a locked run directory anchor",
+        )
+    staging_anchor = create_anchored_directory(run_anchor, staging)
     try:
         files_to_write = {
             "metadata.json": canonical_json_bytes(metadata),
@@ -319,7 +333,7 @@ def _prepare_local_evidence_locked(
             "secondary_sources.json": canonical_json_bytes(prepared_source.secondary_sources),
         }
         for name, content in files_to_write.items():
-            (staging / name).write_bytes(content)
+            atomic_write_bytes(staging / name, content, anchor=staging_anchor)
 
         future_dir = run_dir / "evidence" / evidence_id
         artifact_specs: list[tuple[Path, Path, str, str]] = [
@@ -343,6 +357,7 @@ def _prepare_local_evidence_locked(
             prepared_figures = prepare_figure_artifacts(
                 source_path=source_path,
                 staging=staging,
+                staging_anchor=staging_anchor,
                 future_dir=future_dir,
                 run_dir=run_dir,
                 figure_limit=resolved_figure_limit,
@@ -357,12 +372,14 @@ def _prepare_local_evidence_locked(
                 data={"run_id": loaded.run.run_id},
             ) from exc
         artifact_specs.extend(prepared_figures.artifacts)
+        validate_directory_anchor(staging_anchor)
         files = tuple(
             _artifact_ref(run_dir, staged_path, role, media_type).model_copy(
                 update={"path": future_path.relative_to(run_dir).as_posix()}
             )
             for staged_path, future_path, role, media_type in artifact_specs
         )
+        validate_directory_anchor(staging_anchor)
         manifest = build_evidence_manifest(
             evidence_id=evidence_id,
             run_id=loaded.run.run_id,
@@ -383,7 +400,11 @@ def _prepare_local_evidence_locked(
         updated_run: PaperReaderRun | None = None
         predicted_size: int | None = None
         for _attempt in range(8):
-            manifest_path.write_bytes(canonical_json_bytes(manifest))
+            atomic_write_bytes(
+                manifest_path,
+                canonical_json_bytes(manifest),
+                anchor=staging_anchor,
+            )
             manifest_ref = _artifact_ref(
                 run_dir,
                 manifest_path,
@@ -393,6 +414,7 @@ def _prepare_local_evidence_locked(
                 update={"path": (future_dir / "evidence.json").relative_to(run_dir).as_posix()}
             )
             updated_run = _updated_run(loaded, manifest_ref)
+            validate_directory_anchor(staging_anchor)
             next_size = projected_run_size(
                 run_dir,
                 staging_dir=staging,
@@ -400,6 +422,7 @@ def _prepare_local_evidence_locked(
                     loaded.manifest_path: canonical_json_bytes(updated_run),
                 },
             )
+            validate_directory_anchor(staging_anchor)
             current_size = next(
                 int(item.actual)
                 for item in manifest.resource_checks
@@ -422,12 +445,15 @@ def _prepare_local_evidence_locked(
                 data={"run_id": loaded.run.run_id},
             )
         try:
+            validate_directory_anchor(staging_anchor)
             validate_evidence_manifest_membership(
                 manifest,
                 run_dir=run_dir,
                 bundle_dir=staging,
                 manifest_bundle_dir=future_dir,
+                anchor=staging_anchor,
             )
+            validate_directory_anchor(staging_anchor)
         except EvidenceManifestError as exc:
             raise EvidenceBundleError(
                 exc.code,
@@ -454,8 +480,24 @@ def _prepare_local_evidence_locked(
             ) from exc
 
         destination = run_dir / "evidence" / evidence_id
+        bundle_prefix = PurePosixPath(destination.relative_to(run_dir).as_posix())
+        staging_snapshot = tree_snapshot_from_hashes(
+            {
+                PurePosixPath(ref.path).relative_to(bundle_prefix).as_posix(): (
+                    ref.size_bytes,
+                    ref.sha256,
+                )
+                for ref in (*files, manifest_ref)
+            }
+        )
         try:
-            atomic_publish_tree(staging, destination)
+            atomic_publish_tree(
+                staging,
+                destination,
+                anchor=loaded.run_directory_anchor,
+                expected_staging_anchor=staging_anchor,
+                expected_tree_snapshot=staging_snapshot,
+            )
         except Exception as exc:
             raise EvidenceBundleError(
                 "evidence_publication_failed",
@@ -464,7 +506,11 @@ def _prepare_local_evidence_locked(
             ) from exc
         published_manifest = destination / "evidence.json"
         try:
-            atomic_write_json(loaded.manifest_path, updated_run)
+            atomic_write_json(
+                loaded.manifest_path,
+                updated_run,
+                anchor=loaded.run_directory_anchor,
+            )
         except Exception as exc:
             raise EvidenceBundleError(
                 "evidence_status_update_failed",
@@ -478,11 +524,17 @@ def _prepare_local_evidence_locked(
             run_dir=run_dir,
             evidence_dir=destination,
             evidence_manifest=manifest,
-            evidence_digest=hashlib.sha256(published_manifest.read_bytes()).hexdigest(),
+            evidence_digest=manifest_ref.sha256,
         )
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        try:
+            remove_anchored_tree(
+                run_anchor,
+                staging,
+                expected=staging_anchor,
+            )
+        finally:
+            staging_anchor.close()
 
 
 __all__ = [

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -11,7 +10,12 @@ from pydantic import BaseModel, ConfigDict
 from paper_reader.contracts import ArtifactRef, LocalSourceIdentity, ZoteroSourceIdentity
 from paper_reader.evidence import parse_trusted_locator
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
-from paper_reader.storage import canonical_json_bytes, resolve_artifact_path, rfc3339_utc
+from paper_reader.storage import (
+    DirectoryAnchorLike,
+    canonical_json_bytes,
+    rfc3339_utc,
+    validate_directory_anchor,
+)
 from paper_reader.v2_loader import LoadedRun
 
 
@@ -130,30 +134,27 @@ def _reject_symlink_components(run_dir: Path, relative_path: str) -> None:
             )
 
 
-def _verify_artifact(run_dir: Path, artifact: ArtifactRef) -> tuple[Path, bytes]:
-    _reject_symlink_components(run_dir, artifact.path)
+def _verify_artifact(
+    run_dir: Path,
+    artifact: ArtifactRef,
+    *,
+    anchor: DirectoryAnchorLike | None = None,
+) -> tuple[Path, bytes]:
+    from paper_reader.candidate_integrity import LocalPublicationError, verify_artifact_ref
+
     try:
-        path = resolve_artifact_path(run_dir, artifact.path)
-        raw = path.read_bytes()
-        mode = path.stat().st_mode
-    except (OSError, ValueError) as exc:
+        path, raw = verify_artifact_ref(run_dir, artifact, anchor=anchor)
+    except LocalPublicationError as exc:
+        code = (
+            "evidence_artifact_hash_mismatch"
+            if exc.data.get("reason") == "hash_mismatch"
+            else "evidence_artifact_unreadable"
+        )
         raise EvidenceManifestError(
-            "evidence_artifact_unreadable",
+            code,
             f"evidence artifact is unreadable: {artifact.path}: {exc}",
             artifact_path=artifact.path,
         ) from exc
-    if not stat.S_ISREG(mode):
-        raise EvidenceManifestError(
-            "evidence_artifact_unreadable",
-            f"evidence artifact is not a regular file: {artifact.path}",
-            artifact_path=artifact.path,
-        )
-    if len(raw) != artifact.size_bytes or hashlib.sha256(raw).hexdigest() != artifact.sha256:
-        raise EvidenceManifestError(
-            "evidence_artifact_hash_mismatch",
-            f"evidence artifact hash or size mismatch: {artifact.path}",
-            artifact_path=artifact.path,
-        )
     return path, raw
 
 
@@ -163,7 +164,10 @@ def validate_evidence_manifest_membership(
     run_dir: Path,
     bundle_dir: Path,
     manifest_bundle_dir: Path,
+    anchor: DirectoryAnchorLike | None = None,
 ) -> None:
+    if anchor is not None:
+        validate_directory_anchor(anchor)
     pages = set(manifest.pages)
     if len(pages) != len(manifest.pages) or any(page <= 0 for page in pages):
         raise EvidenceManifestError("invalid_evidence_membership", "evidence pages must be unique positive integers")
@@ -253,10 +257,12 @@ def validate_evidence_manifest_membership(
             "evidence_closed_world_mismatch",
             f"evidence bundle membership differs from manifest: missing={missing}, extra={extra}",
         )
+    if anchor is not None:
+        validate_directory_anchor(anchor)
 
 
 def load_bound_evidence(loaded: LoadedRun, evidence_digest: str) -> BoundEvidence:
-    run_dir = loaded.manifest_path.resolve(strict=True).parent
+    run_dir = loaded.manifest_path.parent
     matching_refs = [
         artifact
         for artifact in loaded.run.artifacts
@@ -268,7 +274,11 @@ def load_bound_evidence(loaded: LoadedRun, evidence_digest: str) -> BoundEvidenc
             f"run must bind exactly one evidence manifest with digest {evidence_digest}",
         )
     manifest_ref = matching_refs[0]
-    manifest_path, manifest_bytes = _verify_artifact(run_dir, manifest_ref)
+    manifest_path, manifest_bytes = _verify_artifact(
+        run_dir,
+        manifest_ref,
+        anchor=loaded.run_directory_anchor,
+    )
     try:
         manifest = EvidenceManifest.model_validate_json(manifest_bytes)
     except Exception as exc:
@@ -306,7 +316,11 @@ def load_bound_evidence(loaded: LoadedRun, evidence_digest: str) -> BoundEvidenc
     manifest_dir = manifest_path.parent
     artifacts_by_role: dict[str, list[VerifiedEvidenceArtifact]] = {}
     for artifact in manifest.files:
-        path, raw = _verify_artifact(run_dir, artifact)
+        path, raw = _verify_artifact(
+            run_dir,
+            artifact,
+            anchor=loaded.run_directory_anchor,
+        )
         if not path.is_relative_to(manifest_dir):
             raise EvidenceManifestError(
                 "evidence_artifact_outside_bundle",
@@ -321,6 +335,7 @@ def load_bound_evidence(loaded: LoadedRun, evidence_digest: str) -> BoundEvidenc
         run_dir=run_dir,
         bundle_dir=manifest_dir,
         manifest_bundle_dir=manifest_dir,
+        anchor=loaded.run_directory_anchor,
     )
     return BoundEvidence(
         manifest=manifest,

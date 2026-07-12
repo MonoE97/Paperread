@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,13 +38,18 @@ from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
     atomic_publish_tree,
+    atomic_write_bytes,
     atomic_write_json,
     canonical_json_bytes,
     canonical_json_sha256,
+    create_anchored_directory,
     new_random_id,
     new_uuid,
     rfc3339_utc,
+    remove_anchored_tree,
     sha256_file,
+    tree_snapshot_from_bytes,
+    validate_directory_anchor,
 )
 from paper_reader.v2_loader import LoadedRun, load_v2_run
 
@@ -64,8 +68,12 @@ def _latest_review_package(
     refs = [item for item in loaded.run.artifacts if item.role == "review_package"]
     if not refs:
         raise LocalPublicationError("sealed_review_missing", "run does not bind a sealed review package")
-    run_dir = loaded.manifest_path.resolve(strict=True).parent
-    package_path, package_bytes = verify_artifact_ref(run_dir, refs[-1])
+    run_dir = loaded.manifest_path.parent
+    package_path, package_bytes = verify_artifact_ref(
+        run_dir,
+        refs[-1],
+        anchor=loaded.run_directory_anchor,
+    )
     try:
         package = PaperReaderReviewPackage.model_validate_json(package_bytes)
     except ValidationError as exc:
@@ -86,11 +94,15 @@ def _sealed_snapshots(
     package_path: Path,
     package_bytes: bytes,
 ) -> dict[str, bytes]:
-    run_dir = loaded.manifest_path.resolve(strict=True).parent
+    run_dir = loaded.manifest_path.parent
     package_dir = package_path.parent
     snapshots: dict[str, bytes] = {}
     for artifact in package.artifacts:
-        path, raw = verify_artifact_ref(run_dir, artifact)
+        path, raw = verify_artifact_ref(
+            run_dir,
+            artifact,
+            anchor=loaded.run_directory_anchor,
+        )
         if not path.is_relative_to(package_dir):
             raise LocalPublicationError(
                 "invalid_sealed_review",
@@ -182,7 +194,7 @@ def build_candidate(run_path: Path, *, provider=None):
 
 
 def _build_local_candidate_locked(loaded: LoadedRun) -> BuiltLocalCandidate:
-    run_dir = loaded.manifest_path.resolve(strict=True).parent
+    run_dir = loaded.manifest_path.parent
     source = loaded.run.source
     target = loaded.run.target
     if not isinstance(source, LocalSourceIdentity) or not isinstance(target, LocalPublicationTarget):
@@ -201,17 +213,27 @@ def _build_local_candidate_locked(loaded: LoadedRun) -> BuiltLocalCandidate:
     source_refs = [item for item in loaded.run.artifacts if item.role == "source_snapshot"]
     if len(source_refs) != 1:
         raise LocalPublicationError("source_snapshot_missing", "run must bind one source snapshot")
-    _source_path, source_bytes = verify_artifact_ref(run_dir, source_refs[0])
+    _source_path, source_bytes = verify_artifact_ref(
+        run_dir,
+        source_refs[0],
+        anchor=loaded.run_directory_anchor,
+    )
     summary = PaperReaderSummary.model_validate_json(snapshots["summary.json"])
 
     candidate_id = new_random_id("candidate")
     candidate_dir = run_dir / "candidates" / candidate_id
     staging = run_dir / f".{candidate_id}.{new_uuid()}.staging"
-    staging.mkdir()
+    run_anchor = loaded.run_directory_anchor
+    if run_anchor is None:
+        raise LocalPublicationError(
+            "run_directory_changed",
+            "candidate build requires a locked run directory anchor",
+        )
+    staging_anchor = create_anchored_directory(run_anchor, staging)
     try:
         files = {"run.json": loaded.manifest_bytes, "source.json": source_bytes, **snapshots}
         for name, content in files.items():
-            (staging / name).write_bytes(content)
+            atomic_write_bytes(staging / name, content, anchor=staging_anchor)
         specs = {
             "run.json": ("run_snapshot", "application/json"),
             "source.json": ("source_snapshot", "application/json"),
@@ -223,10 +245,12 @@ def _build_local_candidate_locked(loaded: LoadedRun) -> BuiltLocalCandidate:
             "note.md": ("note_markdown", "text/markdown"),
             "note.html": ("note_html", "text/html"),
         }
+        validate_directory_anchor(staging_anchor)
         refs = {
             name: _artifact_ref(run_dir, staging / name, candidate_dir / name, role, media)
             for name, (role, media) in specs.items()
         }
+        validate_directory_anchor(staging_anchor)
         checks = (
             "source_identity",
             "evidence_hashes",
@@ -261,7 +285,11 @@ def _build_local_candidate_locked(loaded: LoadedRun) -> BuiltLocalCandidate:
         digest = candidate_core_digest(candidate)
         staged_candidate_path = staging / "candidate.json"
         candidate_bytes = canonical_json_bytes(candidate)
-        staged_candidate_path.write_bytes(candidate_bytes)
+        atomic_write_bytes(
+            staged_candidate_path,
+            candidate_bytes,
+            anchor=staging_anchor,
+        )
         candidate_path = candidate_dir / "candidate.json"
         candidate_ref = _artifact_ref(
             run_dir,
@@ -293,15 +321,28 @@ def _build_local_candidate_locked(loaded: LoadedRun) -> BuiltLocalCandidate:
                 },
             ) from exc
         verify_local_target(target, source)
+        staging_snapshot = tree_snapshot_from_bytes(
+            {**files, "candidate.json": candidate_bytes}
+        )
         try:
-            atomic_publish_tree(staging, candidate_dir)
+            atomic_publish_tree(
+                staging,
+                candidate_dir,
+                anchor=loaded.run_directory_anchor,
+                expected_staging_anchor=staging_anchor,
+                expected_tree_snapshot=staging_snapshot,
+            )
         except Exception as exc:
             raise LocalPublicationError(
                 "candidate_publication_failed",
                 f"immutable candidate publication failed: {candidate_dir}: {exc}",
             ) from exc
         try:
-            atomic_write_json(loaded.manifest_path, updated_run)
+            atomic_write_json(
+                loaded.manifest_path,
+                updated_run,
+                anchor=loaded.run_directory_anchor,
+            )
         except Exception as exc:
             raise LocalPublicationError(
                 "candidate_status_update_failed",
@@ -309,8 +350,14 @@ def _build_local_candidate_locked(loaded: LoadedRun) -> BuiltLocalCandidate:
             ) from exc
         return BuiltLocalCandidate(run_dir, candidate_dir, candidate, digest)
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        try:
+            remove_anchored_tree(
+                run_anchor,
+                staging,
+                expected=staging_anchor,
+            )
+        finally:
+            staging_anchor.close()
 
 
 __all__ = ["BuiltLocalCandidate", "build_candidate", "build_local_candidate"]

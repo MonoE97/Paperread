@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,7 +16,11 @@ from paper_reader.contracts import (
     ZoteroSourceIdentity,
 )
 from paper_reader.note_hash import canonicalize_note_html_for_hash, note_html_sha256
-from paper_reader.storage import canonical_json_bytes, canonical_json_sha256
+from paper_reader.storage import (
+    canonical_json_bytes,
+    canonical_json_sha256,
+    read_anchored_bytes,
+)
 from paper_reader.v2_loader import LoadedRun
 
 
@@ -77,11 +82,16 @@ def _verify_authorization_members(
     run_dir: Path,
     authorization_dir: Path,
     authorization: PaperReaderWriteAuthorization,
+    loaded: LoadedRun,
 ) -> dict[str, tuple[Path, bytes]]:
     verified: dict[str, tuple[Path, bytes]] = {}
     for ref in authorization.artifacts:
         try:
-            path, raw = verify_artifact_ref(run_dir, ref)
+            path, raw = verify_artifact_ref(
+                run_dir,
+                ref,
+                anchor=loaded.run_directory_anchor,
+            )
         except LocalPublicationError as exc:
             raise ZoteroAuthorizationBindingError(
                 "authorization_tampered",
@@ -128,7 +138,7 @@ def _validated_authorization_bytes(
     *,
     bound_ref: ArtifactRef | None,
 ) -> LoadedAuthorization:
-    run_dir = loaded.manifest_path.resolve(strict=True).parent
+    run_dir = loaded.manifest_path.parent
     try:
         resolved = Path(authorization_path).resolve(strict=False)
         relative = resolved.relative_to(run_dir).as_posix()
@@ -155,7 +165,11 @@ def _validated_authorization_bytes(
         )
     if bound_ref is not None:
         try:
-            verified_path, verified_raw = verify_artifact_ref(run_dir, bound_ref)
+            verified_path, verified_raw = verify_artifact_ref(
+                run_dir,
+                bound_ref,
+                anchor=loaded.run_directory_anchor,
+            )
         except LocalPublicationError as exc:
             raise ZoteroAuthorizationBindingError(
                 "authorization_tampered",
@@ -189,7 +203,12 @@ def _validated_authorization_bytes(
             "authorization_tampered",
             "authorization sidecar directory must not be a symlink",
         )
-    members = _verify_authorization_members(run_dir, authorization_dir, authorization)
+    members = _verify_authorization_members(
+        run_dir,
+        authorization_dir,
+        authorization,
+        loaded,
+    )
     _candidate_path, candidate_bytes = members["candidate_snapshot"]
     try:
         candidate = PaperReaderCandidate.model_validate_json(candidate_bytes)
@@ -227,6 +246,7 @@ def _validated_authorization_bytes(
         _bound_candidate_path, bound_candidate_bytes = verify_artifact_ref(
             run_dir,
             bound_candidates[0],
+            anchor=loaded.run_directory_anchor,
         )
     except LocalPublicationError as exc:
         raise ZoteroAuthorizationBindingError(
@@ -240,7 +260,11 @@ def _validated_authorization_bytes(
         )
     for artifact in candidate.artifacts:
         try:
-            verify_artifact_ref(run_dir, artifact)
+            verify_artifact_ref(
+                run_dir,
+                artifact,
+                anchor=loaded.run_directory_anchor,
+            )
         except LocalPublicationError as exc:
             raise ZoteroAuthorizationBindingError(
                 "authorization_tampered",
@@ -288,8 +312,8 @@ def load_authorization_artifact(
     require_bound: bool,
     raw_override: bytes | None = None,
 ) -> LoadedAuthorization:
-    run_dir = loaded.manifest_path.resolve(strict=True).parent
-    resolved = Path(authorization_path).expanduser().resolve(strict=False)
+    run_dir = loaded.manifest_path.parent
+    resolved = Path(os.path.abspath(Path(authorization_path).expanduser()))
     try:
         relative = resolved.relative_to(run_dir).as_posix()
     except ValueError as exc:
@@ -314,10 +338,13 @@ def load_authorization_artifact(
         )
     if raw_override is None:
         try:
-            if resolved.is_symlink() or resolved.parent.is_symlink():
-                raise OSError("authorization path uses a symlink")
-            raw = resolved.read_bytes()
-        except OSError as exc:
+            if loaded.run_directory_anchor is not None:
+                raw = read_anchored_bytes(loaded.run_directory_anchor, resolved)
+            else:
+                if resolved.is_symlink() or resolved.parent.is_symlink():
+                    raise OSError("authorization path uses a symlink")
+                raw = resolved.read_bytes()
+        except (OSError, ValueError) as exc:
             raise ZoteroAuthorizationBindingError(
                 "authorization_unreadable",
                 f"authorization cannot be read: {resolved}: {exc}",

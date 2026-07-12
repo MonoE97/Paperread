@@ -206,6 +206,11 @@
           "title": "Parent Device",
           "type": "integer"
         },
+        "parent_inode": {
+          "minimum": 0,
+          "title": "Parent Inode",
+          "type": "integer"
+        },
         "resolved_path": {
           "title": "Resolved Path",
           "type": "string"
@@ -219,7 +224,8 @@
       },
       "required": [
         "resolved_path",
-        "parent_device"
+        "parent_device",
+        "parent_inode"
       ],
       "title": "LocalPublicationTarget",
       "type": "object"

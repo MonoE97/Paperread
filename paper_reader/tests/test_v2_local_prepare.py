@@ -427,12 +427,12 @@ def test_prepare_run_update_fault_leaves_only_unbound_orphan_and_retry_is_safe(
     original_write = evidence_bundle.atomic_write_json
     failed = False
 
-    def fail_once(path: Path, value):
+    def fail_once(path: Path, value, **kwargs):
         nonlocal failed
         if Path(path).name == "run.json" and not failed:
             failed = True
             raise OSError("injected failure after evidence tree publication")
-        return original_write(path, value)
+        return original_write(path, value, **kwargs)
 
     monkeypatch.setattr(evidence_bundle, "atomic_write_json", fail_once)
 
@@ -535,6 +535,57 @@ def test_full_pdf_figure_failure_is_recorded_as_degraded_evidence(
     check = next(item for item in manifest["resource_checks"] if item["name"] == "figure_extraction")
     assert check["status"] == "degraded"
     assert "injected figure failure" in check["message"]
+
+
+def test_full_pdf_figure_fallback_removes_all_partial_anchored_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, source)
+    initialized = _invoke(["run", "init-local", str(source)])
+    run_dir = Path(_result_payload(initialized)["data"]["run_dir"])
+
+    def fake_extract(_source: Path, *, output_dir: Path, **_kwargs):
+        output_dir.mkdir(parents=True)
+        image_path = output_dir / "figure-p1-1.png"
+        image_path.write_bytes(b"bounded-figure")
+        return {
+            "candidate_count": 1,
+            "selected_figures": [
+                {
+                    "figure_id": "p1-f1",
+                    "page": 1,
+                    "image_path": str(image_path),
+                    "visual_quality": {
+                        "width": 10,
+                        "height": 10,
+                    },
+                }
+            ],
+        }
+
+    import paper_reader.evidence_figures as evidence_figures
+
+    original_write = evidence_figures.atomic_write_bytes
+
+    def fail_context(path: Path, content: bytes, **kwargs):
+        if Path(path).name == "figure_context.md":
+            raise OSError("injected context write failure")
+        return original_write(path, content, **kwargs)
+
+    monkeypatch.setattr(evidence_figures, "extract_figures", fake_extract)
+    monkeypatch.setattr(evidence_figures, "atomic_write_bytes", fail_context)
+
+    result = _invoke(["run", "prepare", str(run_dir)])
+
+    assert result.exit_code == 0, result.stderr
+    payload = _result_payload(result)
+    assert payload["data"]["degraded"] is True
+    evidence_dir = Path(payload["data"]["evidence_dir"])
+    assert not (evidence_dir / "figures").exists()
+    assert not (evidence_dir / "figures.json").exists()
+    assert not (evidence_dir / "figure_context.md").exists()
 
 
 def test_prepare_blocks_page_cap_before_extraction_or_mutation(

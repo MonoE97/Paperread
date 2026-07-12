@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import fcntl
 import os
-import shutil
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,14 +18,20 @@ from paper_reader.contracts import (
 )
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.storage import (
+    DirectoryAnchorLike,
     PublishConflictError,
     atomic_publish_tree,
+    atomic_write_bytes,
     atomic_write_json,
     canonical_json_bytes,
+    create_anchored_directory,
     new_random_id,
     new_uuid,
+    remove_anchored_tree,
     rfc3339_utc,
+    tree_snapshot_from_bytes,
 )
+from paper_reader.v2_loader import DirectoryAnchor, RunLoadError
 
 MAX_LOCAL_PDF_SIZE_BYTES = V2_RESOURCE_POLICY.local_pdf_max_bytes
 
@@ -138,13 +143,13 @@ def _local_source_identity(source_pdf: Path) -> LocalSourceIdentity:
 def _stage_initialized_run(
     *,
     staging: Path,
+    staging_anchor: DirectoryAnchorLike,
     source: LocalSourceIdentity,
     target: LocalPublicationTarget,
 ) -> PaperReaderRun:
     source_path = staging / "source" / "source.json"
-    source_path.parent.mkdir(parents=True)
     source_bytes = canonical_json_bytes(source)
-    source_path.write_bytes(source_bytes)
+    atomic_write_bytes(source_path, source_bytes, anchor=staging_anchor)
 
     import hashlib
 
@@ -166,7 +171,11 @@ def _stage_initialized_run(
         gate=GateState(status="not_evaluated"),
         live_preflight=None,
     )
-    (staging / "run.json").write_bytes(canonical_json_bytes(run))
+    atomic_write_bytes(
+        staging / "run.json",
+        canonical_json_bytes(run),
+        anchor=staging_anchor,
+    )
     return run
 
 
@@ -228,60 +237,100 @@ def _allocate_local_run(
     resolved_source = Path(source.resolved_path)
     parent = resolved_source.parent
     stem = resolved_source.stem
-    parent_device = parent.stat().st_dev
+    parent_metadata = parent.stat()
+    parent_device = parent_metadata.st_dev
+    parent_inode = parent_metadata.st_ino
 
-    version = 1
-    while True:
-        suffix = "" if version == 1 else f"_v{version}"
-        destination = parent / f"{stem}_analysis{suffix}"
-        target_path = parent / f"{stem}_note{suffix}.md"
-        if os.path.lexists(target_path):
-            version += 1
-            continue
-
-        staging = parent / f".{destination.name}.{new_uuid()}.staging"
-        staging.mkdir()
-        try:
-            target = LocalPublicationTarget(
-                resolved_path=str(target_path),
-                parent_device=parent_device,
+    try:
+        parent_anchor_context = DirectoryAnchor.open(
+            parent,
+            manifest_path=parent / "run.json",
+        )
+    except RunLoadError as exc:
+        raise LocalLifecycleError("initialization_failed", str(exc)) from exc
+    with parent_anchor_context as parent_anchor:
+        if (parent_anchor.device, parent_anchor.inode) != (parent_device, parent_inode):
+            raise LocalLifecycleError(
+                "initialization_failed",
+                "local PDF parent changed before run allocation",
             )
-            run = _stage_initialized_run(staging=staging, source=source, target=target)
-            try:
-                atomic_publish_tree(staging, destination)
-            except PublishConflictError:
+        version = 1
+        while True:
+            suffix = "" if version == 1 else f"_v{version}"
+            destination = parent / f"{stem}_analysis{suffix}"
+            target_path = parent / f"{stem}_note{suffix}.md"
+            if os.path.lexists(target_path):
                 version += 1
                 continue
-            except Exception as exc:
-                raise LocalLifecycleError(
-                    "initialization_failed",
-                    f"local run reservation failed: {destination}: {exc}",
-                    data={
-                        "source_pdf": str(source_pdf),
-                        "run_dir": str(destination),
-                    },
-                ) from exc
-            if os.path.lexists(target_path):
+
+            staging = parent / f".{destination.name}.{new_uuid()}.staging"
+            staging_anchor = create_anchored_directory(parent_anchor, staging)
+            try:
+                target = LocalPublicationTarget(
+                    resolved_path=str(target_path),
+                    parent_device=parent_device,
+                    parent_inode=parent_inode,
+                )
+                run = _stage_initialized_run(
+                    staging=staging,
+                    staging_anchor=staging_anchor,
+                    source=source,
+                    target=target,
+                )
+                staging_snapshot = tree_snapshot_from_bytes(
+                    {
+                        "source/source.json": canonical_json_bytes(source),
+                        "run.json": canonical_json_bytes(run),
+                    }
+                )
                 try:
-                    atomic_write_json(
-                        destination / "run.json",
-                        _blocked_target_run(run, target_path),
+                    atomic_publish_tree(
+                        staging,
+                        destination,
+                        anchor=parent_anchor,
+                        expected_staging_anchor=staging_anchor,
+                        expected_tree_snapshot=staging_snapshot,
                     )
+                except PublishConflictError:
+                    version += 1
+                    continue
                 except Exception as exc:
                     raise LocalLifecycleError(
                         "initialization_failed",
-                        f"reserved run could not record a raced target conflict: {destination}: {exc}",
+                        f"local run reservation failed: {destination}: {exc}",
                         data={
                             "source_pdf": str(source_pdf),
                             "run_dir": str(destination),
                         },
                     ) from exc
-                version += 1
-                continue
-            return InitializedLocalRun(run_dir=destination, target_path=target_path, run=run)
-        finally:
-            if staging.exists():
-                shutil.rmtree(staging)
+                if os.path.lexists(target_path):
+                    try:
+                        atomic_write_json(
+                            destination / "run.json",
+                            _blocked_target_run(run, target_path),
+                            anchor=parent_anchor,
+                        )
+                    except Exception as exc:
+                        raise LocalLifecycleError(
+                            "initialization_failed",
+                            f"reserved run could not record a raced target conflict: {destination}: {exc}",
+                            data={
+                                "source_pdf": str(source_pdf),
+                                "run_dir": str(destination),
+                            },
+                        ) from exc
+                    version += 1
+                    continue
+                return InitializedLocalRun(run_dir=destination, target_path=target_path, run=run)
+            finally:
+                try:
+                    remove_anchored_tree(
+                        parent_anchor,
+                        staging,
+                        expected=staging_anchor,
+                    )
+                finally:
+                    staging_anchor.close()
 
 
 __all__ = [

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import paper_reader.candidate_integrity as candidate_integrity
 import paper_reader.local_publish as local_publish_module
+import paper_reader.storage as storage_module
 from paper_reader.contracts import PaperReaderCandidate
 
 from test_v2_review_package import (
@@ -246,12 +247,12 @@ def test_candidate_run_update_fault_leaves_unbound_orphan_and_retry_binds_new_ca
     original_write = candidate_builder.atomic_write_json
     failed = False
 
-    def fail_once(path: Path, value):
+    def fail_once(path: Path, value, **kwargs):
         nonlocal failed
         if Path(path).name == "run.json" and not failed:
             failed = True
             raise OSError("injected failure after candidate tree publication")
-        return original_write(path, value)
+        return original_write(path, value, **kwargs)
 
     monkeypatch.setattr(candidate_builder, "atomic_write_json", fail_once)
 
@@ -466,12 +467,12 @@ def test_local_publish_recovers_after_intent_commit_before_target(
     original_publish = local_publish_module.publish_bytes_no_replace
     failed = False
 
-    def injected_failure(content: bytes, target: Path) -> Path:
+    def injected_failure(content: bytes, target: Path, **kwargs) -> Path:
         nonlocal failed
         if Path(target) == tmp_path / "paper_note.md" and not failed:
             failed = True
             raise OSError("injected failure after intent commit")
-        return original_publish(content, target)
+        return original_publish(content, target, **kwargs)
 
     monkeypatch.setattr("paper_reader.local_publish.publish_bytes_no_replace", injected_failure, raising=False)
 
@@ -488,6 +489,97 @@ def test_local_publish_recovers_after_intent_commit_before_target(
 
     assert retry.exit_code == 0, retry.stderr
     assert (tmp_path / "paper_note.md").read_bytes() == (candidate_path.parent / "note.md").read_bytes()
+
+
+def test_local_publish_recovery_rejects_hardlinked_exact_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir, candidate_path = _built_candidate(tmp_path)
+    target = tmp_path / "paper_note.md"
+    note_bytes = (candidate_path.parent / "note.md").read_bytes()
+    original_publish = local_publish_module.publish_bytes_no_replace
+    failed = False
+
+    def fail_target_once(content: bytes, destination: Path, **kwargs) -> Path:
+        nonlocal failed
+        if Path(destination) == target and not failed:
+            failed = True
+            raise OSError("injected failure after intent commit")
+        return original_publish(content, destination, **kwargs)
+
+    monkeypatch.setattr(local_publish_module, "publish_bytes_no_replace", fail_target_once)
+
+    first = _invoke(["local", "publish", str(candidate_path)])
+    assert first.exit_code == 1
+    assert _result_payload(first)["code"] == "publish_failed"
+    assert (run_dir / "publication-intent.json").is_file()
+
+    attacker_file = tmp_path / "attacker-controlled.md"
+    attacker_file.write_bytes(note_bytes)
+    os.link(attacker_file, target)
+    assert target.stat().st_nlink == 2
+
+    retry = _invoke(["local", "publish", str(candidate_path)])
+
+    assert retry.exit_code == 1
+    assert _result_payload(retry)["code"] == "publish_conflict"
+    assert os.path.samefile(attacker_file, target)
+    assert not (run_dir / "receipts").exists()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "candidate_built"
+
+
+def test_local_publish_rejects_hardlinked_candidate_manifest(tmp_path: Path) -> None:
+    run_dir, candidate_path = _built_candidate(tmp_path)
+    extra_link = tmp_path / "candidate-hardlink.json"
+    os.link(candidate_path, extra_link)
+    assert candidate_path.stat().st_nlink == 2
+
+    result = _invoke(["local", "publish", str(candidate_path)])
+
+    assert result.exit_code == 1
+    assert _result_payload(result)["code"] == "candidate_tampered"
+    assert not (tmp_path / "paper_note.md").exists()
+    assert not (run_dir / "publication-intent.json").exists()
+
+
+def test_local_publish_rejects_target_parent_replacement_before_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir, candidate_path = _built_candidate(tmp_path)
+    original_run = (run_dir / "run.json").read_bytes()
+    original_rename = storage_module._native_renameat_tree_no_replace
+    detached_parent = tmp_path.with_name(f"{tmp_path.name}-detached")
+    outside_parent = tmp_path.with_name(f"{tmp_path.name}-outside")
+    outside_parent.mkdir()
+    swapped = False
+
+    def swap_parent_then_rename(*args, **kwargs):
+        nonlocal swapped
+        destination = Path(kwargs["destination"])
+        if destination.name == "paper_note.md" and not swapped:
+            swapped = True
+            tmp_path.rename(detached_parent)
+            tmp_path.symlink_to(outside_parent, target_is_directory=True)
+        return original_rename(*args, **kwargs)
+
+    monkeypatch.setattr(
+        storage_module,
+        "_native_renameat_tree_no_replace",
+        swap_parent_then_rename,
+    )
+
+    result = _invoke(["local", "publish", str(candidate_path)])
+
+    assert swapped is True
+    assert result.exit_code == 1
+    assert _result_payload(result)["code"] in {
+        "invalid_local_target",
+        "run_directory_changed",
+    }
+    assert not (outside_parent / "paper_note.md").exists()
+    assert (detached_parent / run_dir.name / "run.json").read_bytes() == original_run
 
 
 def test_local_publish_blocks_projected_run_size_before_target_commit(
@@ -582,12 +674,12 @@ def test_local_publish_recovers_after_receipt_commit_before_run_update(
     original_write = local_publish_module.atomic_write_json
     failed = False
 
-    def fail_run_once(path: Path, value):
+    def fail_run_once(path: Path, value, **kwargs):
         nonlocal failed
         if Path(path).name == "run.json" and not failed:
             failed = True
             raise OSError("injected failure before run manifest update")
-        return original_write(path, value)
+        return original_write(path, value, **kwargs)
 
     monkeypatch.setattr(local_publish_module, "atomic_write_json", fail_run_once)
 

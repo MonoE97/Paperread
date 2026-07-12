@@ -12,9 +12,11 @@ from paper_reader.contracts import (
     PaperReaderCandidate,
 )
 from paper_reader.storage import (
+    DirectoryAnchorLike,
     canonical_json_sha256,
     fingerprint_resolved_source,
-    resolve_artifact_path,
+    read_anchored_bytes,
+    safe_relative_artifact_path,
 )
 
 
@@ -48,26 +50,59 @@ def reject_symlinks(run_dir: Path, relative_path: str) -> None:
             )
 
 
-def verify_artifact_ref(run_dir: Path, artifact: ArtifactRef) -> tuple[Path, bytes]:
+def verify_artifact_ref(
+    run_dir: Path,
+    artifact: ArtifactRef,
+    *,
+    anchor: DirectoryAnchorLike | None = None,
+) -> tuple[Path, bytes]:
     reject_symlinks(run_dir, artifact.path)
     try:
-        path = resolve_artifact_path(run_dir, artifact.path)
-        raw = path.read_bytes()
-        mode = path.stat().st_mode
+        relative = safe_relative_artifact_path(artifact.path)
+        path = Path(os.path.abspath(run_dir)).joinpath(*PurePosixPath(relative).parts)
+        if anchor is not None:
+            raw = read_anchored_bytes(anchor, path)
+        else:
+            before_path = os.lstat(path)
+            if (
+                stat.S_ISLNK(before_path.st_mode)
+                or not stat.S_ISREG(before_path.st_mode)
+                or before_path.st_nlink != 1
+            ):
+                raise OSError("artifact must be one single-link regular file")
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                before_fd = os.fstat(descriptor)
+                chunks: list[bytes] = []
+                while chunk := os.read(descriptor, 1024 * 1024):
+                    chunks.append(chunk)
+                after_fd = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            after_path = os.lstat(path)
+            identities = {
+                (
+                    item.st_dev,
+                    item.st_ino,
+                    item.st_size,
+                    item.st_mtime_ns,
+                    item.st_nlink,
+                )
+                for item in (before_path, before_fd, after_fd, after_path)
+            }
+            if len(identities) != 1 or after_path.st_nlink != 1:
+                raise OSError("artifact changed while it was read")
+            raw = b"".join(chunks)
     except (OSError, ValueError) as exc:
         raise LocalPublicationError(
             "sealed_artifact_tampered",
             f"sealed artifact is unreadable: {artifact.path}: {exc}",
         ) from exc
-    if not stat.S_ISREG(mode):
-        raise LocalPublicationError(
-            "sealed_artifact_tampered",
-            f"sealed artifact is not a regular file: {artifact.path}",
-        )
     if len(raw) != artifact.size_bytes or hashlib.sha256(raw).hexdigest() != artifact.sha256:
         raise LocalPublicationError(
             "sealed_artifact_tampered",
             f"sealed artifact hash or size mismatch: {artifact.path}",
+            data={"reason": "hash_mismatch"},
         )
     return path, raw
 
@@ -112,8 +147,11 @@ def validate_local_target_location(
         ) from exc
     if parent != target_path.parent or not parent.is_dir():
         raise LocalPublicationError("invalid_local_target", "local target parent must be canonical")
-    if parent.stat().st_dev != target.parent_device:
+    parent_metadata = parent.stat()
+    if parent_metadata.st_dev != target.parent_device:
         raise LocalPublicationError("target_device_changed", "local target parent device changed")
+    if parent_metadata.st_ino != target.parent_inode:
+        raise LocalPublicationError("invalid_local_target", "local target parent inode changed")
     if target_path == Path(source.resolved_path):
         raise LocalPublicationError("invalid_local_target", "local target aliases the source path")
     return target_path

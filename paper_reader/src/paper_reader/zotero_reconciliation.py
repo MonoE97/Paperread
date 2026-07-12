@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,11 +22,16 @@ from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
+    atomic_write_bytes,
     atomic_write_json,
     canonical_json_bytes,
+    create_anchored_directory,
     new_random_id,
     new_uuid,
+    remove_anchored_tree,
     rfc3339_utc,
+    tree_snapshot_from_bytes,
+    validate_directory_anchor,
 )
 from paper_reader.v2_loader import LoadedRun
 from paper_reader.zotero_authorization_loader import (
@@ -92,6 +96,7 @@ def _validate_reconciliation_record(
     raw: bytes,
     *,
     bound: LoadedAuthorization,
+    loaded: LoadedRun,
 ) -> PaperReaderReconciliation:
     try:
         reconciliation = PaperReaderReconciliation.model_validate_json(raw)
@@ -120,7 +125,11 @@ def _validate_reconciliation_record(
     roles: set[str] = set()
     for artifact in reconciliation.artifacts:
         try:
-            artifact_path, _artifact_bytes = verify_artifact_ref(run_dir, artifact)
+            artifact_path, _artifact_bytes = verify_artifact_ref(
+                run_dir,
+                artifact,
+                anchor=loaded.run_directory_anchor,
+            )
         except LocalPublicationError as exc:
             raise ZoteroReconciliationError(
                 "reconciliation_tampered",
@@ -164,7 +173,7 @@ def _existing_reconciliation(
     *,
     bound: LoadedAuthorization,
 ) -> ReconciledZoteroWrite | None:
-    run_dir = loaded.manifest_path.resolve(strict=True).parent
+    run_dir = loaded.manifest_path.parent
     artifact_paths = _reconciliation_artifact_paths(
         run_dir,
         bound.authorization.authorization_id,
@@ -192,6 +201,7 @@ def _existing_reconciliation(
         reconciliation_path,
         raw,
         bound=bound,
+        loaded=loaded,
     )
     if not reconciliation_path.exists():
         try:
@@ -200,6 +210,7 @@ def _existing_reconciliation(
                 staging_dir=None,
                 allow_existing_sidecar=True,
                 allow_existing_main=False,
+                expected_run_anchor=loaded.run_directory_anchor,
             ) as publication:
                 publication.publish_main(recovery_record, expected_bytes=raw)
         except UnsafeZoteroArtifactPathError as exc:
@@ -222,7 +233,11 @@ def _existing_reconciliation(
         )
     if refs:
         try:
-            path, bound_raw = verify_artifact_ref(run_dir, refs[0])
+            path, bound_raw = verify_artifact_ref(
+                run_dir,
+                refs[0],
+                anchor=loaded.run_directory_anchor,
+            )
         except LocalPublicationError as exc:
             raise ZoteroReconciliationError(
                 "reconciliation_tampered",
@@ -248,7 +263,11 @@ def _existing_reconciliation(
             verified=reconciliation.outcome == "verified",
         )
         try:
-            atomic_write_json(loaded.manifest_path, updated_run)
+            atomic_write_json(
+                loaded.manifest_path,
+                updated_run,
+                anchor=loaded.run_directory_anchor,
+            )
         except Exception as exc:
             raise ZoteroReconciliationError(
                 "reconciliation_status_update_failed",
@@ -422,10 +441,15 @@ def _publish_reconciliation_locked(
     reconciliation_path = artifact_paths.main
     reconciliation_dir = artifact_paths.sidecar
     staging = run_dir / f".{reconciliation_id}.{new_uuid()}.staging"
-    staging.mkdir()
+    run_anchor = loaded.run_directory_anchor
+    if run_anchor is None:
+        raise ZoteroReconciliationError(
+            "run_directory_changed",
+            "reconciliation requires a locked run directory anchor",
+        )
+    staging_anchor = create_anchored_directory(run_anchor, staging)
     try:
         staged_sidecar = staging / "sidecar"
-        staged_sidecar.mkdir()
         files = {
             "authorization.json": bound.authorization_bytes,
             "children.json": children_bytes,
@@ -440,7 +464,11 @@ def _publish_reconciliation_locked(
             files["note.json"] = note_bytes
             files["checks.json"] = canonical_json_bytes(checks_payload)
         for name, content in files.items():
-            (staged_sidecar / name).write_bytes(content)
+            atomic_write_bytes(
+                staged_sidecar / name,
+                content,
+                anchor=staging_anchor,
+            )
         specs = {
             "authorization.json": ("authorization_snapshot", "application/json"),
             "children.json": ("zotero_children_snapshot", "application/json"),
@@ -448,6 +476,7 @@ def _publish_reconciliation_locked(
         if note_bytes is not None:
             specs["note.json"] = ("zotero_note_readback", "application/json")
             specs["checks.json"] = ("verification_checks", "application/json")
+        validate_directory_anchor(staging_anchor)
         refs = {
             name: _artifact_ref(
                 run_dir,
@@ -458,8 +487,10 @@ def _publish_reconciliation_locked(
             )
             for name, (role, media) in specs.items()
         }
+        validate_directory_anchor(staging_anchor)
 
         verification_ref: ArtifactRef | None = None
+        verification_bytes: bytes | None = None
         if note_bytes is not None and evaluation is not None:
             verification_id = new_random_id("verification")
             verification = PaperReaderVerification(
@@ -485,7 +516,12 @@ def _publish_reconciliation_locked(
                 gate=gate,
             )
             staged_verification_path = staged_sidecar / "verification.json"
-            staged_verification_path.write_bytes(canonical_json_bytes(verification))
+            verification_bytes = canonical_json_bytes(verification)
+            atomic_write_bytes(
+                staged_verification_path,
+                verification_bytes,
+                anchor=staging_anchor,
+            )
             verification_ref = _artifact_ref(
                 run_dir,
                 staged_verification_path,
@@ -513,9 +549,21 @@ def _publish_reconciliation_locked(
             gate=gate,
         )
         reconciliation_bytes = canonical_json_bytes(reconciliation)
-        (staged_sidecar / "record.json").write_bytes(reconciliation_bytes)
+        atomic_write_bytes(
+            staged_sidecar / "record.json",
+            reconciliation_bytes,
+            anchor=staging_anchor,
+        )
         staged_reconciliation_path = staging / f"{bound.authorization.authorization_id}.json"
-        staged_reconciliation_path.write_bytes(reconciliation_bytes)
+        atomic_write_bytes(
+            staged_reconciliation_path,
+            reconciliation_bytes,
+            anchor=staging_anchor,
+        )
+        sidecar_files = {**files, "record.json": reconciliation_bytes}
+        if verification_bytes is not None:
+            sidecar_files["verification.json"] = verification_bytes
+        sidecar_snapshot = tree_snapshot_from_bytes(sidecar_files)
         reconciliation_ref = _artifact_ref(
             run_dir,
             staged_reconciliation_path,
@@ -549,6 +597,9 @@ def _publish_reconciliation_locked(
                 staging_dir=staging,
                 allow_existing_sidecar=False,
                 allow_existing_main=False,
+                expected_run_anchor=loaded.run_directory_anchor,
+                expected_staging_anchor=staging_anchor,
+                expected_sidecar_snapshot=sidecar_snapshot,
             ) as publication:
                 publication.publish_sidecar(staged_sidecar)
                 publication_phase = "main"
@@ -567,7 +618,11 @@ def _publish_reconciliation_locked(
                 ),
             ) from exc
         try:
-            atomic_write_json(loaded.manifest_path, updated_run)
+            atomic_write_json(
+                loaded.manifest_path,
+                updated_run,
+                anchor=loaded.run_directory_anchor,
+            )
         except Exception as exc:
             raise ZoteroReconciliationError(
                 "reconciliation_status_update_failed",
@@ -582,8 +637,14 @@ def _publish_reconciliation_locked(
             replayed=False,
         )
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        try:
+            remove_anchored_tree(
+                run_anchor,
+                staging,
+                expected=staging_anchor,
+            )
+        finally:
+            staging_anchor.close()
 
 
 def reconcile_zotero_authorization(

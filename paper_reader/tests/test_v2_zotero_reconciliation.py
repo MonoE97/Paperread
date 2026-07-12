@@ -401,12 +401,12 @@ def test_reconciliation_size_and_run_binding_faults_ignore_unbound_orphans(
     original_write = module.atomic_write_json
     failed = False
 
-    def fail_once(path: Path, value):
+    def fail_once(path: Path, value, **kwargs):
         nonlocal failed
         if Path(path).name == "run.json" and not failed:
             failed = True
             raise OSError("injected reconciliation run binding failure")
-        return original_write(path, value)
+        return original_write(path, value, **kwargs)
 
     monkeypatch.setattr(module, "atomic_write_json", fail_once)
 

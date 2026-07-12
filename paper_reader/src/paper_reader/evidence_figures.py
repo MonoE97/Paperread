@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-import shutil
+import os
+import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from paper_reader.evidence_manifest import EvidenceFigureMember, EvidenceResourceCheck
 from paper_reader.figures import extract_figures
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
-from paper_reader.storage import canonical_json_bytes
+from paper_reader.storage import (
+    DirectoryAnchorLike,
+    atomic_write_bytes,
+    canonical_json_bytes,
+    remove_anchored_file,
+    remove_anchored_tree,
+)
 from paper_reader.workflow import build_figure_context_markdown
 
 
@@ -125,6 +133,7 @@ def prepare_figure_artifacts(
     *,
     source_path: Path,
     staging: Path,
+    staging_anchor: DirectoryAnchorLike,
     future_dir: Path,
     run_dir: Path,
     figure_limit: int,
@@ -148,76 +157,118 @@ def prepare_figure_artifacts(
         )
 
     try:
-        figures_payload = extract_figures(
-            source_path,
-            output_dir=staging / "figures",
-            top_k=figure_limit,
-            max_pages=preview_pages,
-            item_details=None,
-            allow_network_source=allow_network_source,
-            max_candidates=V2_RESOURCE_POLICY.figure_max_candidates,
-        )
-        selected = figures_payload.get("selected_figures", [])
-        if not isinstance(selected, list):
-            raise ValueError("selected_figures must be a list")
-        if len(selected) > figure_limit:
-            raise ValueError("selected figure count exceeds the requested figure limit")
-        resource_checks = _resource_checks(figures_payload, selected)
-        artifacts: list[ArtifactSpec] = []
-        members: list[EvidenceFigureMember] = []
-        normalized_selected: list[dict] = []
-        figures_root = (staging / "figures").resolve(strict=True)
-        for item in selected:
-            if not isinstance(item, dict):
-                raise ValueError("selected figure must be an object")
-            image_path = Path(str(item.get("image_path", ""))).resolve(strict=True)
-            if not image_path.is_relative_to(figures_root):
-                raise ValueError(f"figure image escapes evidence staging: {image_path}")
-            relative_image = image_path.relative_to(staging)
-            future_image = future_dir / relative_image
-            normalized = dict(item)
-            normalized["image_path"] = future_image.relative_to(run_dir).as_posix()
-            normalized_selected.append(normalized)
-            members.append(
-                EvidenceFigureMember(
-                    figure_id=str(item.get("figure_id", "")),
-                    page=int(item.get("page", 0)),
-                    artifact_path=future_image.relative_to(run_dir).as_posix(),
-                )
+        with tempfile.TemporaryDirectory(prefix="paper-reader-figures-") as scratch_text:
+            scratch = Path(scratch_text)
+            scratch_figures = scratch / "figures"
+            figures_payload = extract_figures(
+                source_path,
+                output_dir=scratch_figures,
+                top_k=figure_limit,
+                max_pages=preview_pages,
+                item_details=None,
+                allow_network_source=allow_network_source,
+                max_candidates=V2_RESOURCE_POLICY.figure_max_candidates,
             )
-            artifacts.append((image_path, future_image, "figure_image", "image/png"))
+            selected = figures_payload.get("selected_figures", [])
+            if not isinstance(selected, list):
+                raise ValueError("selected_figures must be a list")
+            if len(selected) > figure_limit:
+                raise ValueError("selected figure count exceeds the requested figure limit")
+            resource_checks = _resource_checks(figures_payload, selected)
+            artifacts: list[ArtifactSpec] = []
+            members: list[EvidenceFigureMember] = []
+            normalized_selected: list[dict] = []
+            figures_root = scratch_figures.resolve(strict=True)
+            for item in selected:
+                if not isinstance(item, dict):
+                    raise ValueError("selected figure must be an object")
+                image_path = Path(str(item.get("image_path", ""))).resolve(strict=True)
+                if not image_path.is_relative_to(figures_root):
+                    raise ValueError(f"figure image escapes extraction scratch: {image_path}")
+                before = os.lstat(image_path)
+                if (
+                    not stat.S_ISREG(before.st_mode)
+                    or stat.S_ISLNK(before.st_mode)
+                    or before.st_nlink != 1
+                ):
+                    raise ValueError(f"figure image is not a single-link regular file: {image_path}")
+                image_bytes = image_path.read_bytes()
+                after = os.lstat(image_path)
+                if (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_nlink,
+                ) != (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_mtime_ns,
+                    after.st_nlink,
+                ):
+                    raise ValueError(f"figure image changed while copied: {image_path}")
+                relative_image = image_path.relative_to(figures_root)
+                staged_image = staging / "figures" / relative_image
+                atomic_write_bytes(
+                    staged_image,
+                    image_bytes,
+                    anchor=staging_anchor,
+                )
+                future_image = future_dir / "figures" / relative_image
+                normalized = dict(item)
+                normalized["image_path"] = future_image.relative_to(run_dir).as_posix()
+                normalized_selected.append(normalized)
+                members.append(
+                    EvidenceFigureMember(
+                        figure_id=str(item.get("figure_id", "")),
+                        page=int(item.get("page", 0)),
+                        artifact_path=future_image.relative_to(run_dir).as_posix(),
+                    )
+                )
+                artifacts.append((staged_image, future_image, "figure_image", "image/png"))
 
-        normalized_payload = dict(figures_payload)
-        normalized_payload["selected_figures"] = normalized_selected
-        figures_json = staging / "figures.json"
-        figure_context = staging / "figure_context.md"
-        figures_json.write_bytes(canonical_json_bytes(normalized_payload))
-        figure_context.write_text(build_figure_context_markdown(normalized_payload), encoding="utf-8")
-        artifacts.extend(
-            [
-                (figures_json, future_dir / "figures.json", "figures", "application/json"),
-                (
-                    figure_context,
-                    future_dir / "figure_context.md",
-                    "figure_context",
-                    "text/markdown",
+            normalized_payload = dict(figures_payload)
+            normalized_payload["selected_figures"] = normalized_selected
+            figures_json = staging / "figures.json"
+            figure_context = staging / "figure_context.md"
+            atomic_write_bytes(
+                figures_json,
+                canonical_json_bytes(normalized_payload),
+                anchor=staging_anchor,
+            )
+            atomic_write_bytes(
+                figure_context,
+                build_figure_context_markdown(normalized_payload).encode("utf-8"),
+                anchor=staging_anchor,
+            )
+            artifacts.extend(
+                [
+                    (figures_json, future_dir / "figures.json", "figures", "application/json"),
+                    (
+                        figure_context,
+                        future_dir / "figure_context.md",
+                        "figure_context",
+                        "text/markdown",
+                    ),
+                ]
+            )
+            return PreparedFigures(
+                artifacts=tuple(artifacts),
+                members=tuple(members),
+                degraded=False,
+                extraction_check=EvidenceResourceCheck(
+                    name="figure_extraction",
+                    status="passed",
+                    actual=len(normalized_selected),
+                    limit=figure_limit,
                 ),
-            ]
-        )
-        return PreparedFigures(
-            artifacts=tuple(artifacts),
-            members=tuple(members),
-            degraded=False,
-            extraction_check=EvidenceResourceCheck(
-                name="figure_extraction",
-                status="passed",
-                actual=len(normalized_selected),
-                limit=figure_limit,
-            ),
-            resource_checks=resource_checks,
-        )
+                resource_checks=resource_checks,
+            )
     except Exception as exc:
-        shutil.rmtree(staging / "figures", ignore_errors=True)
+        remove_anchored_tree(staging_anchor, staging / "figures")
+        remove_anchored_file(staging_anchor, staging / "figures.json")
+        remove_anchored_file(staging_anchor, staging / "figure_context.md")
         if not complete:
             raise IncompleteFigureEvidenceError(str(exc)) from exc
         resource_checks = (exc.check,) if isinstance(exc, FigureResourceLimitError) else ()

@@ -34,11 +34,15 @@ from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
     PublishConflictError,
+    UnsafeStoragePathError,
+    anchored_entry_exists,
     atomic_write_json,
     canonical_json_bytes,
     publish_bytes_no_replace,
+    read_anchored_bytes,
+    validate_directory_anchor,
 )
-from paper_reader.v2_loader import LoadedRun, load_v2_run
+from paper_reader.v2_loader import DirectoryAnchor, LoadedRun, RunLoadError, load_v2_run
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,17 +64,27 @@ def _load_candidate(
     requested = candidate_manifest_path(candidate_input)
     if requested.is_symlink() or requested.parent.is_symlink():
         raise LocalPublicationError("candidate_tampered", "candidate path must not use symlinks")
-    try:
-        candidate_path = requested.resolve(strict=True)
-        raw = candidate_path.read_bytes()
-    except OSError as exc:
-        raise LocalPublicationError("candidate_unreadable", f"candidate is unreadable: {requested}: {exc}") from exc
+    candidate_path = Path(os.path.abspath(requested))
+    if loaded_run is not None and loaded_run.run_directory_anchor is not None:
+        try:
+            raw = read_anchored_bytes(loaded_run.run_directory_anchor, candidate_path)
+        except (OSError, ValueError) as exc:
+            raise LocalPublicationError(
+                "candidate_tampered",
+                f"candidate is not an anchored single-link file: {requested}: {exc}",
+            ) from exc
+    else:
+        try:
+            candidate_path = requested.resolve(strict=True)
+            raw = candidate_path.read_bytes()
+        except OSError as exc:
+            raise LocalPublicationError("candidate_unreadable", f"candidate is unreadable: {requested}: {exc}") from exc
     candidate_dir = candidate_path.parent
     if candidate_dir.parent.name != "candidates":
         raise LocalPublicationError("candidate_tampered", "candidate left its run candidates directory")
     run_dir = candidate_dir.parent.parent
     loaded = loaded_run or load_v2_run(run_dir)
-    if loaded.manifest_path.resolve(strict=True).parent != run_dir:
+    if loaded.manifest_path.parent != run_dir:
         raise LocalPublicationError("candidate_tampered", "candidate run directory binding mismatch")
     try:
         candidate = PaperReaderCandidate.model_validate_json(raw)
@@ -100,7 +114,11 @@ def _load_candidate(
     verified: dict[str, list[tuple[Path, bytes]]] = {}
     for artifact in candidate.artifacts:
         try:
-            path, content = verify_artifact_ref(run_dir, artifact)
+            path, content = verify_artifact_ref(
+                run_dir,
+                artifact,
+                anchor=loaded.run_directory_anchor,
+            )
         except LocalPublicationError as exc:
             raise LocalPublicationError("candidate_tampered", str(exc)) from exc
         if not path.is_relative_to(candidate_dir):
@@ -209,7 +227,32 @@ def _updated_run(
     )
 
 
-def _read_stable_regular_file(path: Path, *, conflict_code: str) -> bytes:
+def _read_stable_regular_file(
+    path: Path,
+    *,
+    conflict_code: str,
+    anchor: DirectoryAnchor | None = None,
+) -> bytes:
+    if anchor is not None:
+        try:
+            return read_anchored_bytes(anchor, path)
+        except UnsafeStoragePathError as exc:
+            try:
+                validate_directory_anchor(anchor)
+            except UnsafeStoragePathError as anchor_exc:
+                raise LocalPublicationError(
+                    "run_directory_changed",
+                    f"anchored publication directory changed: {path}: {anchor_exc}",
+                ) from anchor_exc
+            raise LocalPublicationError(
+                conflict_code,
+                f"publication path is unsafe: {path}: {exc}",
+            ) from exc
+        except OSError as exc:
+            raise LocalPublicationError(
+                conflict_code,
+                f"publication path changed while it was verified: {path}: {exc}",
+            ) from exc
     try:
         before_path = os.lstat(path)
     except OSError as exc:
@@ -217,7 +260,11 @@ def _read_stable_regular_file(path: Path, *, conflict_code: str) -> bytes:
             conflict_code,
             f"publication state is unreadable: {path}: {exc}",
         ) from exc
-    if stat.S_ISLNK(before_path.st_mode) or not stat.S_ISREG(before_path.st_mode):
+    if (
+        stat.S_ISLNK(before_path.st_mode)
+        or not stat.S_ISREG(before_path.st_mode)
+        or before_path.st_nlink != 1
+    ):
         raise LocalPublicationError(
             conflict_code,
             f"publication path must be one canonical regular file: {path}",
@@ -237,12 +284,16 @@ def _read_stable_regular_file(path: Path, *, conflict_code: str) -> bytes:
             f"publication path changed while it was verified: {path}: {exc}",
         ) from exc
     identities = {
-        (before_path.st_dev, before_path.st_ino, before_path.st_size, before_path.st_mtime_ns),
-        (before_fd.st_dev, before_fd.st_ino, before_fd.st_size, before_fd.st_mtime_ns),
-        (after_fd.st_dev, after_fd.st_ino, after_fd.st_size, after_fd.st_mtime_ns),
-        (after_path.st_dev, after_path.st_ino, after_path.st_size, after_path.st_mtime_ns),
+        (before_path.st_dev, before_path.st_ino, before_path.st_size, before_path.st_mtime_ns, before_path.st_nlink),
+        (before_fd.st_dev, before_fd.st_ino, before_fd.st_size, before_fd.st_mtime_ns, before_fd.st_nlink),
+        (after_fd.st_dev, after_fd.st_ino, after_fd.st_size, after_fd.st_mtime_ns, after_fd.st_nlink),
+        (after_path.st_dev, after_path.st_ino, after_path.st_size, after_path.st_mtime_ns, after_path.st_nlink),
     }
-    if len(identities) != 1 or not stat.S_ISREG(after_path.st_mode):
+    if (
+        len(identities) != 1
+        or not stat.S_ISREG(after_path.st_mode)
+        or after_path.st_nlink != 1
+    ):
         raise LocalPublicationError(
             conflict_code,
             f"publication path changed while it was verified: {path}",
@@ -250,10 +301,20 @@ def _read_stable_regular_file(path: Path, *, conflict_code: str) -> bytes:
     return raw
 
 
-def _verify_exact_target(target_path: Path, expected: bytes, expected_sha256: str) -> bool:
-    if not os.path.lexists(target_path):
+def _verify_exact_target(
+    target_path: Path,
+    expected: bytes,
+    expected_sha256: str,
+    *,
+    anchor: DirectoryAnchor,
+) -> bool:
+    if not anchored_entry_exists(anchor, target_path):
         return False
-    raw = _read_stable_regular_file(target_path, conflict_code="publish_conflict")
+    raw = _read_stable_regular_file(
+        target_path,
+        conflict_code="publish_conflict",
+        anchor=anchor,
+    )
     if (
         len(raw) != len(expected)
         or hashlib.sha256(raw).hexdigest() != expected_sha256
@@ -271,22 +332,24 @@ def _publish_or_recover_target(
     target_path: Path,
     note_bytes: bytes,
     content_sha256: str,
+    *,
+    anchor: DirectoryAnchor,
 ) -> None:
-    if _verify_exact_target(target_path, note_bytes, content_sha256):
+    if _verify_exact_target(target_path, note_bytes, content_sha256, anchor=anchor):
         return
     try:
-        publish_bytes_no_replace(note_bytes, target_path)
+        publish_bytes_no_replace(note_bytes, target_path, anchor=anchor)
     except (PublishConflictError, FileExistsError):
-        _verify_exact_target(target_path, note_bytes, content_sha256)
+        _verify_exact_target(target_path, note_bytes, content_sha256, anchor=anchor)
     except Exception as exc:
-        if _verify_exact_target(target_path, note_bytes, content_sha256):
+        if _verify_exact_target(target_path, note_bytes, content_sha256, anchor=anchor):
             return
         raise LocalPublicationError(
             "publish_failed",
             f"atomic local publication failed before commit: {target_path}: {exc}",
             data={"target_path": str(target_path)},
         ) from exc
-    if not _verify_exact_target(target_path, note_bytes, content_sha256):
+    if not _verify_exact_target(target_path, note_bytes, content_sha256, anchor=anchor):
         raise LocalPublicationError(
             "publish_failed",
             f"atomic local publication did not create its target: {target_path}",
@@ -325,11 +388,14 @@ def _publish_or_verify_intent(
     intent_bytes: bytes,
     intent_path: Path,
     target_path: Path,
+    run_anchor: DirectoryAnchor,
+    target_anchor: DirectoryAnchor,
 ) -> None:
-    if os.path.lexists(intent_path):
+    if anchored_entry_exists(run_anchor, intent_path):
         actual = _read_stable_regular_file(
             intent_path,
             conflict_code="publication_identity_conflict",
+            anchor=run_anchor,
         )
         if actual != intent_bytes:
             raise LocalPublicationError(
@@ -338,18 +404,19 @@ def _publish_or_verify_intent(
             )
         return
 
-    if os.path.lexists(target_path):
+    if anchored_entry_exists(target_anchor, target_path):
         raise LocalPublicationError(
             "publish_conflict",
             f"fixed local target predates this run publication intent: {target_path}",
             data={"target_path": str(target_path)},
         )
     try:
-        publish_bytes_no_replace(intent_bytes, intent_path)
+        publish_bytes_no_replace(intent_bytes, intent_path, anchor=run_anchor)
     except (PublishConflictError, FileExistsError):
         actual = _read_stable_regular_file(
             intent_path,
             conflict_code="publication_identity_conflict",
+            anchor=run_anchor,
         )
         if actual != intent_bytes:
             raise LocalPublicationError(
@@ -357,10 +424,11 @@ def _publish_or_verify_intent(
                 f"run publication intent belongs to another candidate: {intent_path}",
             )
     except Exception as exc:
-        if os.path.lexists(intent_path):
+        if anchored_entry_exists(run_anchor, intent_path):
             actual = _read_stable_regular_file(
                 intent_path,
                 conflict_code="publication_identity_conflict",
+                anchor=run_anchor,
             )
             if actual == intent_bytes:
                 return
@@ -375,6 +443,7 @@ def _publish_or_verify_intent(
     actual = _read_stable_regular_file(
         intent_path,
         conflict_code="publication_identity_conflict",
+        anchor=run_anchor,
     )
     if actual != intent_bytes:
         raise LocalPublicationError(
@@ -423,6 +492,7 @@ def _publish_or_verify_receipt(
     candidate: PaperReaderCandidate,
     candidate_digest: str,
     intent_ref: ArtifactRef,
+    run_anchor: DirectoryAnchor,
 ) -> tuple[Path, ArtifactRef]:
     receipt_bytes, receipt_path, receipt_ref = _receipt_bytes_and_path(
         run_dir=run_dir,
@@ -431,8 +501,12 @@ def _publish_or_verify_receipt(
         candidate_digest=candidate_digest,
         intent_ref=intent_ref,
     )
-    if os.path.lexists(receipt_path):
-        actual = _read_stable_regular_file(receipt_path, conflict_code="receipt_conflict")
+    if anchored_entry_exists(run_anchor, receipt_path):
+        actual = _read_stable_regular_file(
+            receipt_path,
+            conflict_code="receipt_conflict",
+            anchor=run_anchor,
+        )
         if actual != receipt_bytes:
             raise LocalPublicationError(
                 "receipt_conflict",
@@ -440,19 +514,24 @@ def _publish_or_verify_receipt(
             )
     else:
         try:
-            publish_bytes_no_replace(receipt_bytes, receipt_path)
+            publish_bytes_no_replace(receipt_bytes, receipt_path, anchor=run_anchor)
         except (PublishConflictError, FileExistsError):
-            actual = _read_stable_regular_file(receipt_path, conflict_code="receipt_conflict")
+            actual = _read_stable_regular_file(
+                receipt_path,
+                conflict_code="receipt_conflict",
+                anchor=run_anchor,
+            )
             if actual != receipt_bytes:
                 raise LocalPublicationError(
                     "receipt_conflict",
                     f"deterministic local receipt contains different bytes: {receipt_path}",
                 )
         except Exception as exc:
-            if os.path.lexists(receipt_path):
+            if anchored_entry_exists(run_anchor, receipt_path):
                 actual = _read_stable_regular_file(
                     receipt_path,
                     conflict_code="receipt_conflict",
+                    anchor=run_anchor,
                 )
                 if actual == receipt_bytes:
                     pass
@@ -503,7 +582,13 @@ def _publish_local_candidate_locked(
     verify_local_source(source)
     target_path = validate_local_target_location(target, source)
     _note_path, note_bytes = verified["note_markdown"][0]
-    run_dir = loaded.manifest_path.resolve(strict=True).parent
+    run_dir = loaded.manifest_path.parent
+    run_anchor = loaded.run_directory_anchor
+    if run_anchor is None:
+        raise LocalPublicationError(
+            "run_directory_changed",
+            "local publication requires a locked run directory anchor",
+        )
     intent_bytes, intent_path, intent_ref = _intent_bytes_and_path(
         run_dir=run_dir,
         candidate=candidate,
@@ -541,44 +626,73 @@ def _publish_local_candidate_locked(
                 "max_bytes": exc.max_bytes,
             },
         ) from exc
-    _publish_or_verify_intent(
-        intent_bytes=intent_bytes,
-        intent_path=intent_path,
-        target_path=target_path,
-    )
-    _publish_or_recover_target(target_path, note_bytes, candidate.content_sha256)
-
     try:
-        receipt_path, receipt_ref = _publish_or_verify_receipt(
-            run_dir=run_dir,
-            candidate_path=candidate_path,
-            candidate=candidate,
-            candidate_digest=digest,
-            intent_ref=intent_ref,
+        target_anchor_context = DirectoryAnchor.open(
+            target_path.parent,
+            manifest_path=target_path,
         )
-    except LocalPublicationError:
-        raise
-    except Exception as exc:
-        raise LocalPublicationError(
-            "publication_recovery_required",
-            f"target is committed but local receipt is incomplete: {exc}",
-            data={"target_path": str(target_path)},
-        ) from exc
-    try:
-        updated_run = _updated_run(loaded, intent_ref, receipt_ref, candidate.gate)
-        if updated_run != loaded.run:
-            atomic_write_json(loaded.manifest_path, updated_run)
-    except LocalPublicationError:
-        raise
-    except Exception as exc:
-        raise LocalPublicationError(
-            "publication_recovery_required",
-            f"target and receipt are committed but run status is incomplete: {exc}",
-            data={
-                "target_path": str(target_path),
-                "receipt_path": str(receipt_path),
-            },
-        ) from exc
+    except RunLoadError as exc:
+        raise LocalPublicationError("invalid_local_target", str(exc)) from exc
+    with target_anchor_context as target_anchor:
+        if (
+            target_anchor.device != target.parent_device
+            or target_anchor.inode != target.parent_inode
+        ):
+            raise LocalPublicationError(
+                "invalid_local_target",
+                "local target parent identity changed",
+            )
+        validate_directory_anchor(run_anchor)
+        _publish_or_verify_intent(
+            intent_bytes=intent_bytes,
+            intent_path=intent_path,
+            target_path=target_path,
+            run_anchor=run_anchor,
+            target_anchor=target_anchor,
+        )
+        _publish_or_recover_target(
+            target_path,
+            note_bytes,
+            candidate.content_sha256,
+            anchor=target_anchor,
+        )
+
+        try:
+            receipt_path, receipt_ref = _publish_or_verify_receipt(
+                run_dir=run_dir,
+                candidate_path=candidate_path,
+                candidate=candidate,
+                candidate_digest=digest,
+                intent_ref=intent_ref,
+                run_anchor=run_anchor,
+            )
+        except LocalPublicationError:
+            raise
+        except Exception as exc:
+            raise LocalPublicationError(
+                "publication_recovery_required",
+                f"target is committed but local receipt is incomplete: {exc}",
+                data={"target_path": str(target_path)},
+            ) from exc
+        try:
+            updated_run = _updated_run(loaded, intent_ref, receipt_ref, candidate.gate)
+            if updated_run != loaded.run:
+                atomic_write_json(
+                    loaded.manifest_path,
+                    updated_run,
+                    anchor=run_anchor,
+                )
+        except LocalPublicationError:
+            raise
+        except Exception as exc:
+            raise LocalPublicationError(
+                "publication_recovery_required",
+                f"target and receipt are committed but run status is incomplete: {exc}",
+                data={
+                    "target_path": str(target_path),
+                    "receipt_path": str(receipt_path),
+                },
+            ) from exc
     return PublishedLocalCandidate(
         run_dir=run_dir,
         candidate_path=candidate_path,

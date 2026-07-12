@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 from dataclasses import dataclass
 from datetime import date
 from html import unescape
@@ -27,14 +26,21 @@ from paper_reader.local_lifecycle import LocalLifecycleError, _local_source_iden
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.runs import slugify_title
 from paper_reader.storage import (
+    DirectoryAnchorLike,
     PublishConflictError,
     atomic_publish_tree,
+    atomic_write_bytes,
     canonical_json_bytes,
     canonical_json_sha256,
+    create_anchored_directory,
     new_random_id,
     new_uuid,
+    open_anchored_directory,
+    remove_anchored_tree,
     rfc3339_utc,
+    tree_snapshot_from_bytes,
 )
+from paper_reader.v2_loader import DirectoryAnchor, RunLoadError
 from paper_reader.workflow import select_pdf_attachment
 from paper_reader.zotero_item_io import normalize_item_details_payload
 
@@ -378,15 +384,23 @@ def _build_validated_run(
 def _stage_run(
     staging: Path,
     *,
+    staging_anchor: DirectoryAnchorLike,
     raw_bytes: bytes,
     normalized_bytes: bytes,
     run_bytes: bytes,
 ) -> None:
     source_dir = staging / "source"
-    source_dir.mkdir()
-    (source_dir / "discovery.raw.json").write_bytes(raw_bytes)
-    (source_dir / "source.json").write_bytes(normalized_bytes)
-    (staging / "run.json").write_bytes(run_bytes)
+    atomic_write_bytes(
+        source_dir / "discovery.raw.json",
+        raw_bytes,
+        anchor=staging_anchor,
+    )
+    atomic_write_bytes(
+        source_dir / "source.json",
+        normalized_bytes,
+        anchor=staging_anchor,
+    )
+    atomic_write_bytes(staging / "run.json", run_bytes, anchor=staging_anchor)
 
 
 def initialize_zotero_run(
@@ -492,34 +506,73 @@ def initialize_zotero_run(
                     "zotero_pdf_unavailable",
                     "selected Zotero PDF changed before run allocation",
                 )
-            runs_day.mkdir(parents=True, exist_ok=True)
-            version = 1
-            while True:
-                suffix = "" if version == 1 else f"_v{version}"
-                destination = runs_day / f"{slug}{suffix}"
-                staging = runs_day / f".{destination.name}.{new_uuid()}.staging"
-                staging.mkdir()
+            try:
+                root_anchor_context = DirectoryAnchor.open(
+                    resolved_root,
+                    manifest_path=resolved_root / "run.json",
+                )
+            except RunLoadError as exc:
+                raise ZoteroLifecycleError("initialization_failed", str(exc)) from exc
+            with root_anchor_context as root_anchor:
                 try:
-                    _stage_run(
-                        staging,
-                        raw_bytes=raw_bytes,
-                        normalized_bytes=normalized_bytes,
-                        run_bytes=run_bytes,
+                    runs_anchor_context = open_anchored_directory(
+                        root_anchor,
+                        runs_day,
+                        create=True,
                     )
-                    try:
-                        atomic_publish_tree(staging, destination)
-                    except PublishConflictError:
-                        version += 1
-                        continue
-                    except Exception as exc:
-                        raise ZoteroLifecycleError(
-                            "initialization_failed",
-                            f"Zotero run reservation failed: {destination}: {exc}",
-                        ) from exc
-                    return InitializedZoteroRun(run_dir=destination, run=run)
-                finally:
-                    if staging.exists():
-                        shutil.rmtree(staging)
+                except Exception as exc:
+                    raise ZoteroLifecycleError(
+                        "initialization_failed",
+                        f"Zotero runs directory cannot be created safely: {exc}",
+                    ) from exc
+                with runs_anchor_context as runs_anchor:
+                    version = 1
+                    while True:
+                        suffix = "" if version == 1 else f"_v{version}"
+                        destination = runs_day / f"{slug}{suffix}"
+                        staging = runs_day / f".{destination.name}.{new_uuid()}.staging"
+                        staging_anchor = create_anchored_directory(runs_anchor, staging)
+                        try:
+                            _stage_run(
+                                staging,
+                                staging_anchor=staging_anchor,
+                                raw_bytes=raw_bytes,
+                                normalized_bytes=normalized_bytes,
+                                run_bytes=run_bytes,
+                            )
+                            staging_snapshot = tree_snapshot_from_bytes(
+                                {
+                                    "source/discovery.raw.json": raw_bytes,
+                                    "source/source.json": normalized_bytes,
+                                    "run.json": run_bytes,
+                                }
+                            )
+                            try:
+                                atomic_publish_tree(
+                                    staging,
+                                    destination,
+                                    anchor=runs_anchor,
+                                    expected_staging_anchor=staging_anchor,
+                                    expected_tree_snapshot=staging_snapshot,
+                                )
+                            except PublishConflictError:
+                                version += 1
+                                continue
+                            except Exception as exc:
+                                raise ZoteroLifecycleError(
+                                    "initialization_failed",
+                                    f"Zotero run reservation failed: {destination}: {exc}",
+                                ) from exc
+                            return InitializedZoteroRun(run_dir=destination, run=run)
+                        finally:
+                            try:
+                                remove_anchored_tree(
+                                    runs_anchor,
+                                    staging,
+                                    expected=staging_anchor,
+                                )
+                            finally:
+                                staging_anchor.close()
         finally:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 

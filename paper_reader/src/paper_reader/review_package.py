@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,13 +28,18 @@ from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
     atomic_publish_tree,
+    atomic_write_bytes,
     atomic_write_json,
     canonical_json_bytes,
     canonical_json_sha256,
+    create_anchored_directory,
     new_random_id,
     new_uuid,
     rfc3339_utc,
+    remove_anchored_tree,
     sha256_file,
+    tree_snapshot_from_bytes,
+    validate_directory_anchor,
 )
 from paper_reader.summary_lint import lint_rendered_markdown, lint_summary
 from paper_reader.v2_loader import LoadedRun, load_v2_run
@@ -176,9 +180,13 @@ def _validate_locator_bindings(
             )
 
 
-def validate_review_run(run_path: Path) -> ReviewValidation:
-    loaded = load_v2_run(run_path)
-    run_dir = loaded.manifest_path.resolve(strict=True).parent
+def validate_review_run(
+    run_path: Path,
+    *,
+    loaded_run: LoadedRun | None = None,
+) -> ReviewValidation:
+    loaded = loaded_run or load_v2_run(run_path)
+    run_dir = loaded.manifest_path.parent
     summary_path = run_dir / "summary.json"
     review_path = run_dir / "review.json"
     blockers: list[GateBlocker] = []
@@ -331,12 +339,12 @@ def _reviewed_run(
 
 
 def seal_review_run(run_path: Path) -> SealedReview:
-    with locked_v2_run(run_path):
-        return _seal_review_run_locked(run_path)
+    with locked_v2_run(run_path) as loaded:
+        return _seal_review_run_locked(run_path, loaded)
 
 
-def _seal_review_run_locked(run_path: Path) -> SealedReview:
-    validation = validate_review_run(run_path)
+def _seal_review_run_locked(run_path: Path, loaded: LoadedRun) -> SealedReview:
+    validation = validate_review_run(run_path, loaded_run=loaded)
     if validation.blockers:
         raise ReviewSealError(
             "review_blocked",
@@ -361,7 +369,13 @@ def _seal_review_run_locked(run_path: Path) -> SealedReview:
     package_id = new_random_id("review-package")
     package_dir = validation.run_dir / "reviews" / package_id
     staging = validation.run_dir / f".{package_id}.{new_uuid()}.staging"
-    staging.mkdir()
+    run_anchor = validation.loaded_run.run_directory_anchor
+    if run_anchor is None:
+        raise ReviewSealError(
+            "run_directory_changed",
+            "review seal requires a locked run directory anchor",
+        )
+    staging_anchor = create_anchored_directory(run_anchor, staging)
     try:
         snapshot_bytes = {
             "summary.json": validation.summary_bytes,
@@ -390,7 +404,7 @@ def _seal_review_run_locked(run_path: Path) -> SealedReview:
         }
         snapshot_bytes["validation.json"] = canonical_json_bytes(validation_payload)
         for name, content in snapshot_bytes.items():
-            (staging / name).write_bytes(content)
+            atomic_write_bytes(staging / name, content, anchor=staging_anchor)
 
         specs = {
             "summary.json": ("summary_snapshot", "application/json"),
@@ -400,6 +414,7 @@ def _seal_review_run_locked(run_path: Path) -> SealedReview:
             "note.md": ("review_note_markdown", "text/markdown"),
             "note.html": ("review_note_html", "text/html"),
         }
+        validate_directory_anchor(staging_anchor)
         refs = {
             name: _artifact_ref(
                 validation.run_dir,
@@ -410,6 +425,7 @@ def _seal_review_run_locked(run_path: Path) -> SealedReview:
             )
             for name, (role, media_type) in specs.items()
         }
+        validate_directory_anchor(staging_anchor)
         gate = GateState(
             status="passed",
             evaluated_at=rfc3339_utc(),
@@ -438,7 +454,11 @@ def _seal_review_run_locked(run_path: Path) -> SealedReview:
             gate=gate,
         )
         staged_package_path = staging / "review-package.json"
-        staged_package_path.write_bytes(canonical_json_bytes(review_package))
+        atomic_write_bytes(
+            staged_package_path,
+            canonical_json_bytes(review_package),
+            anchor=staging_anchor,
+        )
         package_path = package_dir / "review-package.json"
         package_ref = _artifact_ref(
             validation.run_dir,
@@ -466,8 +486,20 @@ def _seal_review_run_locked(run_path: Path) -> SealedReview:
                     "max_bytes": exc.max_bytes,
                 },
             ) from exc
+        staging_snapshot = tree_snapshot_from_bytes(
+            {
+                **snapshot_bytes,
+                "review-package.json": canonical_json_bytes(review_package),
+            }
+        )
         try:
-            atomic_publish_tree(staging, package_dir)
+            atomic_publish_tree(
+                staging,
+                package_dir,
+                anchor=validation.loaded_run.run_directory_anchor,
+                expected_staging_anchor=staging_anchor,
+                expected_tree_snapshot=staging_snapshot,
+            )
         except Exception as exc:
             raise ReviewSealError(
                 "review_seal_failed",
@@ -475,7 +507,11 @@ def _seal_review_run_locked(run_path: Path) -> SealedReview:
                 data={"run_id": validation.loaded_run.run.run_id},
             ) from exc
         try:
-            atomic_write_json(validation.loaded_run.manifest_path, updated_run)
+            atomic_write_json(
+                validation.loaded_run.manifest_path,
+                updated_run,
+                anchor=validation.loaded_run.run_directory_anchor,
+            )
         except Exception as exc:
             raise ReviewSealError(
                 "review_status_update_failed",
@@ -489,8 +525,14 @@ def _seal_review_run_locked(run_path: Path) -> SealedReview:
             package_digest=package_ref.sha256,
         )
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        try:
+            remove_anchored_tree(
+                run_anchor,
+                staging,
+                expected=staging_anchor,
+            )
+        finally:
+            staging_anchor.close()
 
 
 __all__ = [

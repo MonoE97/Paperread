@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,11 +18,16 @@ from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
+    atomic_write_bytes,
     atomic_write_json,
     canonical_json_bytes,
+    create_anchored_directory,
     new_random_id,
     new_uuid,
+    remove_anchored_tree,
     rfc3339_utc,
+    tree_snapshot_from_bytes,
+    validate_directory_anchor,
 )
 from paper_reader.v2_loader import LoadedRun
 from paper_reader.zotero_authorization_loader import (
@@ -107,6 +111,7 @@ def _validate_verification_record(
     *,
     bound: LoadedAuthorization,
     note_key: str,
+    loaded: LoadedRun,
 ) -> PaperReaderVerification:
     try:
         verification = PaperReaderVerification.model_validate_json(raw)
@@ -137,7 +142,11 @@ def _validate_verification_record(
     roles: set[str] = set()
     for artifact in verification.artifacts:
         try:
-            artifact_path, _artifact_bytes = verify_artifact_ref(run_dir, artifact)
+            artifact_path, _artifact_bytes = verify_artifact_ref(
+                run_dir,
+                artifact,
+                anchor=loaded.run_directory_anchor,
+            )
         except LocalPublicationError as exc:
             raise ZoteroVerificationError(
                 "verification_tampered",
@@ -172,7 +181,7 @@ def _existing_verification(
     bound: LoadedAuthorization,
     note_key: str,
 ) -> VerifiedZoteroNote | None:
-    run_dir = loaded.manifest_path.resolve(strict=True).parent
+    run_dir = loaded.manifest_path.parent
     artifact_paths = _verification_artifact_paths(
         run_dir,
         bound.authorization.authorization_id,
@@ -202,6 +211,7 @@ def _existing_verification(
         raw,
         bound=bound,
         note_key=note_key,
+        loaded=loaded,
     )
     if not verification_path.exists():
         try:
@@ -210,6 +220,7 @@ def _existing_verification(
                 staging_dir=None,
                 allow_existing_sidecar=True,
                 allow_existing_main=False,
+                expected_run_anchor=loaded.run_directory_anchor,
             ) as publication:
                 publication.publish_main(recovery_record, expected_bytes=raw)
         except UnsafeZoteroArtifactPathError as exc:
@@ -232,7 +243,11 @@ def _existing_verification(
         )
     if refs:
         try:
-            path, bound_raw = verify_artifact_ref(run_dir, refs[0])
+            path, bound_raw = verify_artifact_ref(
+                run_dir,
+                refs[0],
+                anchor=loaded.run_directory_anchor,
+            )
         except LocalPublicationError as exc:
             raise ZoteroVerificationError(
                 "verification_tampered",
@@ -258,7 +273,11 @@ def _existing_verification(
             verified=verification.verified,
         )
         try:
-            atomic_write_json(loaded.manifest_path, updated_run)
+            atomic_write_json(
+                loaded.manifest_path,
+                updated_run,
+                anchor=loaded.run_directory_anchor,
+            )
         except Exception as exc:
             raise ZoteroVerificationError(
                 "verification_status_update_failed",
@@ -320,10 +339,15 @@ def publish_verification_locked(
     verification_path = artifact_paths.main
     verification_dir = artifact_paths.sidecar
     staging = run_dir / f".{verification_id}.{new_uuid()}.staging"
-    staging.mkdir()
+    run_anchor = loaded.run_directory_anchor
+    if run_anchor is None:
+        raise ZoteroVerificationError(
+            "run_directory_changed",
+            "verification requires a locked run directory anchor",
+        )
+    staging_anchor = create_anchored_directory(run_anchor, staging)
     try:
         staged_sidecar = staging / "sidecar"
-        staged_sidecar.mkdir()
         checks_payload = {
             "format": "paper_reader.verification-checks.v2-internal",
             "authorization_digest": bound.authorization_digest,
@@ -336,12 +360,17 @@ def publish_verification_locked(
             "checks.json": canonical_json_bytes(checks_payload),
         }
         for name, content in files.items():
-            (staged_sidecar / name).write_bytes(content)
+            atomic_write_bytes(
+                staged_sidecar / name,
+                content,
+                anchor=staging_anchor,
+            )
         specs = {
             "authorization.json": ("authorization_snapshot", "application/json"),
             "note.json": ("zotero_note_readback", "application/json"),
             "checks.json": ("verification_checks", "application/json"),
         }
+        validate_directory_anchor(staging_anchor)
         refs = {
             name: _artifact_ref(
                 run_dir,
@@ -352,6 +381,7 @@ def publish_verification_locked(
             )
             for name, (role, media) in specs.items()
         }
+        validate_directory_anchor(staging_anchor)
         gate = _verification_gate(evaluation)
         verification = PaperReaderVerification(
             schema_version="paper_reader.verification.v2",
@@ -372,9 +402,20 @@ def publish_verification_locked(
             gate=gate,
         )
         verification_bytes = canonical_json_bytes(verification)
-        (staged_sidecar / "record.json").write_bytes(verification_bytes)
+        atomic_write_bytes(
+            staged_sidecar / "record.json",
+            verification_bytes,
+            anchor=staging_anchor,
+        )
         staged_verification_path = staging / f"{note_key}.json"
-        staged_verification_path.write_bytes(verification_bytes)
+        atomic_write_bytes(
+            staged_verification_path,
+            verification_bytes,
+            anchor=staging_anchor,
+        )
+        sidecar_snapshot = tree_snapshot_from_bytes(
+            {**files, "record.json": verification_bytes}
+        )
         verification_ref = _artifact_ref(
             run_dir,
             staged_verification_path,
@@ -408,6 +449,9 @@ def publish_verification_locked(
                 staging_dir=staging,
                 allow_existing_sidecar=False,
                 allow_existing_main=False,
+                expected_run_anchor=loaded.run_directory_anchor,
+                expected_staging_anchor=staging_anchor,
+                expected_sidecar_snapshot=sidecar_snapshot,
             ) as publication:
                 publication.publish_sidecar(staged_sidecar)
                 publication_phase = "main"
@@ -426,7 +470,11 @@ def publish_verification_locked(
                 ),
             ) from exc
         try:
-            atomic_write_json(loaded.manifest_path, updated_run)
+            atomic_write_json(
+                loaded.manifest_path,
+                updated_run,
+                anchor=loaded.run_directory_anchor,
+            )
         except Exception as exc:
             raise ZoteroVerificationError(
                 "verification_status_update_failed",
@@ -441,8 +489,14 @@ def publish_verification_locked(
             replayed=False,
         )
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        try:
+            remove_anchored_tree(
+                run_anchor,
+                staging,
+                expected=staging_anchor,
+            )
+        finally:
+            staging_anchor.close()
 
 
 def verify_zotero_authorization(

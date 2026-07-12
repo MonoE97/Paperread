@@ -326,8 +326,8 @@ def test_review_seal_uses_only_bytes_captured_by_validation(
     original_validate = review_package.validate_review_run
     captured: dict[str, object] = {}
 
-    def validate_then_overwrite(run_path: Path):
-        validation = original_validate(run_path)
+    def validate_then_overwrite(run_path: Path, **kwargs):
+        validation = original_validate(run_path, **kwargs)
         captured["validation"] = validation
         validation.summary_path.write_bytes(b"summary swapped after validation")
         validation.review_path.write_bytes(b"review swapped after validation")
@@ -409,12 +409,12 @@ def test_review_run_update_fault_leaves_unbound_orphan_and_retry_binds_new_packa
     original_write = review_package.atomic_write_json
     failed = False
 
-    def fail_once(path: Path, value):
+    def fail_once(path: Path, value, **kwargs):
         nonlocal failed
         if Path(path).name == "run.json" and not failed:
             failed = True
             raise OSError("injected failure after review package publication")
-        return original_write(path, value)
+        return original_write(path, value, **kwargs)
 
     monkeypatch.setattr(review_package, "atomic_write_json", fail_once)
 

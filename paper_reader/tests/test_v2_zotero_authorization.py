@@ -640,12 +640,12 @@ def test_authorization_faults_and_size_gate_do_not_create_false_bound_state(
     original_write = module.atomic_write_json
     failed = False
 
-    def fail_once(path: Path, value):
+    def fail_once(path: Path, value, **kwargs):
         nonlocal failed
         if Path(path).name == "run.json" and not failed:
             failed = True
             raise OSError("injected authorization run binding failure")
-        return original_write(path, value)
+        return original_write(path, value, **kwargs)
 
     monkeypatch.setattr(module, "atomic_write_json", fail_once)
 

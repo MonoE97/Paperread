@@ -315,12 +315,12 @@ def test_zotero_candidate_run_binding_fault_leaves_orphan_and_retry_binds_new_tr
     original_write = module.atomic_write_json
     failed = False
 
-    def fail_once(path: Path, value):
+    def fail_once(path: Path, value, **kwargs):
         nonlocal failed
         if Path(path).name == "run.json" and not failed:
             failed = True
             raise OSError("injected Zotero candidate run binding failure")
-        return original_write(path, value)
+        return original_write(path, value, **kwargs)
 
     monkeypatch.setattr(module, "atomic_write_json", fail_once)
 

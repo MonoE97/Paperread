@@ -12,8 +12,12 @@ from typing import Iterator
 
 from paper_reader.storage import (
     AtomicNoReplaceUnsupportedError,
+    DirectoryAnchorLike,
+    ImmutableTreeSnapshot,
     PublishConflictError,
     new_uuid,
+    snapshot_directory_fd,
+    validate_directory_anchor,
 )
 
 
@@ -58,6 +62,9 @@ class AnchoredArtifactPublication:
     staging_fd: int | None = None
     staging_device: int | None = None
     staging_inode: int | None = None
+    locked_run_anchor: DirectoryAnchorLike | None = None
+    expected_staging_anchor: DirectoryAnchorLike | None = None
+    expected_sidecar_snapshot: ImmutableTreeSnapshot | None = None
 
     @property
     def parent_fd(self) -> int:
@@ -82,11 +89,25 @@ class AnchoredArtifactPublication:
         try:
             _fsync_tree_fd(source_fd, source_path)
             source_metadata = os.fstat(source_fd)
+            source_snapshot = snapshot_directory_fd(source_fd)
+            sealed_snapshot = self.expected_sidecar_snapshot or source_snapshot
+            if source_snapshot != sealed_snapshot:
+                raise _unsafe(
+                    source_path,
+                    "sidecar closed-set changed before publication",
+                )
             _validate_anchor_identity(self)
             _require_absent(self.parent_fd, self.paths.stem, self.paths.sidecar)
             _require_absent(self.parent_fd, self.paths.main.name, self.paths.main)
             if source_metadata.st_dev != os.fstat(self.parent_fd).st_dev:
                 raise OSError(errno.EXDEV, "sidecar publication requires the same filesystem")
+            named_source = os.stat(
+                source_name,
+                dir_fd=self.staging_fd,
+                follow_symlinks=False,
+            )
+            if not _same_identity(source_metadata, named_source):
+                raise _unsafe(source_path, "sidecar source name changed before publication")
             _renameat_no_replace(
                 self.staging_fd,
                 source_name,
@@ -95,6 +116,7 @@ class AnchoredArtifactPublication:
                 source=source_path,
                 destination=self.paths.sidecar,
             )
+            os.fsync(self.staging_fd)
             os.fsync(self.parent_fd)
             destination_fd = _open_directory_entry(
                 self.parent_fd,
@@ -106,13 +128,34 @@ class AnchoredArtifactPublication:
                 destination_metadata.st_dev,
                 destination_metadata.st_ino,
             ):
+                named_destination = os.stat(
+                    self.paths.stem,
+                    dir_fd=self.parent_fd,
+                    follow_symlinks=False,
+                )
                 raise _unsafe(
                     self.paths.sidecar,
                     "published sidecar does not match the anchored staging directory",
                 )
+            destination_snapshot = snapshot_directory_fd(destination_fd)
+            if destination_snapshot != sealed_snapshot:
+                raise _unsafe(
+                    self.paths.sidecar,
+                    "published sidecar closed-set changed during publication",
+                )
             os.fsync(destination_fd)
             os.fsync(self.parent_fd)
             _validate_anchor_identity(self)
+            final_destination = os.stat(
+                self.paths.stem,
+                dir_fd=self.parent_fd,
+                follow_symlinks=False,
+            )
+            if not _same_identity(destination_metadata, final_destination):
+                raise _unsafe(
+                    self.paths.sidecar,
+                    "published sidecar name changed before commit",
+                )
             return self.paths.sidecar
         finally:
             if destination_fd is not None:
@@ -127,6 +170,7 @@ class AnchoredArtifactPublication:
         source_parent_fd, close_source_parent = _main_source_parent(self, source_path)
         source_fd: int | None = None
         temporary_fd: int | None = None
+        owned_temporary: os.stat_result | None = None
         published_fd: int | None = None
         temporary_name = f".{self.paths.main.name}.{new_uuid()}.tmp"
         renamed = False
@@ -160,8 +204,24 @@ class AnchoredArtifactPublication:
                 0o644,
                 dir_fd=self.parent_fd,
             )
+            owned_temporary = os.fstat(temporary_fd)
             _write_all(temporary_fd, source_bytes)
             os.fsync(temporary_fd)
+            temporary_metadata = os.fstat(temporary_fd)
+            named_temporary = os.stat(
+                temporary_name,
+                dir_fd=self.parent_fd,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(temporary_metadata.st_mode)
+                or temporary_metadata.st_nlink != 1
+                or not _same_identity(temporary_metadata, named_temporary)
+            ):
+                raise _unsafe(
+                    self.paths.parent / temporary_name,
+                    "main temporary file name changed before publication",
+                )
             _validate_anchor_identity(self)
             _require_real_sidecar(self)
             _require_absent(self.parent_fd, self.paths.main.name, self.paths.main)
@@ -191,6 +251,11 @@ class AnchoredArtifactPublication:
                 published_metadata.st_ino,
                 published_metadata.st_size,
             ) or _read_all(published_fd) != source_bytes:
+                named_published = os.stat(
+                    self.paths.main.name,
+                    dir_fd=self.parent_fd,
+                    follow_symlinks=False,
+                )
                 raise _unsafe(
                     self.paths.main,
                     "published main artifact does not match the anchored temporary file",
@@ -198,6 +263,16 @@ class AnchoredArtifactPublication:
             os.fsync(published_fd)
             os.fsync(self.parent_fd)
             _validate_anchor_identity(self)
+            final_published = os.stat(
+                self.paths.main.name,
+                dir_fd=self.parent_fd,
+                follow_symlinks=False,
+            )
+            if not _same_identity(published_metadata, final_published):
+                raise _unsafe(
+                    self.paths.main,
+                    "published main name changed before commit",
+                )
             return self.paths.main
         finally:
             if published_fd is not None:
@@ -210,10 +285,20 @@ class AnchoredArtifactPublication:
                 os.close(source_parent_fd)
             if not renamed:
                 try:
-                    os.unlink(temporary_name, dir_fd=self.parent_fd)
-                    os.fsync(self.parent_fd)
-                except OSError:
+                    named_temporary = os.stat(
+                        temporary_name,
+                        dir_fd=self.parent_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
                     pass
+                else:
+                    if owned_temporary is not None and _same_identity(
+                        owned_temporary,
+                        named_temporary,
+                    ):
+                        os.unlink(temporary_name, dir_fd=self.parent_fd)
+                        os.fsync(self.parent_fd)
 
 
 def _unsafe(path: Path, message: str) -> UnsafeZoteroArtifactPathError:
@@ -449,6 +534,22 @@ def _validate_existing_destination_state(
 
 
 def _validate_anchor_identity(anchor: AnchoredArtifactPublication) -> None:
+    if anchor.locked_run_anchor is not None:
+        try:
+            validate_directory_anchor(anchor.locked_run_anchor)
+        except Exception as exc:
+            raise _unsafe(
+                anchor.paths.run_dir,
+                f"locked run directory identity changed: {exc}",
+            ) from exc
+    if anchor.expected_staging_anchor is not None:
+        try:
+            validate_directory_anchor(anchor.expected_staging_anchor)
+        except Exception as exc:
+            raise _unsafe(
+                anchor.expected_staging_anchor.path,
+                f"staging directory identity changed: {exc}",
+            ) from exc
     try:
         opened_run = os.fstat(anchor.run_fd)
         current_run = os.lstat(anchor.paths.run_dir)
@@ -527,6 +628,21 @@ def _fsync_tree_fd(directory_fd: int, path: Path) -> None:
                 entry_path,
                 "anchored staging tree contains a symlink, hardlink, or special file",
             )
+    os.fsync(directory_fd)
+
+
+def _remove_tree_contents_fd(directory_fd: int) -> None:
+    for name in sorted(os.listdir(directory_fd)):
+        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISDIR(metadata.st_mode):
+            child_fd = _open_directory_entry(directory_fd, name, Path(name))
+            try:
+                _remove_tree_contents_fd(child_fd)
+            finally:
+                os.close(child_fd)
+            os.rmdir(name, dir_fd=directory_fd)
+        else:
+            os.unlink(name, dir_fd=directory_fd)
     os.fsync(directory_fd)
 
 
@@ -654,12 +770,28 @@ def anchored_artifact_publication(
     staging_dir: Path | None,
     allow_existing_sidecar: bool,
     allow_existing_main: bool,
+    expected_run_anchor: DirectoryAnchorLike | None = None,
+    expected_staging_anchor: DirectoryAnchorLike | None = None,
+    expected_sidecar_snapshot: ImmutableTreeSnapshot | None = None,
 ) -> Iterator[AnchoredArtifactPublication]:
     descriptors: list[int] = []
     staging_fd: int | None = None
     try:
         try:
-            run_fd = os.open(paths.run_dir, _DIRECTORY_FLAGS)
+            if expected_run_anchor is None:
+                run_fd = os.open(paths.run_dir, _DIRECTORY_FLAGS)
+            else:
+                validate_directory_anchor(expected_run_anchor)
+                if Path(os.path.abspath(paths.run_dir)) != Path(
+                    os.path.abspath(expected_run_anchor.path)
+                ):
+                    raise _unsafe(
+                        paths.run_dir,
+                        "artifact run directory differs from the locked run anchor",
+                    )
+                run_fd = os.dup(expected_run_anchor.descriptor)
+        except UnsafeZoteroArtifactPathError:
+            raise
         except OSError as exc:
             raise _unsafe(paths.run_dir, f"anchored run directory open failed: {exc}") from exc
         descriptors.append(run_fd)
@@ -672,6 +804,11 @@ def anchored_artifact_publication(
             or not _same_identity(opened_run, current_run)
         ):
             raise _unsafe(paths.run_dir, "run directory changed during anchored open")
+        if expected_run_anchor is not None and (
+            opened_run.st_dev,
+            opened_run.st_ino,
+        ) != (expected_run_anchor.device, expected_run_anchor.inode):
+            raise _unsafe(paths.run_dir, "artifact publisher does not match the locked run")
         components: list[_AnchoredDirectory] = []
         parent_fd = run_fd
         current_path = paths.run_dir
@@ -723,6 +860,26 @@ def anchored_artifact_publication(
             )
             descriptors.append(staging_fd)
             staging_metadata = os.fstat(staging_fd)
+            if expected_staging_anchor is not None and (
+                staging_metadata.st_dev,
+                staging_metadata.st_ino,
+            ) != (expected_staging_anchor.device, expected_staging_anchor.inode):
+                raise _unsafe(
+                    resolved_staging,
+                    "artifact staging directory differs from the expected staging anchor",
+                )
+            if expected_staging_anchor is not None:
+                validate_directory_anchor(expected_staging_anchor)
+        elif expected_staging_anchor is not None:
+            raise _unsafe(
+                expected_staging_anchor.path,
+                "expected staging anchor requires a staging directory",
+            )
+        if expected_sidecar_snapshot is not None and staging_dir is None:
+            raise _unsafe(
+                paths.run_dir,
+                "expected sidecar snapshot requires a staging directory",
+            )
 
         anchor = AnchoredArtifactPublication(
             paths=paths,
@@ -734,6 +891,9 @@ def anchored_artifact_publication(
             staging_fd=staging_fd,
             staging_device=None if staging_metadata is None else staging_metadata.st_dev,
             staging_inode=None if staging_metadata is None else staging_metadata.st_ino,
+            locked_run_anchor=expected_run_anchor,
+            expected_staging_anchor=expected_staging_anchor,
+            expected_sidecar_snapshot=expected_sidecar_snapshot,
         )
         _validate_existing_destination_state(
             anchor,

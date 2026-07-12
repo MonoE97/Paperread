@@ -91,6 +91,7 @@ def test_init_local_reserves_first_free_version_without_touching_history(tmp_pat
         "target_type": "local",
         "resolved_path": str(tmp_path / "paper_note_v3.md"),
         "parent_device": tmp_path.stat().st_dev,
+        "parent_inode": tmp_path.stat().st_ino,
     }
     assert run_payload["source"]["resolved_path"] == str(source.resolve())
     assert run_payload["source"]["size_bytes"] == source.stat().st_size
@@ -292,9 +293,9 @@ def test_init_local_blocks_raced_reservation_and_allocates_next_pair(
     original_publish = local_lifecycle.atomic_publish_tree
     injected = False
 
-    def publish_then_race(staging: Path, destination: Path) -> Path:
+    def publish_then_race(staging: Path, destination: Path, **kwargs) -> Path:
         nonlocal injected
-        published = original_publish(staging, destination)
+        published = original_publish(staging, destination, **kwargs)
         if destination.name == "paper_analysis" and not injected:
             target.write_bytes(b"external competing note")
             injected = True

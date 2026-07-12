@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,11 +35,16 @@ from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
     atomic_publish_tree,
+    atomic_write_bytes,
     atomic_write_json,
     canonical_json_bytes,
+    create_anchored_directory,
     new_random_id,
     new_uuid,
+    remove_anchored_tree,
     rfc3339_utc,
+    tree_snapshot_from_bytes,
+    validate_directory_anchor,
 )
 from paper_reader.v2_loader import LoadedRun, load_v2_run
 from paper_reader.zotero_lifecycle import parent_fingerprint
@@ -61,7 +65,7 @@ def _source_snapshot_bytes(
     loaded: LoadedRun,
     source: ZoteroSourceIdentity,
 ) -> tuple[bytes, bytes]:
-    run_dir = loaded.manifest_path.resolve(strict=True).parent
+    run_dir = loaded.manifest_path.parent
     refs_by_role = {
         role: [item for item in loaded.run.artifacts if item.role == role]
         for role in ("raw_discovery_bundle", "normalized_source")
@@ -76,8 +80,16 @@ def _source_snapshot_bytes(
             "source_snapshot_missing",
             "run must bind the exact normalized Zotero source snapshot",
         )
-    _raw_path, raw_bytes = verify_artifact_ref(run_dir, source.raw_discovery_bundle)
-    _normalized_path, normalized_bytes = verify_artifact_ref(run_dir, source.normalized_source)
+    _raw_path, raw_bytes = verify_artifact_ref(
+        run_dir,
+        source.raw_discovery_bundle,
+        anchor=loaded.run_directory_anchor,
+    )
+    _normalized_path, normalized_bytes = verify_artifact_ref(
+        run_dir,
+        source.normalized_source,
+        anchor=loaded.run_directory_anchor,
+    )
     try:
         normalized = json.loads(normalized_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -226,7 +238,7 @@ def _build_zotero_candidate_locked(
     loaded: LoadedRun,
     provider: ZoteroReadProvider,
 ) -> BuiltZoteroCandidate:
-    run_dir = loaded.manifest_path.resolve(strict=True).parent
+    run_dir = loaded.manifest_path.parent
     source = loaded.run.source
     if not isinstance(source, ZoteroSourceIdentity):
         raise LocalPublicationError("not_zotero_candidate", "Zotero candidate requires a Zotero run")
@@ -292,7 +304,13 @@ def _build_zotero_candidate_locked(
     candidate_id = new_random_id("candidate")
     candidate_dir = run_dir / "candidates" / candidate_id
     staging = run_dir / f".{candidate_id}.{new_uuid()}.staging"
-    staging.mkdir()
+    run_anchor = loaded.run_directory_anchor
+    if run_anchor is None:
+        raise LocalPublicationError(
+            "run_directory_changed",
+            "Zotero candidate build requires a locked run directory anchor",
+        )
+    staging_anchor = create_anchored_directory(run_anchor, staging)
     try:
         note_md_bytes = _rewrite_markdown_h1(snapshots["note.md"], note_title)
         note_html = render_note_html(note_md_bytes.decode("utf-8"))
@@ -308,7 +326,7 @@ def _build_zotero_candidate_locked(
             "note.html": note_html_bytes,
         }
         for name, content in files.items():
-            (staging / name).write_bytes(content)
+            atomic_write_bytes(staging / name, content, anchor=staging_anchor)
         specs = {
             "run.json": ("run_snapshot", "application/json"),
             "discovery.raw.json": ("raw_discovery_bundle_snapshot", "application/json"),
@@ -323,10 +341,12 @@ def _build_zotero_candidate_locked(
             "parent.json": ("zotero_parent_snapshot", "application/json"),
             "children.json": ("zotero_children_snapshot", "application/json"),
         }
+        validate_directory_anchor(staging_anchor)
         refs = {
             name: _artifact_ref(run_dir, staging / name, candidate_dir / name, role, media)
             for name, (role, media) in specs.items()
         }
+        validate_directory_anchor(staging_anchor)
         preflight = LivePreflight(
             preflight_id=new_random_id("preflight"),
             captured_at=rfc3339_utc(),
@@ -378,7 +398,11 @@ def _build_zotero_candidate_locked(
         )
         candidate_bytes = canonical_json_bytes(candidate)
         staged_candidate_path = staging / "candidate.json"
-        staged_candidate_path.write_bytes(candidate_bytes)
+        atomic_write_bytes(
+            staged_candidate_path,
+            candidate_bytes,
+            anchor=staging_anchor,
+        )
         candidate_path = candidate_dir / "candidate.json"
         candidate_ref = _artifact_ref(
             run_dir,
@@ -413,15 +437,28 @@ def _build_zotero_candidate_locked(
                 str(exc),
                 data={"run_size_bytes": exc.actual_bytes, "max_bytes": exc.max_bytes},
             ) from exc
+        staging_snapshot = tree_snapshot_from_bytes(
+            {**files, "candidate.json": candidate_bytes}
+        )
         try:
-            atomic_publish_tree(staging, candidate_dir)
+            atomic_publish_tree(
+                staging,
+                candidate_dir,
+                anchor=loaded.run_directory_anchor,
+                expected_staging_anchor=staging_anchor,
+                expected_tree_snapshot=staging_snapshot,
+            )
         except Exception as exc:
             raise LocalPublicationError(
                 "candidate_publication_failed",
                 f"immutable Zotero candidate publication failed: {candidate_dir}: {exc}",
             ) from exc
         try:
-            atomic_write_json(loaded.manifest_path, updated_run)
+            atomic_write_json(
+                loaded.manifest_path,
+                updated_run,
+                anchor=loaded.run_directory_anchor,
+            )
         except Exception as exc:
             raise LocalPublicationError(
                 "candidate_status_update_failed",
@@ -429,8 +466,14 @@ def _build_zotero_candidate_locked(
             ) from exc
         return BuiltZoteroCandidate(run_dir, candidate_dir, candidate, digest)
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        try:
+            remove_anchored_tree(
+                run_anchor,
+                staging,
+                expected=staging_anchor,
+            )
+        finally:
+            staging_anchor.close()
 
 
 __all__ = ["BuiltZoteroCandidate", "build_zotero_candidate"]
