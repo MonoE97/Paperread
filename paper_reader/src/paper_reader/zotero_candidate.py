@@ -7,9 +7,13 @@ from pathlib import Path
 from typing import Any
 
 from paper_reader.candidate_builder import (
+    SealedReviewSchemaPreflight,
     _artifact_ref,
     _latest_review_package,
     _sealed_snapshots,
+    preflight_candidate_lock_artifacts,
+    preflight_sealed_review_schema_versions,
+    validate_candidate_binding_growth,
 )
 from paper_reader.candidate_integrity import (
     LocalPublicationError,
@@ -46,10 +50,10 @@ from paper_reader.storage import (
     tree_snapshot_from_bytes,
     validate_directory_anchor,
 )
-from paper_reader.v2_loader import LoadedRun, load_v2_run
+from paper_reader.v2_loader import LoadedRun, RunLoadError
 from paper_reader.zotero_lifecycle import parent_fingerprint
 from paper_reader.zotero_live import _parse_headings
-from paper_reader.zotero_lock import locked_zotero_parent
+from paper_reader.zotero_lock import ZoteroLockError, locked_zotero_parent
 from paper_reader.zotero_read import LocalApiZoteroReadProvider, ZoteroReadProvider
 
 
@@ -59,6 +63,51 @@ class BuiltZoteroCandidate:
     candidate_dir: Path
     candidate: PaperReaderCandidate
     candidate_digest: str
+
+
+def _validate_zotero_candidate_retry(
+    baseline: SealedReviewSchemaPreflight,
+    refreshed: SealedReviewSchemaPreflight,
+) -> None:
+    baseline_run = baseline.loaded_run.run
+    refreshed_run = refreshed.loaded_run.run
+    if (
+        refreshed_run.run_id != baseline_run.run_id
+        or refreshed_run.created_at != baseline_run.created_at
+        or refreshed_run.source != baseline_run.source
+        or refreshed.expected_artifacts != baseline.expected_artifacts
+    ):
+        raise LocalPublicationError(
+            "sealed_artifact_tampered",
+            "Zotero candidate run identity, source, or sealed review changed during retry",
+        )
+    added = validate_candidate_binding_growth(baseline, refreshed)
+    if baseline_run.target is not None:
+        if refreshed_run.target != baseline_run.target:
+            raise LocalPublicationError(
+                "sealed_artifact_tampered",
+                "Zotero run target changed during retry",
+            )
+        return
+    if refreshed_run.target is None:
+        if added:
+            raise LocalPublicationError(
+                "sealed_artifact_tampered",
+                "Zotero candidate appeared without a run target during retry",
+            )
+        return
+    if (
+        not isinstance(refreshed_run.target, ZoteroPublicationTarget)
+        or len(added) != 1
+        or added[0].candidate.run_id != refreshed_run.run_id
+        or added[0].candidate.source != refreshed_run.source
+        or added[0].candidate.target != refreshed_run.target
+        or added[0].candidate_digest != added[0].artifact_ref.sha256
+    ):
+        raise LocalPublicationError(
+            "sealed_artifact_tampered",
+            "Zotero target transition lacks one exact newly bound candidate proof",
+        )
 
 
 def _source_snapshot_bytes(
@@ -143,7 +192,7 @@ def _captured_live_snapshots(
     except Exception as exc:
         raise LocalPublicationError(
             "zotero_read_failed",
-            f"read-only Zotero preflight failed: {exc}",
+            "read-only Zotero preflight failed",
         ) from exc
     if not isinstance(parent, dict) or not isinstance(children, list) or not all(
         isinstance(item, dict) for item in children
@@ -221,17 +270,104 @@ def build_zotero_candidate(
     *,
     provider: ZoteroReadProvider | None = None,
 ) -> BuiltZoteroCandidate:
-    initial = load_v2_run(run_path)
+    preflight = preflight_sealed_review_schema_versions(run_path)
+    return _build_zotero_candidate_from_preflight(
+        run_path,
+        preflight,
+        provider=provider,
+    )
+
+
+def _build_zotero_candidate_from_preflight(
+    run_path: Path,
+    preflight: SealedReviewSchemaPreflight,
+    *,
+    provider: ZoteroReadProvider | None = None,
+) -> BuiltZoteroCandidate:
+    baseline = preflight
+    resolved_provider = provider or LocalApiZoteroReadProvider()
+    current = preflight
+    for attempt in range(2):
+        try:
+            return _build_zotero_candidate_once(
+                run_path,
+                current,
+                provider=resolved_provider,
+            )
+        except (RunLoadError, LocalPublicationError) as exc:
+            if exc.code not in {
+                "run_manifest_changed",
+                "run_artifact_changed",
+            } or attempt == 1:
+                raise
+        refreshed = preflight_sealed_review_schema_versions(run_path)
+        if (
+            refreshed.loaded_run.manifest_path.parent
+            != baseline.loaded_run.manifest_path.parent
+            or refreshed.loaded_run.run_directory_device
+            != baseline.loaded_run.run_directory_device
+            or refreshed.loaded_run.run_directory_inode
+            != baseline.loaded_run.run_directory_inode
+            or refreshed.skill_root != baseline.skill_root
+            or refreshed.skill_root_device != baseline.skill_root_device
+            or refreshed.skill_root_inode != baseline.skill_root_inode
+        ):
+            raise LocalPublicationError(
+                "run_directory_changed",
+                "Zotero candidate run or skill root changed during retry",
+            )
+        _validate_zotero_candidate_retry(baseline, refreshed)
+        current = refreshed
+    raise AssertionError("Zotero candidate retry loop did not terminate")
+
+
+def _build_zotero_candidate_once(
+    run_path: Path,
+    preflight: SealedReviewSchemaPreflight,
+    *,
+    provider: ZoteroReadProvider,
+) -> BuiltZoteroCandidate:
+    initial = preflight.loaded_run
     source = initial.run.source
     if not isinstance(source, ZoteroSourceIdentity):
         raise LocalPublicationError("not_zotero_candidate", "Zotero candidate requires a Zotero run")
-    run_dir = initial.manifest_path.resolve(strict=True).parent
-    resolved_provider = provider or LocalApiZoteroReadProvider()
-    with locked_zotero_parent(run_dir, source.item_key):
-        with locked_v2_run(run_dir) as loaded:
-            if loaded.run.source != source:
-                raise LocalPublicationError("source_changed", "run source changed before candidate build")
-            return _build_zotero_candidate_locked(loaded, resolved_provider)
+    run_dir = initial.manifest_path.parent
+    inspected_run = preflight.loaded_run
+    if (
+        preflight.skill_root is None
+        or preflight.skill_root_device is None
+        or preflight.skill_root_inode is None
+    ):
+        raise LocalPublicationError(
+            "invalid_zotero_run_path",
+            "Zotero candidate run is outside <skill_root>/runs/YYYY-MM-DD",
+        )
+    try:
+        with locked_zotero_parent(
+            run_dir,
+            source.item_key,
+            expected_skill_root=preflight.skill_root,
+            expected_skill_root_device=preflight.skill_root_device,
+            expected_skill_root_inode=preflight.skill_root_inode,
+            expected_run_path=run_dir,
+            expected_run_device=inspected_run.run_directory_device,
+            expected_run_inode=inspected_run.run_directory_inode,
+            expected_run_manifest_sha256=inspected_run.manifest_sha256,
+            expected_artifacts=preflight_candidate_lock_artifacts(preflight),
+        ):
+            with locked_v2_run(
+                run_dir,
+                expected_run_path=run_dir,
+                expected_run_device=inspected_run.run_directory_device,
+                expected_run_inode=inspected_run.run_directory_inode,
+                expected_run_manifest_sha256=inspected_run.manifest_sha256,
+                expected_artifacts=preflight_candidate_lock_artifacts(preflight),
+            ) as loaded:
+                if loaded.run.source != source:
+                    raise LocalPublicationError("source_changed", "run source changed before candidate build")
+                return _build_zotero_candidate_locked(loaded, provider)
+    except ZoteroLockError as exc:
+        raise LocalPublicationError(exc.code, str(exc)) from exc
 
 
 def _build_zotero_candidate_locked(

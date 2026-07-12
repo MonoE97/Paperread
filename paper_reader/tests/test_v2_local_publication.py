@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -85,6 +86,191 @@ def test_candidate_build_rehashes_sealed_inputs_and_publishes_immutable_local_ca
         if path.name in {"write-payload.json", "authorization.json", "live-notes.json"}
     }
     assert forbidden == set()
+
+
+def test_concurrent_local_candidate_builds_preserve_both_immutable_bindings(
+    tmp_path: Path,
+) -> None:
+    from paper_reader.candidate_builder import build_local_candidate
+
+    run_dir = _sealed_run(tmp_path)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(lambda _index: build_local_candidate(run_dir), range(2)))
+
+    assert len({item.candidate_dir for item in outcomes}) == 2
+    assert len({item.candidate.candidate_id for item in outcomes}) == 2
+    run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    bound = [item for item in run["artifacts"] if item["role"] == "candidate"]
+    assert len(bound) == 2
+    assert {run_dir / item["path"] for item in bound} == {
+        outcome.candidate_dir / "candidate.json" for outcome in outcomes
+    }
+
+
+@pytest.mark.parametrize("extra_path", ["extra.bin", "unreferenced/extra.bin"])
+def test_local_publish_rejects_unreferenced_candidate_tree_members(
+    extra_path: str,
+    tmp_path: Path,
+) -> None:
+    run_dir, candidate_path = _built_candidate(tmp_path)
+    extra = candidate_path.parent / extra_path
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    extra.write_bytes(b"unreferenced candidate bytes")
+    run_before = (run_dir / "run.json").read_bytes()
+
+    with pytest.raises(Exception) as exc_info:
+        local_publish_module.publish_local_candidate(candidate_path)
+
+    assert getattr(exc_info.value, "code", None) == "candidate_tampered"
+    assert (run_dir / "run.json").read_bytes() == run_before
+    assert not (tmp_path / "paper_note.md").exists()
+    assert not (run_dir / "receipts").exists()
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+def test_local_publish_rejects_unreferenced_candidate_tree_links(
+    link_kind: str,
+    tmp_path: Path,
+) -> None:
+    run_dir, candidate_path = _built_candidate(tmp_path)
+    outside = tmp_path / "outside-extra.bin"
+    outside.write_bytes(b"outside bytes")
+    extra = candidate_path.parent / "extra.bin"
+    if link_kind == "symlink":
+        extra.symlink_to(outside)
+    else:
+        os.link(outside, extra)
+    run_before = (run_dir / "run.json").read_bytes()
+
+    with pytest.raises(Exception) as exc_info:
+        local_publish_module.publish_local_candidate(candidate_path)
+
+    assert getattr(exc_info.value, "code", None) == "candidate_tampered"
+    assert (run_dir / "run.json").read_bytes() == run_before
+    assert outside.read_bytes() == b"outside bytes"
+    assert not (tmp_path / "paper_note.md").exists()
+    assert not (run_dir / "receipts").exists()
+
+
+def test_candidate_build_rejects_unreferenced_member_in_existing_candidate(
+    tmp_path: Path,
+) -> None:
+    from paper_reader.candidate_builder import build_local_candidate
+
+    run_dir = _sealed_run(tmp_path)
+    first = build_local_candidate(run_dir)
+    (first.candidate_dir / "extra.bin").write_bytes(b"unreferenced candidate bytes")
+
+    with pytest.raises(Exception) as exc_info:
+        build_local_candidate(run_dir)
+
+    assert getattr(exc_info.value, "code", None) == "candidate_tampered"
+    assert sorted((run_dir / "candidates").iterdir()) == [first.candidate_dir]
+
+
+def test_local_candidate_retry_rejects_dropped_immutable_candidate_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.candidate_builder as module
+
+    run_dir = _sealed_run(tmp_path)
+    first = module.build_local_candidate(run_dir)
+    original_locked_v2_run = module.locked_v2_run
+    changed = False
+
+    @contextmanager
+    def drop_binding_before_lock(path: Path, **kwargs):
+        nonlocal changed
+        if not changed:
+            payload = json.loads((run_dir / "run.json").read_bytes())
+            payload["artifacts"] = [
+                item for item in payload["artifacts"] if item["role"] != "candidate"
+            ]
+            (run_dir / "run.json").write_bytes(
+                storage_module.canonical_json_bytes(payload)
+            )
+            changed = True
+        with original_locked_v2_run(path, **kwargs) as loaded:
+            yield loaded
+
+    monkeypatch.setattr(module, "locked_v2_run", drop_binding_before_lock)
+
+    with pytest.raises(Exception) as exc_info:
+        module.build_local_candidate(run_dir)
+
+    assert getattr(exc_info.value, "code", None) == "sealed_artifact_tampered"
+    assert changed is True
+    assert sorted((run_dir / "candidates").iterdir()) == [first.candidate_dir]
+
+
+def test_local_candidate_retry_rejects_existing_candidate_child_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.candidate_builder as module
+
+    run_dir = _sealed_run(tmp_path)
+    first = module.build_local_candidate(run_dir)
+    child_path = first.candidate_dir / "note.html"
+    original_locked_v2_run = module.locked_v2_run
+    changed = False
+
+    @contextmanager
+    def change_child_before_lock(path: Path, **kwargs):
+        nonlocal changed
+        if not changed:
+            child_path.write_bytes(child_path.read_bytes() + b"\nchanged")
+            changed = True
+        with original_locked_v2_run(path, **kwargs) as loaded:
+            yield loaded
+
+    monkeypatch.setattr(module, "locked_v2_run", change_child_before_lock)
+
+    with pytest.raises(Exception) as exc_info:
+        module.build_local_candidate(run_dir)
+
+    assert getattr(exc_info.value, "code", None) in {
+        "candidate_tampered",
+        "sealed_artifact_tampered",
+    }
+    assert changed is True
+    assert sorted((run_dir / "candidates").iterdir()) == [first.candidate_dir]
+
+
+def test_candidate_preflight_detects_child_swap_after_member_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.candidate_builder as module
+
+    run_dir = _sealed_run(tmp_path)
+    first = module.build_local_candidate(run_dir)
+    child_path = first.candidate_dir / "note.html"
+    original_load_candidate = local_publish_module._load_candidate
+    changed = False
+
+    def load_then_change_child(*args, **kwargs):
+        nonlocal changed
+        result = original_load_candidate(*args, **kwargs)
+        if not changed and result[1] == first.candidate_dir / "candidate.json":
+            child_path.write_bytes(child_path.read_bytes() + b"\nchanged-after-load")
+            changed = True
+        return result
+
+    monkeypatch.setattr(
+        local_publish_module,
+        "_load_candidate",
+        load_then_change_child,
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        module.build_local_candidate(run_dir)
+
+    assert getattr(exc_info.value, "code", None) == "sealed_artifact_tampered"
+    assert changed is True
+    assert sorted((run_dir / "candidates").iterdir()) == [first.candidate_dir]
 
 
 def test_candidate_build_blocks_sealed_snapshot_tamper(

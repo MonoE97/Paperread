@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,23 +24,28 @@ from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
+    anchored_entry_exists,
     atomic_write_bytes,
     atomic_write_json,
     canonical_json_bytes,
     create_anchored_directory,
     new_random_id,
     new_uuid,
+    open_anchored_directory,
+    read_anchored_bytes,
     remove_anchored_tree,
     rfc3339_utc,
+    snapshot_directory_fd,
     tree_snapshot_from_bytes,
     validate_directory_anchor,
 )
-from paper_reader.v2_loader import LoadedRun
+from paper_reader.v2_loader import LoadedRun, RunLoadError
 from paper_reader.zotero_authorization_loader import (
+    InspectedAuthorization,
     LoadedAuthorization,
     ZoteroAuthorizationBindingError,
-    inspect_authorization_target,
     load_bound_authorization,
+    preflight_authorization_schema_versions,
 )
 from paper_reader.zotero_artifact_paths import (
     DeterministicArtifactPaths,
@@ -47,17 +54,100 @@ from paper_reader.zotero_artifact_paths import (
     inspect_deterministic_artifact_paths,
 )
 from paper_reader.zotero_candidate import _artifact_ref, _note_child_view
-from paper_reader.zotero_lock import locked_zotero_parent
+from paper_reader.zotero_lock import ZoteroLockError, locked_zotero_parent
 from paper_reader.zotero_note_validation import evaluate_note_snapshot
 from paper_reader.zotero_read import LocalApiZoteroReadProvider, ZoteroReadProvider
 from paper_reader.zotero_verification import _verification_gate
 
 
 _PORTABLE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$")
+_RECONCILIATION_MEMBER_BY_ROLE = {
+    "authorization_snapshot": "authorization.json",
+    "verification_checks": "checks.json",
+    "zotero_children_snapshot": "children.json",
+    "zotero_note_readback": "note.json",
+    "reconciliation_verification": "verification.json",
+}
 
 
 class ZoteroReconciliationError(LocalPublicationError):
     pass
+
+
+def _read_closed_reconciliation_sidecar(
+    loaded: LoadedRun,
+    reconciliation_path: Path,
+    *,
+    expected_roles: set[str],
+) -> dict[str, bytes]:
+    anchor = loaded.run_directory_anchor
+    if anchor is None:
+        raise ZoteroReconciliationError(
+            "reconciliation_tampered",
+            "reconciliation sidecar validation requires a locked run anchor",
+        )
+    sidecar = reconciliation_path.with_suffix("")
+    expected_names = tuple(
+        sorted(
+            (
+                *(
+                    _RECONCILIATION_MEMBER_BY_ROLE[role]
+                    for role in expected_roles
+                ),
+                "record.json",
+            )
+        )
+    )
+    try:
+        with open_anchored_directory(anchor, sidecar) as sidecar_anchor:
+            before_names = tuple(sorted(os.listdir(sidecar_anchor.descriptor)))
+            if before_names != expected_names:
+                raise ZoteroReconciliationError(
+                    "reconciliation_tampered",
+                    "reconciliation sidecar membership is not the exact closed set",
+                )
+            before_snapshot = snapshot_directory_fd(sidecar_anchor.descriptor)
+            members = {
+                name: read_anchored_bytes(sidecar_anchor, sidecar / name)
+                for name in expected_names
+            }
+            after_names = tuple(sorted(os.listdir(sidecar_anchor.descriptor)))
+            after_snapshot = snapshot_directory_fd(sidecar_anchor.descriptor)
+            if after_names != before_names or after_snapshot != before_snapshot:
+                raise ZoteroReconciliationError(
+                    "reconciliation_tampered",
+                    "reconciliation sidecar changed while it was inspected",
+                )
+            validate_directory_anchor(sidecar_anchor)
+        validate_directory_anchor(anchor)
+    except ZoteroReconciliationError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ZoteroReconciliationError(
+            "reconciliation_tampered",
+            "reconciliation sidecar cannot be inspected safely",
+        ) from exc
+    return members
+
+
+@contextmanager
+def _locked_parent_for_inspection(inspection: InspectedAuthorization):
+    try:
+        with locked_zotero_parent(
+            inspection.run_dir,
+            inspection.authorization.target.parent_key,
+            expected_skill_root=inspection.skill_root,
+            expected_skill_root_device=inspection.skill_root_device,
+            expected_skill_root_inode=inspection.skill_root_inode,
+            expected_run_path=inspection.run_dir,
+            expected_run_device=inspection.run_directory_device,
+            expected_run_inode=inspection.run_directory_inode,
+            expected_run_manifest_sha256=inspection.run_manifest_sha256,
+            expected_artifacts=inspection.expected_artifacts,
+        ) as locked:
+            yield locked
+    except ZoteroLockError as exc:
+        raise ZoteroReconciliationError(exc.code, str(exc)) from exc
 
 
 def _reconciliation_artifact_paths(
@@ -122,10 +212,33 @@ def _validate_reconciliation_record(
             "reconciliation main artifact identity or binding changed",
         )
     sidecar_dir = expected_path.with_suffix("")
+    required = {"authorization_snapshot", "zotero_children_snapshot"}
+    if reconciliation.verification is not None:
+        required |= {
+            "zotero_note_readback",
+            "verification_checks",
+            "reconciliation_verification",
+        }
+    sidecar_members = _read_closed_reconciliation_sidecar(
+        loaded,
+        expected_path,
+        expected_roles=required,
+    )
+    if sidecar_members["record.json"] != raw:
+        raise ZoteroReconciliationError(
+            "reconciliation_tampered",
+            "reconciliation sidecar record differs from its main commit marker",
+        )
     roles: set[str] = set()
     for artifact in reconciliation.artifacts:
+        expected_filename = _RECONCILIATION_MEMBER_BY_ROLE.get(artifact.role)
+        if expected_filename is None or artifact.role in roles:
+            raise ZoteroReconciliationError(
+                "reconciliation_tampered",
+                "reconciliation sidecar artifact roles changed",
+            )
         try:
-            artifact_path, _artifact_bytes = verify_artifact_ref(
+            artifact_path, artifact_bytes = verify_artifact_ref(
                 run_dir,
                 artifact,
                 anchor=loaded.run_directory_anchor,
@@ -135,19 +248,15 @@ def _validate_reconciliation_record(
                 "reconciliation_tampered",
                 f"reconciliation member changed: {artifact.path}: {exc}",
             ) from exc
-        if not artifact_path.is_relative_to(sidecar_dir) or artifact.role in roles:
+        if (
+            artifact_path != sidecar_dir / expected_filename
+            or artifact_bytes != sidecar_members[expected_filename]
+        ):
             raise ZoteroReconciliationError(
                 "reconciliation_tampered",
-                "reconciliation sidecar membership is not closed and unique",
+                "reconciliation refs do not bind the exact closed sidecar members",
             )
         roles.add(artifact.role)
-    required = {"authorization_snapshot", "zotero_children_snapshot"}
-    if reconciliation.verification is not None:
-        required |= {
-            "zotero_note_readback",
-            "verification_checks",
-            "reconciliation_verification",
-        }
     if roles != required:
         raise ZoteroReconciliationError(
             "reconciliation_tampered",
@@ -183,18 +292,33 @@ def _existing_reconciliation(
     reconciliation_path = artifact_paths.main
     reconciliation_dir = artifact_paths.sidecar
     recovery_record = reconciliation_dir / "record.json"
-    if not reconciliation_path.exists() and not recovery_record.exists():
-        return None
-    try:
-        raw = (
-            reconciliation_path.read_bytes()
-            if reconciliation_path.exists()
-            else recovery_record.read_bytes()
-        )
-    except OSError as exc:
+    anchor = loaded.run_directory_anchor
+    if anchor is None:
         raise ZoteroReconciliationError(
             "reconciliation_tampered",
-            f"reconciliation commit candidate is unreadable: {exc}",
+            "reconciliation recovery requires a locked run anchor",
+        )
+    try:
+        main_exists = anchored_entry_exists(anchor, reconciliation_path)
+        record_exists = anchored_entry_exists(anchor, recovery_record)
+        sidecar_exists = anchored_entry_exists(anchor, reconciliation_dir)
+        if not main_exists and not record_exists:
+            if sidecar_exists:
+                raise ZoteroReconciliationError(
+                    "reconciliation_tampered",
+                    "reconciliation sidecar exists without its record commit marker",
+                )
+            return None
+        raw = read_anchored_bytes(
+            anchor,
+            reconciliation_path if main_exists else recovery_record,
+        )
+    except ZoteroReconciliationError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ZoteroReconciliationError(
+            "reconciliation_tampered",
+            "reconciliation commit candidate cannot be inspected safely",
         ) from exc
     reconciliation = _validate_reconciliation_record(
         run_dir,
@@ -203,7 +327,7 @@ def _existing_reconciliation(
         bound=bound,
         loaded=loaded,
     )
-    if not reconciliation_path.exists():
+    if not main_exists:
         try:
             with anchored_artifact_publication(
                 artifact_paths,
@@ -220,6 +344,23 @@ def _existing_reconciliation(
                 "reconciliation_recovery_failed",
                 f"failed to restore exact reconciliation commit marker: {exc}",
             ) from exc
+        recovered_members = _read_closed_reconciliation_sidecar(
+            loaded,
+            reconciliation_path,
+            expected_roles={artifact.role for artifact in reconciliation.artifacts},
+        )
+        try:
+            recovered_main = read_anchored_bytes(anchor, reconciliation_path)
+        except (OSError, ValueError) as exc:
+            raise ZoteroReconciliationError(
+                "reconciliation_tampered",
+                "recovered reconciliation main cannot be inspected safely",
+            ) from exc
+        if recovered_members["record.json"] != raw or recovered_main != raw:
+            raise ZoteroReconciliationError(
+                "reconciliation_tampered",
+                "recovered reconciliation tree differs from the validated record",
+            )
     relative = reconciliation_path.relative_to(run_dir).as_posix()
     refs = [
         item
@@ -249,12 +390,12 @@ def _existing_reconciliation(
                 "run-bound reconciliation differs from the deterministic main artifact",
             )
     else:
-        reconciliation_ref = _artifact_ref(
-            run_dir,
-            reconciliation_path,
-            reconciliation_path,
-            "zotero_reconciliation",
-            "application/json",
+        reconciliation_ref = ArtifactRef(
+            role="zotero_reconciliation",
+            path=relative,
+            sha256=hashlib.sha256(raw).hexdigest(),
+            size_bytes=len(raw),
+            media_type="application/json",
         )
         updated_run = _updated_run(
             loaded.run,
@@ -293,7 +434,7 @@ def _captured_children(
     except Exception as exc:
         raise ZoteroReconciliationError(
             "zotero_read_failed",
-            f"read-only Zotero reconciliation children read failed: {exc}",
+            "read-only Zotero reconciliation children read failed",
         ) from exc
     if not isinstance(children, list) or not all(isinstance(item, dict) for item in children):
         raise ZoteroReconciliationError(
@@ -408,7 +549,7 @@ def _publish_reconciliation_locked(
         except Exception as exc:
             raise ZoteroReconciliationError(
                 "zotero_read_failed",
-                f"read-only Zotero reconciliation note read failed: {exc}",
+                "read-only Zotero reconciliation note read failed",
             ) from exc
         if not isinstance(note_snapshot, dict):
             raise ZoteroReconciliationError(
@@ -647,30 +788,118 @@ def _publish_reconciliation_locked(
             staging_anchor.close()
 
 
+def _preflight_reconciliation_authorization(
+    authorization_input: Path,
+) -> InspectedAuthorization:
+    try:
+        return preflight_authorization_schema_versions(authorization_input)
+    except ZoteroAuthorizationBindingError as exc:
+        raise ZoteroReconciliationError(exc.code, str(exc), data=exc.data) from exc
+
+
+def _refresh_reconciliation_inspection(
+    authorization_input: Path,
+    previous: InspectedAuthorization,
+) -> InspectedAuthorization:
+    refreshed = _preflight_reconciliation_authorization(authorization_input)
+    if (
+        refreshed.run_dir != previous.run_dir
+        or refreshed.run_directory_device != previous.run_directory_device
+        or refreshed.run_directory_inode != previous.run_directory_inode
+        or refreshed.skill_root != previous.skill_root
+        or refreshed.skill_root_device != previous.skill_root_device
+        or refreshed.skill_root_inode != previous.skill_root_inode
+    ):
+        raise ZoteroReconciliationError(
+            "run_directory_changed",
+            "authorization run or skill root changed during reconciliation retry",
+        )
+    if (
+        refreshed.authorization_path != previous.authorization_path
+        or refreshed.authorization_bytes != previous.authorization_bytes
+        or refreshed.authorization != previous.authorization
+        or refreshed.expected_artifacts != previous.expected_artifacts
+    ):
+        raise ZoteroReconciliationError(
+            "authorization_tampered",
+            "authorization changed during reconciliation retry",
+        )
+    return refreshed
+
+
 def reconcile_zotero_authorization(
     authorization_input: Path,
     *,
     provider: ZoteroReadProvider | None = None,
 ) -> ReconciledZoteroWrite:
+    inspection = _preflight_reconciliation_authorization(authorization_input)
+    resolved_provider = provider or LocalApiZoteroReadProvider()
     try:
-        authorization_path, inspected, run_dir = inspect_authorization_target(
-            authorization_input
+        return _reconcile_zotero_authorization_from_inspection(
+            inspection,
+            provider=resolved_provider,
         )
-    except ZoteroAuthorizationBindingError as exc:
-        raise ZoteroReconciliationError(exc.code, str(exc), data=exc.data) from exc
+    except (RunLoadError, ZoteroReconciliationError) as exc:
+        if exc.code not in {"run_manifest_changed", "run_artifact_changed"}:
+            raise
+    refreshed = _refresh_reconciliation_inspection(
+        authorization_input,
+        inspection,
+    )
+    return _reconcile_zotero_authorization_from_inspection(
+        refreshed,
+        provider=resolved_provider,
+    )
+
+
+def _reconcile_zotero_authorization_from_inspection(
+    inspection: InspectedAuthorization,
+    *,
+    provider: ZoteroReadProvider,
+) -> ReconciledZoteroWrite:
+    authorization_path = inspection.authorization_path
+    inspected = inspection.authorization
+    run_dir = inspection.run_dir
     _reconciliation_artifact_paths(
         run_dir,
         inspected.authorization_id,
         allow_existing_sidecar=True,
         allow_existing_main=True,
     )
-    resolved_provider = provider or LocalApiZoteroReadProvider()
-    with locked_zotero_parent(run_dir, inspected.target.parent_key):
-        with locked_v2_run(run_dir) as loaded:
+    with _locked_parent_for_inspection(inspection):
+        with locked_v2_run(
+            run_dir,
+            expected_run_path=inspection.run_dir,
+            expected_run_device=inspection.run_directory_device,
+            expected_run_inode=inspection.run_directory_inode,
+            expected_run_manifest_sha256=inspection.run_manifest_sha256,
+            expected_artifacts=inspection.expected_artifacts,
+        ) as loaded:
+            if (
+                loaded.run_directory_device,
+                loaded.run_directory_inode,
+            ) != (
+                inspection.run_directory_device,
+                inspection.run_directory_inode,
+            ):
+                raise ZoteroReconciliationError(
+                    "authorization_tampered",
+                    "authorization run directory changed after read-only preflight",
+                )
+            if loaded.manifest_bytes != inspection.run_manifest_bytes:
+                raise ZoteroReconciliationError(
+                    "run_directory_changed",
+                    "authorization run manifest changed after read-only preflight",
+                )
             try:
                 bound = load_bound_authorization(loaded, authorization_path)
             except ZoteroAuthorizationBindingError as exc:
                 raise ZoteroReconciliationError(exc.code, str(exc), data=exc.data) from exc
+            if bound.authorization_bytes != inspection.authorization_bytes:
+                raise ZoteroReconciliationError(
+                    "authorization_tampered",
+                    "authorization changed after read-only preflight",
+                )
             replay = _existing_reconciliation(
                 loaded,
                 bound=bound,
@@ -684,14 +913,14 @@ def reconcile_zotero_authorization(
                 allow_existing_main=False,
             )
             children, children_bytes = _captured_children(
-                resolved_provider,
+                provider,
                 parent_key=bound.authorization.target.parent_key,
             )
             matched_note_keys = _locate_exact_matches(children, bound=bound)
             return _publish_reconciliation_locked(
                 loaded,
                 bound,
-                provider=resolved_provider,
+                provider=provider,
                 children=children,
                 children_bytes=children_bytes,
                 matched_note_keys=matched_note_keys,

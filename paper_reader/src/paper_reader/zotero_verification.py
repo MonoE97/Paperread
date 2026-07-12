@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import os
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
 from pydantic import ValidationError
 
 from paper_reader.candidate_integrity import LocalPublicationError, verify_artifact_ref
@@ -18,24 +22,29 @@ from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
+    anchored_entry_exists,
     atomic_write_bytes,
     atomic_write_json,
     canonical_json_bytes,
     create_anchored_directory,
     new_random_id,
     new_uuid,
+    open_anchored_directory,
+    read_anchored_bytes,
     remove_anchored_tree,
     rfc3339_utc,
+    snapshot_directory_fd,
     tree_snapshot_from_bytes,
     validate_directory_anchor,
 )
-from paper_reader.v2_loader import LoadedRun
+from paper_reader.v2_loader import LoadedRun, RunLoadError
 from paper_reader.zotero_authorization_loader import (
+    InspectedAuthorization,
     LoadedAuthorization,
     ZoteroAuthorizationBindingError,
     authorization_manifest_path,
-    inspect_authorization_target,
     load_bound_authorization,
+    preflight_authorization_schema_versions,
 )
 from paper_reader.zotero_artifact_paths import (
     DeterministicArtifactPaths,
@@ -44,16 +53,44 @@ from paper_reader.zotero_artifact_paths import (
     inspect_deterministic_artifact_paths,
 )
 from paper_reader.zotero_candidate import _artifact_ref
-from paper_reader.zotero_lock import locked_zotero_parent
+from paper_reader.zotero_lock import ZoteroLockError, locked_zotero_parent
 from paper_reader.zotero_note_validation import NoteEvaluation, evaluate_note_snapshot
 from paper_reader.zotero_read import LocalApiZoteroReadProvider, ZoteroReadProvider
 
 
 _PORTABLE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$")
+_VERIFICATION_MEMBER_BY_ROLE = {
+    "authorization_snapshot": "authorization.json",
+    "verification_checks": "checks.json",
+    "zotero_note_readback": "note.json",
+}
+_VERIFICATION_SIDECAR_NAMES = tuple(
+    sorted((*_VERIFICATION_MEMBER_BY_ROLE.values(), "record.json"))
+)
 
 
 class ZoteroVerificationError(LocalPublicationError):
     pass
+
+
+@contextmanager
+def _locked_parent_for_inspection(inspection: InspectedAuthorization):
+    try:
+        with locked_zotero_parent(
+            inspection.run_dir,
+            inspection.authorization.target.parent_key,
+            expected_skill_root=inspection.skill_root,
+            expected_skill_root_device=inspection.skill_root_device,
+            expected_skill_root_inode=inspection.skill_root_inode,
+            expected_run_path=inspection.run_dir,
+            expected_run_device=inspection.run_directory_device,
+            expected_run_inode=inspection.run_directory_inode,
+            expected_run_manifest_sha256=inspection.run_manifest_sha256,
+            expected_artifacts=inspection.expected_artifacts,
+        ) as locked:
+            yield locked
+    except ZoteroLockError as exc:
+        raise ZoteroVerificationError(exc.code, str(exc)) from exc
 
 
 def _verification_artifact_paths(
@@ -104,6 +141,49 @@ def _verification_gate(evaluation: NoteEvaluation) -> GateState:
     )
 
 
+def _read_closed_verification_sidecar(
+    loaded: LoadedRun,
+    verification_path: Path,
+) -> dict[str, bytes]:
+    anchor = loaded.run_directory_anchor
+    if anchor is None:
+        raise ZoteroVerificationError(
+            "verification_tampered",
+            "verification sidecar validation requires a locked run anchor",
+        )
+    sidecar = verification_path.with_suffix("")
+    try:
+        with open_anchored_directory(anchor, sidecar) as sidecar_anchor:
+            before_names = tuple(sorted(os.listdir(sidecar_anchor.descriptor)))
+            if before_names != _VERIFICATION_SIDECAR_NAMES:
+                raise ZoteroVerificationError(
+                    "verification_tampered",
+                    "verification sidecar membership is not the exact closed set",
+                )
+            before_snapshot = snapshot_directory_fd(sidecar_anchor.descriptor)
+            members = {
+                name: read_anchored_bytes(sidecar_anchor, sidecar / name)
+                for name in _VERIFICATION_SIDECAR_NAMES
+            }
+            after_names = tuple(sorted(os.listdir(sidecar_anchor.descriptor)))
+            after_snapshot = snapshot_directory_fd(sidecar_anchor.descriptor)
+            if after_names != before_names or after_snapshot != before_snapshot:
+                raise ZoteroVerificationError(
+                    "verification_tampered",
+                    "verification sidecar changed while it was inspected",
+                )
+            validate_directory_anchor(sidecar_anchor)
+        validate_directory_anchor(anchor)
+    except ZoteroVerificationError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ZoteroVerificationError(
+            "verification_tampered",
+            "verification sidecar cannot be inspected safely",
+        ) from exc
+    return members
+
+
 def _validate_verification_record(
     run_dir: Path,
     path: Path,
@@ -139,10 +219,22 @@ def _validate_verification_record(
             "verification main artifact identity or binding changed",
         )
     sidecar_dir = expected_path.with_suffix("")
+    sidecar_members = _read_closed_verification_sidecar(loaded, expected_path)
+    if sidecar_members["record.json"] != raw:
+        raise ZoteroVerificationError(
+            "verification_tampered",
+            "verification sidecar record differs from its main commit marker",
+        )
     roles: set[str] = set()
     for artifact in verification.artifacts:
+        expected_filename = _VERIFICATION_MEMBER_BY_ROLE.get(artifact.role)
+        if expected_filename is None or artifact.role in roles:
+            raise ZoteroVerificationError(
+                "verification_tampered",
+                "verification sidecar artifact roles changed",
+            )
         try:
-            artifact_path, _artifact_bytes = verify_artifact_ref(
+            artifact_path, artifact_bytes = verify_artifact_ref(
                 run_dir,
                 artifact,
                 anchor=loaded.run_directory_anchor,
@@ -152,13 +244,16 @@ def _validate_verification_record(
                 "verification_tampered",
                 f"verification member changed: {artifact.path}: {exc}",
             ) from exc
-        if not artifact_path.is_relative_to(sidecar_dir) or artifact.role in roles:
+        if (
+            artifact_path != sidecar_dir / expected_filename
+            or artifact_bytes != sidecar_members[expected_filename]
+        ):
             raise ZoteroVerificationError(
                 "verification_tampered",
-                "verification sidecar membership is not closed and unique",
+                "verification refs do not bind the exact closed sidecar members",
             )
         roles.add(artifact.role)
-    if roles != {"authorization_snapshot", "zotero_note_readback", "verification_checks"}:
+    if roles != set(_VERIFICATION_MEMBER_BY_ROLE):
         raise ZoteroVerificationError(
             "verification_tampered",
             "verification sidecar artifact roles changed",
@@ -192,18 +287,33 @@ def _existing_verification(
     verification_path = artifact_paths.main
     verification_dir = artifact_paths.sidecar
     recovery_record = verification_dir / "record.json"
-    if not verification_path.exists() and not recovery_record.exists():
-        return None
-    try:
-        raw = (
-            verification_path.read_bytes()
-            if verification_path.exists()
-            else recovery_record.read_bytes()
-        )
-    except OSError as exc:
+    anchor = loaded.run_directory_anchor
+    if anchor is None:
         raise ZoteroVerificationError(
             "verification_tampered",
-            f"verification commit candidate is unreadable: {exc}",
+            "verification recovery requires a locked run anchor",
+        )
+    try:
+        main_exists = anchored_entry_exists(anchor, verification_path)
+        record_exists = anchored_entry_exists(anchor, recovery_record)
+        sidecar_exists = anchored_entry_exists(anchor, verification_dir)
+        if not main_exists and not record_exists:
+            if sidecar_exists:
+                raise ZoteroVerificationError(
+                    "verification_tampered",
+                    "verification sidecar exists without its record commit marker",
+                )
+            return None
+        raw = read_anchored_bytes(
+            anchor,
+            verification_path if main_exists else recovery_record,
+        )
+    except ZoteroVerificationError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ZoteroVerificationError(
+            "verification_tampered",
+            "verification commit candidate cannot be inspected safely",
         ) from exc
     verification = _validate_verification_record(
         run_dir,
@@ -213,7 +323,7 @@ def _existing_verification(
         note_key=note_key,
         loaded=loaded,
     )
-    if not verification_path.exists():
+    if not main_exists:
         try:
             with anchored_artifact_publication(
                 artifact_paths,
@@ -230,6 +340,19 @@ def _existing_verification(
                 "verification_recovery_failed",
                 f"failed to restore exact verification commit marker: {exc}",
             ) from exc
+        recovered_members = _read_closed_verification_sidecar(loaded, verification_path)
+        try:
+            recovered_main = read_anchored_bytes(anchor, verification_path)
+        except (OSError, ValueError) as exc:
+            raise ZoteroVerificationError(
+                "verification_tampered",
+                "recovered verification main cannot be inspected safely",
+            ) from exc
+        if recovered_members["record.json"] != raw or recovered_main != raw:
+            raise ZoteroVerificationError(
+                "verification_tampered",
+                "recovered verification tree differs from the validated record",
+            )
     relative = verification_path.relative_to(run_dir).as_posix()
     refs = [
         item
@@ -259,12 +382,12 @@ def _existing_verification(
                 "run-bound verification differs from the deterministic main artifact",
             )
     else:
-        verification_ref = _artifact_ref(
-            run_dir,
-            verification_path,
-            verification_path,
-            "zotero_verification",
-            "application/json",
+        verification_ref = ArtifactRef(
+            role="zotero_verification",
+            path=relative,
+            sha256=hashlib.sha256(raw).hexdigest(),
+            size_bytes=len(raw),
+            media_type="application/json",
         )
         updated_run = _updated_run(
             loaded.run,
@@ -499,6 +622,45 @@ def publish_verification_locked(
             staging_anchor.close()
 
 
+def _preflight_verification_authorization(
+    authorization_input: Path,
+) -> InspectedAuthorization:
+    try:
+        return preflight_authorization_schema_versions(authorization_input)
+    except ZoteroAuthorizationBindingError as exc:
+        raise ZoteroVerificationError(exc.code, str(exc), data=exc.data) from exc
+
+
+def _refresh_verification_inspection(
+    authorization_input: Path,
+    previous: InspectedAuthorization,
+) -> InspectedAuthorization:
+    refreshed = _preflight_verification_authorization(authorization_input)
+    if (
+        refreshed.run_dir != previous.run_dir
+        or refreshed.run_directory_device != previous.run_directory_device
+        or refreshed.run_directory_inode != previous.run_directory_inode
+        or refreshed.skill_root != previous.skill_root
+        or refreshed.skill_root_device != previous.skill_root_device
+        or refreshed.skill_root_inode != previous.skill_root_inode
+    ):
+        raise ZoteroVerificationError(
+            "run_directory_changed",
+            "authorization run or skill root changed during verification retry",
+        )
+    if (
+        refreshed.authorization_path != previous.authorization_path
+        or refreshed.authorization_bytes != previous.authorization_bytes
+        or refreshed.authorization != previous.authorization
+        or refreshed.expected_artifacts != previous.expected_artifacts
+    ):
+        raise ZoteroVerificationError(
+            "authorization_tampered",
+            "authorization changed during verification retry",
+        )
+    return refreshed
+
+
 def verify_zotero_authorization(
     authorization_input: Path,
     *,
@@ -507,12 +669,37 @@ def verify_zotero_authorization(
 ) -> VerifiedZoteroNote:
     if not _PORTABLE_IDENTIFIER_RE.fullmatch(note_key):
         raise ZoteroVerificationError("invalid_note_key", "note_key is not a valid identifier")
+    inspection = _preflight_verification_authorization(authorization_input)
+    resolved_provider = provider or LocalApiZoteroReadProvider()
     try:
-        authorization_path, inspected, run_dir = inspect_authorization_target(
-            authorization_input
+        return _verify_zotero_authorization_from_inspection(
+            inspection,
+            note_key=note_key,
+            provider=resolved_provider,
         )
-    except ZoteroAuthorizationBindingError as exc:
-        raise ZoteroVerificationError(exc.code, str(exc), data=exc.data) from exc
+    except (RunLoadError, ZoteroVerificationError) as exc:
+        if exc.code not in {"run_manifest_changed", "run_artifact_changed"}:
+            raise
+    refreshed = _refresh_verification_inspection(
+        authorization_input,
+        inspection,
+    )
+    return _verify_zotero_authorization_from_inspection(
+        refreshed,
+        note_key=note_key,
+        provider=resolved_provider,
+    )
+
+
+def _verify_zotero_authorization_from_inspection(
+    inspection: InspectedAuthorization,
+    *,
+    note_key: str,
+    provider: ZoteroReadProvider,
+) -> VerifiedZoteroNote:
+    authorization_path = inspection.authorization_path
+    inspected = inspection.authorization
+    run_dir = inspection.run_dir
     _verification_artifact_paths(
         run_dir,
         inspected.authorization_id,
@@ -520,13 +707,40 @@ def verify_zotero_authorization(
         allow_existing_sidecar=True,
         allow_existing_main=True,
     )
-    resolved_provider = provider or LocalApiZoteroReadProvider()
-    with locked_zotero_parent(run_dir, inspected.target.parent_key):
-        with locked_v2_run(run_dir) as loaded:
+    with _locked_parent_for_inspection(inspection):
+        with locked_v2_run(
+            run_dir,
+            expected_run_path=inspection.run_dir,
+            expected_run_device=inspection.run_directory_device,
+            expected_run_inode=inspection.run_directory_inode,
+            expected_run_manifest_sha256=inspection.run_manifest_sha256,
+            expected_artifacts=inspection.expected_artifacts,
+        ) as loaded:
+            if (
+                loaded.run_directory_device,
+                loaded.run_directory_inode,
+            ) != (
+                inspection.run_directory_device,
+                inspection.run_directory_inode,
+            ):
+                raise ZoteroVerificationError(
+                    "authorization_tampered",
+                    "authorization run directory changed after read-only preflight",
+                )
+            if loaded.manifest_bytes != inspection.run_manifest_bytes:
+                raise ZoteroVerificationError(
+                    "run_directory_changed",
+                    "authorization run manifest changed after read-only preflight",
+                )
             try:
                 bound = load_bound_authorization(loaded, authorization_path)
             except ZoteroAuthorizationBindingError as exc:
                 raise ZoteroVerificationError(exc.code, str(exc), data=exc.data) from exc
+            if bound.authorization_bytes != inspection.authorization_bytes:
+                raise ZoteroVerificationError(
+                    "authorization_tampered",
+                    "authorization changed after read-only preflight",
+                )
             replay = _existing_verification(
                 loaded,
                 bound=bound,
@@ -542,11 +756,11 @@ def verify_zotero_authorization(
                 allow_existing_main=False,
             )
             try:
-                snapshot = resolved_provider.get_note(note_key)
+                snapshot = provider.get_note(note_key)
             except Exception as exc:
                 raise ZoteroVerificationError(
                     "zotero_read_failed",
-                    f"read-only Zotero note readback failed: {exc}",
+                    "read-only Zotero note readback failed",
                 ) from exc
             if not isinstance(snapshot, dict):
                 raise ZoteroVerificationError(

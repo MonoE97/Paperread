@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -19,6 +20,7 @@ from paper_reader.contracts import (
     PaperReaderWriteAuthorization,
 )
 from paper_reader.public_cli import app
+from paper_reader.storage import canonical_json_bytes
 
 from test_v2_zotero_authorization import (
     _authorize,
@@ -83,6 +85,66 @@ def _verify(authorization_path: Path, provider, *, note_key: str = "NOTE1"):
         note_key=note_key,
         provider=provider,
     )
+
+
+def _rewrite_bound_terminal_ref(run_dir: Path, *, role: str, raw: bytes) -> None:
+    run_path = run_dir / "run.json"
+    run = json.loads(run_path.read_bytes())
+    for artifact in run["artifacts"]:
+        if artifact["role"] == role:
+            artifact["sha256"] = hashlib.sha256(raw).hexdigest()
+            artifact["size_bytes"] = len(raw)
+    run_path.write_bytes(canonical_json_bytes(run))
+
+
+def _mutate_verification_terminal(
+    verification_path: Path,
+    verification_dir: Path,
+    *,
+    case: str,
+) -> None:
+    record_path = verification_dir / "record.json"
+    if case == "extra_file":
+        (verification_dir / "extra.bin").write_bytes(b"unbound")
+        return
+    if case == "nested_directory":
+        nested = verification_dir / "nested"
+        nested.mkdir()
+        (nested / "member.bin").write_bytes(b"unbound")
+        return
+    if case == "record_mismatch":
+        record_path.write_bytes(b"{}")
+        return
+    if case in {"record_symlink", "record_hardlink"}:
+        outside = verification_dir.parent / f"outside-{case}.json"
+        outside.write_bytes(record_path.read_bytes())
+        record_path.unlink()
+        if case == "record_symlink":
+            record_path.symlink_to(outside)
+        else:
+            os.link(outside, record_path)
+        return
+    if case == "role_filename_swap":
+        source = verification_path if verification_path.exists() else record_path
+        payload = json.loads(source.read_bytes())
+        artifacts = {item["role"]: item for item in payload["artifacts"]}
+        authorization = artifacts["authorization_snapshot"]
+        note = artifacts["zotero_note_readback"]
+        for field in ("path", "sha256", "size_bytes", "media_type"):
+            authorization[field], note[field] = note[field], authorization[field]
+        payload["authorization"] = copy.deepcopy(authorization)
+        payload["note_snapshot"] = copy.deepcopy(note)
+        rewritten = canonical_json_bytes(payload)
+        record_path.write_bytes(rewritten)
+        if verification_path.exists():
+            verification_path.write_bytes(rewritten)
+            _rewrite_bound_terminal_ref(
+                verification_path.parents[2],
+                role="zotero_verification",
+                raw=rewritten,
+            )
+        return
+    raise AssertionError(case)
 
 
 def test_verify_expired_authorization_saves_exact_passed_readback_and_publishes_run(
@@ -407,6 +469,134 @@ def test_verify_is_idempotent_for_same_authorization_and_note_key(tmp_path: Path
     assert second.replayed is True
 
 
+_TERMINAL_SIDECAR_CASES = (
+    "extra_file",
+    "nested_directory",
+    "record_mismatch",
+    "record_symlink",
+    "record_hardlink",
+    "role_filename_swap",
+)
+
+
+@pytest.mark.parametrize("case", _TERMINAL_SIDECAR_CASES)
+@pytest.mark.parametrize("recovery_mode", ["bound_replay", "unbound_main"])
+def test_verify_replay_and_unbound_main_recovery_reject_tampered_closed_sidecar(
+    case: str,
+    recovery_mode: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    authorization_path, authorization = _authorized(tmp_path)
+    provider = InMemoryZoteroProvider(
+        notes={"NOTE1": _note_snapshot(authorization)}
+    )
+    if recovery_mode == "bound_replay":
+        first = _verify(authorization_path, provider)
+    else:
+        original_write = module.atomic_write_json
+        failed = False
+
+        def fail_run_binding_once(path: Path, value, **kwargs):
+            nonlocal failed
+            if Path(path).name == "run.json" and not failed:
+                failed = True
+                raise OSError("injected verification run binding failure")
+            return original_write(path, value, **kwargs)
+
+        monkeypatch.setattr(module, "atomic_write_json", fail_run_binding_once)
+        with pytest.raises(module.ZoteroVerificationError) as fault:
+            _verify(authorization_path, provider)
+        assert fault.value.code == "verification_status_update_failed"
+        monkeypatch.setattr(module, "atomic_write_json", original_write)
+        verification_path = (
+            authorization_path.parent.parent
+            / "verifications"
+            / authorization.authorization_id
+            / "NOTE1.json"
+        )
+        first = type(
+            "UnboundVerification",
+            (),
+            {
+                "verification_path": verification_path,
+                "verification_dir": verification_path.with_suffix(""),
+            },
+        )()
+
+    _mutate_verification_terminal(
+        first.verification_path,
+        first.verification_dir,
+        case=case,
+    )
+
+    class ProviderMustNotRun:
+        def get_note(self, _note_key: str):
+            raise AssertionError("tampered terminal verification reached provider")
+
+    with pytest.raises(module.ZoteroVerificationError) as exc_info:
+        _verify(authorization_path, ProviderMustNotRun())
+
+    assert exc_info.value.code == "verification_tampered"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "extra_file",
+        "nested_directory",
+        "record_symlink",
+        "record_hardlink",
+        "role_filename_swap",
+    ],
+)
+def test_verify_sidecar_only_orphan_recovery_rejects_tampered_closed_sidecar(
+    case: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    authorization_path, authorization = _authorized(tmp_path)
+    provider = InMemoryZoteroProvider(
+        notes={"NOTE1": _note_snapshot(authorization)}
+    )
+    original_write = module.atomic_write_json
+
+    def fail_run_binding(path: Path, value, **kwargs):
+        if Path(path).name == "run.json":
+            raise OSError("injected verification run binding failure")
+        return original_write(path, value, **kwargs)
+
+    monkeypatch.setattr(module, "atomic_write_json", fail_run_binding)
+    with pytest.raises(module.ZoteroVerificationError) as fault:
+        _verify(authorization_path, provider)
+    assert fault.value.code == "verification_status_update_failed"
+    monkeypatch.setattr(module, "atomic_write_json", original_write)
+    verification_path = (
+        authorization_path.parent.parent
+        / "verifications"
+        / authorization.authorization_id
+        / "NOTE1.json"
+    )
+    verification_dir = verification_path.with_suffix("")
+    verification_path.unlink()
+    _mutate_verification_terminal(
+        verification_path,
+        verification_dir,
+        case=case,
+    )
+
+    class ProviderMustNotRun:
+        def get_note(self, _note_key: str):
+            raise AssertionError("tampered terminal verification reached provider")
+
+    with pytest.raises(module.ZoteroVerificationError) as exc_info:
+        _verify(authorization_path, ProviderMustNotRun())
+
+    assert exc_info.value.code == "verification_tampered"
+
+
 def test_verify_rejects_authorization_or_candidate_tamper_before_readback(tmp_path: Path) -> None:
     authorization_path, authorization = _authorized(tmp_path)
     candidate_snapshot = authorization_path.with_suffix("") / "candidate.json"
@@ -447,6 +637,56 @@ def test_verify_cli_emits_one_structured_passed_result(
     assert payload["code"] == "verified"
     assert payload["data"]["verified"] is True
     assert Path(payload["data"]["verification_path"]).is_file()
+
+
+def test_verify_provider_failure_keeps_original_exception_only_as_cause(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    authorization_path, _authorization = _authorized(tmp_path)
+    secret = "secret-verify-provider-token"
+
+    class FailingProvider:
+        def get_note(self, _note_key: str):
+            raise OSError(secret)
+
+    with pytest.raises(module.ZoteroVerificationError) as exc_info:
+        _verify(authorization_path, FailingProvider())
+
+    assert exc_info.value.code == "zotero_read_failed"
+    assert str(exc_info.value) == "read-only Zotero note readback failed"
+    assert exc_info.value.data == {}
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert secret in str(exc_info.value.__cause__)
+
+
+def test_verify_cli_does_not_leak_provider_failure_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    authorization_path, _authorization = _authorized(tmp_path)
+    secret = "secret-verify-provider-token"
+
+    class FailingProvider:
+        def get_note(self, _note_key: str):
+            raise OSError(secret)
+
+    monkeypatch.setattr(module, "LocalApiZoteroReadProvider", FailingProvider)
+
+    result = CliRunner().invoke(
+        app,
+        ["zotero", "verify", str(authorization_path), "--note-key", "NOTE1"],
+    )
+
+    assert result.exit_code == 1
+    assert secret not in result.stdout
+    assert secret not in result.stderr
+    payload = json.loads(result.stdout)
+    PaperReaderCommandResult.model_validate(payload)
+    assert payload["code"] == "zotero_read_failed"
+    assert payload["message"] == "read-only Zotero note readback failed"
+    assert payload["data"] == {}
 
 
 def test_concurrent_verify_converges_on_one_bound_terminal_tree(tmp_path: Path) -> None:

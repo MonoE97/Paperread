@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -23,10 +23,12 @@ from paper_reader.evidence_manifest import (
     locator_membership_error,
 )
 from paper_reader.note import render_note, render_note_html, validate_note, validate_trusted_summary
+from paper_reader.raw_schema import require_raw_schema_version
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
+    UnsafeStoragePathError,
     atomic_publish_tree,
     atomic_write_bytes,
     atomic_write_json,
@@ -37,12 +39,13 @@ from paper_reader.storage import (
     new_uuid,
     rfc3339_utc,
     remove_anchored_tree,
+    read_anchored_bytes,
     sha256_file,
     tree_snapshot_from_bytes,
     validate_directory_anchor,
 )
 from paper_reader.summary_lint import lint_rendered_markdown, lint_summary
-from paper_reader.v2_loader import LoadedRun, load_v2_run
+from paper_reader.v2_loader import DirectoryAnchor, LoadedRun, RunLoadError, load_v2_run
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,13 +99,21 @@ def _blocker(code: str, message: str, artifact_path: str | None = None) -> GateB
 def _load_summary(
     path: Path,
     blockers: list[GateBlocker],
+    *,
+    anchor: DirectoryAnchor,
 ) -> tuple[PaperReaderSummary | None, bytes | None]:
     try:
-        summary = PaperReaderSummary.model_validate_json(path.read_bytes())
+        raw = read_anchored_bytes(anchor, path)
+        require_raw_schema_version(
+            raw,
+            expected="paper_reader.summary.v2",
+            artifact_path=path,
+        )
+        summary = PaperReaderSummary.model_validate_json(raw)
     except FileNotFoundError:
         blockers.append(_blocker("summary_missing", "summary.json is required", "summary.json"))
         return None, None
-    except (OSError, ValidationError) as exc:
+    except (OSError, UnsafeStoragePathError, ValidationError) as exc:
         blockers.append(
             _blocker(
                 "invalid_summary_schema",
@@ -117,13 +128,21 @@ def _load_summary(
 def _load_review(
     path: Path,
     blockers: list[GateBlocker],
+    *,
+    anchor: DirectoryAnchor,
 ) -> tuple[PaperReaderReview | None, bytes | None]:
     try:
-        review = PaperReaderReview.model_validate_json(path.read_bytes())
+        raw = read_anchored_bytes(anchor, path)
+        require_raw_schema_version(
+            raw,
+            expected="paper_reader.review.v2",
+            artifact_path=path,
+        )
+        review = PaperReaderReview.model_validate_json(raw)
     except FileNotFoundError:
         blockers.append(_blocker("review_missing", "review.json is required", "review.json"))
         return None, None
-    except (OSError, ValidationError) as exc:
+    except (OSError, UnsafeStoragePathError, ValidationError) as exc:
         blockers.append(
             _blocker(
                 "invalid_review_schema",
@@ -133,6 +152,39 @@ def _load_review(
         )
         return None, None
     return review, canonical_json_bytes(review)
+
+
+def _preflight_review_schema_versions(run_path: Path) -> LoadedRun:
+    loaded = load_v2_run(run_path)
+    run_dir = loaded.manifest_path.parent
+    with DirectoryAnchor.open(run_dir, manifest_path=loaded.manifest_path) as anchor:
+        if (anchor.device, anchor.inode) != (
+            loaded.run_directory_device,
+            loaded.run_directory_inode,
+        ):
+            raise RunLoadError(
+                "run_directory_changed",
+                f"run directory changed during review schema preflight: {run_dir}",
+                manifest_path=loaded.manifest_path,
+            )
+        for name, expected in (
+            ("summary.json", "paper_reader.summary.v2"),
+            ("review.json", "paper_reader.review.v2"),
+        ):
+            path = run_dir / name
+            try:
+                raw = read_anchored_bytes(anchor, path)
+            except FileNotFoundError:
+                # Missing inputs retain the normal review blocker path.
+                continue
+            except (OSError, UnsafeStoragePathError) as exc:
+                raise RunLoadError(
+                    "run_artifact_unsafe",
+                    f"review input is not a stable single-link run artifact: {path}: {exc}",
+                    manifest_path=path,
+                ) from exc
+            require_raw_schema_version(raw, expected=expected, artifact_path=path)
+    return loaded
 
 
 def _validate_locator_bindings(
@@ -186,12 +238,40 @@ def validate_review_run(
     loaded_run: LoadedRun | None = None,
 ) -> ReviewValidation:
     loaded = loaded_run or load_v2_run(run_path)
+    if loaded.run_directory_anchor is not None:
+        return _validate_review_run_loaded(loaded)
+    with DirectoryAnchor.open(
+        loaded.manifest_path.parent,
+        manifest_path=loaded.manifest_path,
+    ) as anchor:
+        if (anchor.device, anchor.inode) != (
+            loaded.run_directory_device,
+            loaded.run_directory_inode,
+        ):
+            raise RunLoadError(
+                "run_directory_changed",
+                f"run directory changed before review validation: {loaded.manifest_path.parent}",
+                manifest_path=loaded.manifest_path,
+            )
+        anchored = replace(loaded, run_directory_anchor=anchor)
+        validation = _validate_review_run_loaded(anchored)
+        return replace(validation, loaded_run=loaded)
+
+
+def _validate_review_run_loaded(loaded: LoadedRun) -> ReviewValidation:
     run_dir = loaded.manifest_path.parent
     summary_path = run_dir / "summary.json"
     review_path = run_dir / "review.json"
     blockers: list[GateBlocker] = []
-    summary, summary_bytes = _load_summary(summary_path, blockers)
-    review, review_bytes = _load_review(review_path, blockers)
+    anchor = loaded.run_directory_anchor
+    if anchor is None:
+        raise RunLoadError(
+            "run_directory_changed",
+            "review validation requires a verified run directory anchor",
+            manifest_path=loaded.manifest_path,
+        )
+    summary, summary_bytes = _load_summary(summary_path, blockers, anchor=anchor)
+    review, review_bytes = _load_review(review_path, blockers, anchor=anchor)
     summary_sha256 = canonical_json_sha256(summary) if summary is not None else None
     review_sha256 = canonical_json_sha256(review) if review is not None else None
     evidence: BoundEvidence | None = None
@@ -339,7 +419,14 @@ def _reviewed_run(
 
 
 def seal_review_run(run_path: Path) -> SealedReview:
-    with locked_v2_run(run_path) as loaded:
+    preflight = _preflight_review_schema_versions(run_path)
+    with locked_v2_run(
+        run_path,
+        expected_run_path=preflight.manifest_path.parent,
+        expected_run_device=preflight.run_directory_device,
+        expected_run_inode=preflight.run_directory_inode,
+        expected_run_manifest_sha256=preflight.manifest_sha256,
+    ) as loaded:
         return _seal_review_run_locked(run_path, loaded)
 
 

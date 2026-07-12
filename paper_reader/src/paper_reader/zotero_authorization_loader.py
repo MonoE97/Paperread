@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,16 +17,68 @@ from paper_reader.contracts import (
     ZoteroSourceIdentity,
 )
 from paper_reader.note_hash import canonicalize_note_html_for_hash, note_html_sha256
+from paper_reader.raw_schema import require_raw_schema_version
+from paper_reader.run_lock import ExpectedRunArtifact
 from paper_reader.storage import (
+    UnsafeStoragePathError,
     canonical_json_bytes,
     canonical_json_sha256,
+    open_anchored_directory,
     read_anchored_bytes,
+    snapshot_directory_fd,
+    validate_directory_anchor,
 )
-from paper_reader.v2_loader import LoadedRun
+from paper_reader.v2_loader import (
+    DirectoryAnchor,
+    LoadedRun,
+    RunLoadError,
+    _load_v2_run_from_anchor,
+)
 
 
 class ZoteroAuthorizationBindingError(LocalPublicationError):
     pass
+
+
+_AUTHORIZATION_SIDECAR_NAMES = (
+    "candidate.json",
+    "children.json",
+    "content.html",
+    "parent.json",
+    "record.json",
+)
+
+
+def _read_closed_authorization_sidecar(
+    anchor: DirectoryAnchor,
+    authorization_path: Path,
+) -> tuple[dict[str, bytes], str]:
+    sidecar = authorization_path.with_suffix("")
+    with open_anchored_directory(anchor, sidecar) as sidecar_anchor:
+        before_names = tuple(sorted(os.listdir(sidecar_anchor.descriptor)))
+        if before_names != _AUTHORIZATION_SIDECAR_NAMES:
+            raise ZoteroAuthorizationBindingError(
+                "authorization_tampered",
+                "authorization sidecar membership is not the exact closed set",
+            )
+        before_snapshot = snapshot_directory_fd(sidecar_anchor.descriptor)
+        members = {
+            name: read_anchored_bytes(sidecar_anchor, sidecar / name)
+            for name in _AUTHORIZATION_SIDECAR_NAMES
+        }
+        after_names = tuple(sorted(os.listdir(sidecar_anchor.descriptor)))
+        after_snapshot = snapshot_directory_fd(sidecar_anchor.descriptor)
+        if (
+            after_names != before_names
+            or after_snapshot != before_snapshot
+        ):
+            raise ZoteroAuthorizationBindingError(
+                "authorization_tampered",
+                "authorization sidecar changed while it was inspected",
+            )
+        validate_directory_anchor(sidecar_anchor)
+    validate_directory_anchor(anchor)
+    return members, canonical_json_sha256(after_snapshot)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +92,22 @@ class LoadedAuthorization:
     candidate_bytes: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class InspectedAuthorization:
+    authorization_path: Path
+    authorization_bytes: bytes
+    authorization: PaperReaderWriteAuthorization
+    run_dir: Path
+    run_directory_device: int
+    run_directory_inode: int
+    run_manifest_bytes: bytes
+    run_manifest_sha256: str
+    skill_root: Path
+    skill_root_device: int
+    skill_root_inode: int
+    expected_artifacts: tuple[ExpectedRunArtifact, ...]
+
+
 def authorization_manifest_path(authorization_input: Path) -> Path:
     path = Path(authorization_input).expanduser()
     if path.suffix.lower() == ".json":
@@ -48,39 +117,154 @@ def authorization_manifest_path(authorization_input: Path) -> Path:
     return path
 
 
-def inspect_authorization_target(
+def preflight_authorization_schema_versions(
     authorization_input: Path,
-) -> tuple[Path, PaperReaderWriteAuthorization, Path]:
+) -> InspectedAuthorization:
     requested = authorization_manifest_path(authorization_input)
-    if requested.is_symlink() or requested.parent.is_symlink():
-        raise ZoteroAuthorizationBindingError(
-            "authorization_tampered",
-            "authorization path must not use symlinks",
-        )
-    try:
-        path = requested.resolve(strict=True)
-        raw = path.read_bytes()
-        authorization = PaperReaderWriteAuthorization.model_validate_json(raw)
-    except (OSError, ValidationError) as exc:
-        raise ZoteroAuthorizationBindingError(
-            "authorization_unreadable",
-            f"authorization cannot be inspected: {requested}: {exc}",
-        ) from exc
-    if (
-        path.parent.name != "authorizations"
-        or path.name != f"{authorization.authorization_id}.json"
-    ):
+    path = Path(os.path.abspath(requested))
+    if path.parent.name != "authorizations" or path.suffix.lower() != ".json":
         raise ZoteroAuthorizationBindingError(
             "authorization_tampered",
             "authorization does not use authorizations/<authorization_id>.json",
         )
     run_dir = path.parent.parent
-    return path, authorization, run_dir
+    runs_root = run_dir.parent.parent
+    if runs_root.name != "runs":
+        raise ZoteroAuthorizationBindingError(
+            "authorization_tampered",
+            "authorization run is outside <skill_root>/runs/YYYY-MM-DD",
+        )
+    skill_root = runs_root.parent
+    with ExitStack() as anchors:
+        try:
+            skill_anchor = anchors.enter_context(
+                DirectoryAnchor.open(skill_root, manifest_path=path)
+            )
+            anchor = anchors.enter_context(
+                DirectoryAnchor.open(run_dir, manifest_path=path)
+            )
+        except RunLoadError as exc:
+            raise ZoteroAuthorizationBindingError(
+                "authorization_tampered",
+                f"authorization run or skill root path is unsafe: {requested}: {exc}",
+            ) from exc
+        loaded = _load_v2_run_from_anchor(
+            anchor,
+            manifest_name="run.json",
+            manifest_path=run_dir / "run.json",
+        )
+        try:
+            raw = read_anchored_bytes(anchor, path)
+        except (OSError, ValueError) as exc:
+            raise ZoteroAuthorizationBindingError(
+                "authorization_unreadable",
+                f"authorization cannot be inspected safely: {requested}: {exc}",
+            ) from exc
+        require_raw_schema_version(
+            raw,
+            expected="paper_reader.write-authorization.v2",
+            artifact_path=path,
+        )
+        try:
+            authorization = PaperReaderWriteAuthorization.model_validate_json(raw)
+        except ValidationError as exc:
+            raise ZoteroAuthorizationBindingError(
+                "authorization_unreadable",
+                f"authorization cannot be inspected: {requested}: {exc}",
+            ) from exc
+        if path.name != f"{authorization.authorization_id}.json":
+            raise ZoteroAuthorizationBindingError(
+                "authorization_tampered",
+                "authorization does not use authorizations/<authorization_id>.json",
+            )
+        try:
+            sidecar_members, sidecar_digest = _read_closed_authorization_sidecar(
+                anchor,
+                path,
+            )
+        except (OSError, ValueError) as exc:
+            raise ZoteroAuthorizationBindingError(
+                "authorization_tampered",
+                "authorization sidecar cannot be inspected safely",
+            ) from exc
+        if sidecar_members["record.json"] != raw:
+            raise ZoteroAuthorizationBindingError(
+                "authorization_tampered",
+                "authorization sidecar record differs from its main commit marker",
+            )
+        candidate_path = path.with_suffix("") / "candidate.json"
+        expected_candidate_relative = candidate_path.relative_to(anchor.path).as_posix()
+        if authorization.candidate.path != expected_candidate_relative:
+            raise ZoteroAuthorizationBindingError(
+                "authorization_tampered",
+                "authorization candidate ref does not bind the closed sidecar member",
+            )
+        candidate_bytes = sidecar_members["candidate.json"]
+        require_raw_schema_version(
+            candidate_bytes,
+            expected="paper_reader.candidate.v2",
+            artifact_path=candidate_path,
+        )
+        try:
+            validate_directory_anchor(anchor)
+            validate_directory_anchor(skill_anchor)
+        except (OSError, UnsafeStoragePathError) as exc:
+            raise ZoteroAuthorizationBindingError(
+                "authorization_tampered",
+                "authorization run or skill root changed during preflight",
+            ) from exc
+        return InspectedAuthorization(
+            authorization_path=path,
+            authorization_bytes=raw,
+            authorization=authorization,
+            run_dir=anchor.path,
+            run_directory_device=anchor.device,
+            run_directory_inode=anchor.inode,
+            run_manifest_bytes=loaded.manifest_bytes,
+            run_manifest_sha256=loaded.manifest_sha256,
+            skill_root=skill_anchor.path,
+            skill_root_device=skill_anchor.device,
+            skill_root_inode=skill_anchor.inode,
+            expected_artifacts=(
+                ExpectedRunArtifact(
+                    path=path.relative_to(anchor.path).as_posix(),
+                    sha256=hashlib.sha256(raw).hexdigest(),
+                ),
+                ExpectedRunArtifact(
+                    path=candidate_path.relative_to(anchor.path).as_posix(),
+                    sha256=hashlib.sha256(candidate_bytes).hexdigest(),
+                ),
+                ExpectedRunArtifact(
+                    path=(path.with_suffix("") / "record.json")
+                    .relative_to(anchor.path)
+                    .as_posix(),
+                    sha256=hashlib.sha256(sidecar_members["record.json"]).hexdigest(),
+                ),
+                ExpectedRunArtifact(
+                    path=path.with_suffix("").relative_to(anchor.path).as_posix(),
+                    sha256=sidecar_digest,
+                    kind="tree",
+                ),
+            ),
+        )
+
+
+def inspect_authorization_target(
+    authorization_input: Path,
+) -> tuple[Path, PaperReaderWriteAuthorization, Path]:
+    inspected = preflight_authorization_schema_versions(authorization_input)
+    return (
+        inspected.authorization_path,
+        inspected.authorization,
+        inspected.run_dir,
+    )
 
 
 def _verify_authorization_members(
     run_dir: Path,
+    authorization_path: Path,
     authorization_dir: Path,
+    authorization_bytes: bytes,
     authorization: PaperReaderWriteAuthorization,
     loaded: LoadedRun,
 ) -> dict[str, tuple[Path, bytes]]:
@@ -128,6 +312,45 @@ def _verify_authorization_members(
             "authorization_tampered",
             "authorization refs are not members of its immutable artifact set",
         )
+    anchor = loaded.run_directory_anchor
+    if anchor is None:
+        raise ZoteroAuthorizationBindingError(
+            "authorization_tampered",
+            "authorization sidecar validation requires a locked run anchor",
+        )
+    try:
+        sidecar_members, _sidecar_digest = _read_closed_authorization_sidecar(
+            anchor,
+            authorization_path,
+        )
+    except ZoteroAuthorizationBindingError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ZoteroAuthorizationBindingError(
+            "authorization_tampered",
+            "authorization sidecar cannot be inspected safely",
+        ) from exc
+    if sidecar_members["record.json"] != authorization_bytes:
+        raise ZoteroAuthorizationBindingError(
+            "authorization_tampered",
+            "authorization sidecar record differs from its main commit marker",
+        )
+    expected_member_by_role = {
+        "candidate_snapshot": "candidate.json",
+        "authorized_content_html": "content.html",
+        "zotero_parent_snapshot": "parent.json",
+        "zotero_children_snapshot": "children.json",
+    }
+    for role, filename in expected_member_by_role.items():
+        verified_path, verified_bytes = verified[role]
+        if (
+            verified_path != authorization_dir / filename
+            or verified_bytes != sidecar_members[filename]
+        ):
+            raise ZoteroAuthorizationBindingError(
+                "authorization_tampered",
+                "authorization refs do not bind the exact closed sidecar members",
+            )
     return verified
 
 
@@ -147,6 +370,11 @@ def _validated_authorization_bytes(
             "authorization_tampered",
             "authorization path does not belong to the run",
         ) from exc
+    require_raw_schema_version(
+        raw,
+        expected="paper_reader.write-authorization.v2",
+        artifact_path=resolved,
+    )
     try:
         authorization = PaperReaderWriteAuthorization.model_validate_json(raw)
     except ValidationError as exc:
@@ -205,11 +433,18 @@ def _validated_authorization_bytes(
         )
     members = _verify_authorization_members(
         run_dir,
+        resolved,
         authorization_dir,
+        raw,
         authorization,
         loaded,
     )
     _candidate_path, candidate_bytes = members["candidate_snapshot"]
+    require_raw_schema_version(
+        candidate_bytes,
+        expected="paper_reader.candidate.v2",
+        artifact_path=_candidate_path,
+    )
     try:
         candidate = PaperReaderCandidate.model_validate_json(candidate_bytes)
     except ValidationError as exc:
@@ -371,10 +606,12 @@ def load_bound_authorization(
 
 
 __all__ = [
+    "InspectedAuthorization",
     "LoadedAuthorization",
     "ZoteroAuthorizationBindingError",
     "authorization_manifest_path",
     "inspect_authorization_target",
     "load_authorization_artifact",
     "load_bound_authorization",
+    "preflight_authorization_schema_versions",
 ]

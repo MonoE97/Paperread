@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -33,8 +34,9 @@ from paper_reader.evidence_manifest import (
     load_bound_evidence,
 )
 from paper_reader.note import build_note_labels
+from paper_reader.raw_schema import require_raw_schema_version
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
-from paper_reader.run_lock import locked_v2_run
+from paper_reader.run_lock import ExpectedRunArtifact, locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
     atomic_publish_tree,
@@ -48,10 +50,17 @@ from paper_reader.storage import (
     rfc3339_utc,
     remove_anchored_tree,
     sha256_file,
+    snapshot_anchored_tree,
     tree_snapshot_from_bytes,
     validate_directory_anchor,
 )
-from paper_reader.v2_loader import LoadedRun, load_v2_run
+from paper_reader.v2_loader import (
+    DirectoryAnchor,
+    LoadedRun,
+    RunLoadError,
+    load_v2_run,
+    run_manifest_path,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +69,92 @@ class BuiltLocalCandidate:
     candidate_dir: Path
     candidate: PaperReaderCandidate
     candidate_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreflightCandidateBinding:
+    artifact_ref: ArtifactRef
+    candidate_path: Path
+    candidate: PaperReaderCandidate
+    candidate_digest: str
+    candidate_tree_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class SealedReviewSchemaPreflight:
+    loaded_run: LoadedRun
+    expected_artifacts: tuple[ExpectedRunArtifact, ...] = ()
+    bound_candidates: tuple[PreflightCandidateBinding, ...] = ()
+    skill_root: Path | None = None
+    skill_root_device: int | None = None
+    skill_root_inode: int | None = None
+
+
+def preflight_candidate_lock_artifacts(
+    preflight: SealedReviewSchemaPreflight,
+) -> tuple[ExpectedRunArtifact, ...]:
+    artifacts = list(preflight.expected_artifacts)
+    for binding in preflight.bound_candidates:
+        artifacts.extend(
+            (
+                ExpectedRunArtifact(
+                    path=binding.artifact_ref.path,
+                    sha256=binding.candidate_digest,
+                ),
+                ExpectedRunArtifact(
+                    path=(
+                        binding.candidate_path.parent.relative_to(
+                            preflight.loaded_run.manifest_path.parent
+                        ).as_posix()
+                    ),
+                    sha256=binding.candidate_tree_sha256,
+                    kind="tree",
+                ),
+            )
+        )
+    return tuple(artifacts)
+
+
+def validate_candidate_binding_growth(
+    baseline: SealedReviewSchemaPreflight,
+    refreshed: SealedReviewSchemaPreflight,
+) -> tuple[PreflightCandidateBinding, ...]:
+    baseline_artifacts = baseline.loaded_run.run.artifacts
+    refreshed_artifacts = refreshed.loaded_run.run.artifacts
+    if (
+        refreshed_artifacts[: len(baseline_artifacts)] != baseline_artifacts
+        or any(
+            item.role != "candidate"
+            for item in refreshed_artifacts[len(baseline_artifacts) :]
+        )
+    ):
+        raise LocalPublicationError(
+            "sealed_artifact_tampered",
+            "run artifact history changed non-append-only during candidate retry",
+        )
+    baseline_by_path = {
+        item.artifact_ref.path: item for item in baseline.bound_candidates
+    }
+    refreshed_by_path = {
+        item.artifact_ref.path: item for item in refreshed.bound_candidates
+    }
+    if (
+        len(baseline_by_path) != len(baseline.bound_candidates)
+        or len(refreshed_by_path) != len(refreshed.bound_candidates)
+        or any(
+            refreshed_by_path.get(path) != binding
+            for path, binding in baseline_by_path.items()
+        )
+    ):
+        raise LocalPublicationError(
+            "sealed_artifact_tampered",
+            "an existing candidate binding changed during retry",
+        )
+    return tuple(
+        binding
+        for path, binding in refreshed_by_path.items()
+        if path not in baseline_by_path
+    )
 
 
 def _latest_review_package(
@@ -123,6 +218,16 @@ def _sealed_snapshots(
         raise LocalPublicationError("invalid_sealed_review", "sealed summary/review refs are not members")
     if package.evidence_manifest not in package.artifacts:
         raise LocalPublicationError("invalid_sealed_review", "sealed evidence ref is not a member")
+    require_raw_schema_version(
+        snapshots["summary.json"],
+        expected="paper_reader.summary.v2",
+        artifact_path=package_dir / "summary.json",
+    )
+    require_raw_schema_version(
+        snapshots["review.json"],
+        expected="paper_reader.review.v2",
+        artifact_path=package_dir / "review.json",
+    )
     try:
         summary = PaperReaderSummary.model_validate_json(snapshots["summary.json"])
         review = PaperReaderReview.model_validate_json(snapshots["review.json"])
@@ -179,18 +284,239 @@ def _updated_run(loaded: LoadedRun, candidate_ref: ArtifactRef, gate: GateState)
     )
 
 
+def _preflight_sealed_review_from_anchor(
+    loaded: LoadedRun,
+    anchor: DirectoryAnchor,
+) -> tuple[ExpectedRunArtifact, ...]:
+    run_dir = loaded.manifest_path.parent
+    anchored = replace(loaded, run_directory_anchor=anchor)
+    refs = [item for item in anchored.run.artifacts if item.role == "review_package"]
+    if not refs:
+        raise LocalPublicationError(
+            "sealed_review_missing",
+            "run does not bind a sealed review package",
+        )
+    package_path, package_bytes = verify_artifact_ref(
+        run_dir,
+        refs[-1],
+        anchor=anchor,
+    )
+    try:
+        package = PaperReaderReviewPackage.model_validate_json(package_bytes)
+    except ValidationError as exc:
+        raise LocalPublicationError(
+            "invalid_sealed_review",
+            f"sealed review package schema validation failed: {exc}",
+        ) from exc
+    if canonical_json_bytes(package) != package_bytes:
+        raise LocalPublicationError(
+            "invalid_sealed_review",
+            "sealed review package is not canonical",
+        )
+    expected_artifacts = [
+        ExpectedRunArtifact(
+            path=refs[-1].path,
+            sha256=hashlib.sha256(package_bytes).hexdigest(),
+        )
+    ]
+    for artifact_ref, expected in (
+        (package.summary, "paper_reader.summary.v2"),
+        (package.review, "paper_reader.review.v2"),
+    ):
+        artifact_path, raw = verify_artifact_ref(
+            run_dir,
+            artifact_ref,
+            anchor=anchor,
+        )
+        require_raw_schema_version(
+            raw,
+            expected=expected,
+            artifact_path=artifact_path,
+        )
+        expected_artifacts.append(
+            ExpectedRunArtifact(
+                path=artifact_ref.path,
+                sha256=hashlib.sha256(raw).hexdigest(),
+            )
+        )
+    return tuple(expected_artifacts)
+
+
+def _validate_preflight_run_anchor(loaded: LoadedRun, anchor: DirectoryAnchor) -> None:
+    if (anchor.device, anchor.inode) != (
+        loaded.run_directory_device,
+        loaded.run_directory_inode,
+    ):
+        raise RunLoadError(
+            "run_directory_changed",
+            f"run directory changed during candidate schema preflight: {anchor.path}",
+            manifest_path=loaded.manifest_path,
+        )
+
+
+def _preflight_bound_candidates(
+    loaded: LoadedRun,
+    anchor: DirectoryAnchor,
+) -> tuple[PreflightCandidateBinding, ...]:
+    from paper_reader.local_publish import _load_candidate
+
+    anchored = replace(loaded, run_directory_anchor=anchor)
+    bindings: list[PreflightCandidateBinding] = []
+    for artifact_ref in (
+        item for item in loaded.run.artifacts if item.role == "candidate"
+    ):
+        candidate_path = loaded.manifest_path.parent / artifact_ref.path
+        before_snapshot = snapshot_anchored_tree(anchor, candidate_path.parent)
+        (
+            _loaded,
+            verified_path,
+            candidate,
+            candidate_digest,
+            _verified,
+        ) = _load_candidate(
+            candidate_path,
+            loaded_run=anchored,
+            require_local=False,
+        )
+        after_snapshot = snapshot_anchored_tree(anchor, verified_path.parent)
+        if after_snapshot != before_snapshot:
+            raise LocalPublicationError(
+                "sealed_artifact_tampered",
+                "candidate tree changed during read-only retry preflight",
+            )
+        bindings.append(
+            PreflightCandidateBinding(
+                artifact_ref=artifact_ref,
+                candidate_path=verified_path,
+                candidate=candidate,
+                candidate_digest=candidate_digest,
+                candidate_tree_sha256=canonical_json_sha256(after_snapshot),
+            )
+        )
+    return tuple(bindings)
+
+
+def preflight_sealed_review_schema_versions(
+    run_path: Path,
+) -> SealedReviewSchemaPreflight:
+    """Read-only, lock-free validation of transitive review schema versions."""
+
+    manifest_path = run_manifest_path(run_path)
+    run_dir = Path(os.path.abspath(manifest_path.parent))
+    runs_root = run_dir.parent.parent
+    if runs_root.name == "runs":
+        skill_root = runs_root.parent
+        with DirectoryAnchor.open(skill_root, manifest_path=manifest_path) as skill_anchor:
+            loaded = load_v2_run(run_path)
+            with DirectoryAnchor.open(
+                run_dir,
+                manifest_path=loaded.manifest_path,
+            ) as run_anchor:
+                _validate_preflight_run_anchor(loaded, run_anchor)
+                expected_artifacts = _preflight_sealed_review_from_anchor(
+                    loaded,
+                    run_anchor,
+                )
+                bound_candidates = _preflight_bound_candidates(loaded, run_anchor)
+                validate_directory_anchor(run_anchor)
+                validate_directory_anchor(skill_anchor)
+                return SealedReviewSchemaPreflight(
+                    loaded_run=loaded,
+                    expected_artifacts=expected_artifacts,
+                    bound_candidates=bound_candidates,
+                    skill_root=skill_anchor.path,
+                    skill_root_device=skill_anchor.device,
+                    skill_root_inode=skill_anchor.inode,
+                )
+
+    loaded = load_v2_run(run_path)
+    with DirectoryAnchor.open(run_dir, manifest_path=loaded.manifest_path) as run_anchor:
+        _validate_preflight_run_anchor(loaded, run_anchor)
+        expected_artifacts = _preflight_sealed_review_from_anchor(
+            loaded,
+            run_anchor,
+        )
+        bound_candidates = _preflight_bound_candidates(loaded, run_anchor)
+        validate_directory_anchor(run_anchor)
+        return SealedReviewSchemaPreflight(
+            loaded_run=loaded,
+            expected_artifacts=expected_artifacts,
+            bound_candidates=bound_candidates,
+        )
+
+
 def build_local_candidate(run_path: Path) -> BuiltLocalCandidate:
-    with locked_v2_run(run_path) as loaded:
-        return _build_local_candidate_locked(loaded)
+    preflight = preflight_sealed_review_schema_versions(run_path)
+    return _build_local_candidate_from_preflight(run_path, preflight)
+
+
+def _build_local_candidate_from_preflight(
+    run_path: Path,
+    preflight: SealedReviewSchemaPreflight,
+) -> BuiltLocalCandidate:
+    baseline = preflight
+    current = preflight
+    for attempt in range(2):
+        inspected_run = current.loaded_run
+        try:
+            with locked_v2_run(
+                run_path,
+                expected_run_path=inspected_run.manifest_path.parent,
+                expected_run_device=inspected_run.run_directory_device,
+                expected_run_inode=inspected_run.run_directory_inode,
+                expected_run_manifest_sha256=inspected_run.manifest_sha256,
+                expected_artifacts=preflight_candidate_lock_artifacts(current),
+            ) as loaded:
+                return _build_local_candidate_locked(loaded)
+        except RunLoadError as exc:
+            if exc.code not in {
+                "run_manifest_changed",
+                "run_artifact_changed",
+            } or attempt == 1:
+                raise
+        refreshed = preflight_sealed_review_schema_versions(run_path)
+        if (
+            refreshed.loaded_run.manifest_path.parent
+            != baseline.loaded_run.manifest_path.parent
+            or refreshed.loaded_run.run_directory_device
+            != baseline.loaded_run.run_directory_device
+            or refreshed.loaded_run.run_directory_inode
+            != baseline.loaded_run.run_directory_inode
+        ):
+            raise RunLoadError(
+                "run_directory_changed",
+                "local candidate run changed during retry",
+                manifest_path=refreshed.loaded_run.manifest_path,
+            )
+        baseline_run = baseline.loaded_run.run
+        refreshed_run = refreshed.loaded_run.run
+        if (
+            refreshed_run.run_id != baseline_run.run_id
+            or refreshed_run.created_at != baseline_run.created_at
+            or refreshed_run.source != baseline_run.source
+            or refreshed_run.target != baseline_run.target
+            or refreshed.expected_artifacts != baseline.expected_artifacts
+        ):
+            raise LocalPublicationError(
+                "sealed_artifact_tampered",
+                "local candidate source or sealed review changed during retry",
+            )
+        validate_candidate_binding_growth(baseline, refreshed)
+        current = refreshed
+    raise AssertionError("local candidate retry loop did not terminate")
 
 
 def build_candidate(run_path: Path, *, provider=None):
-    loaded = load_v2_run(run_path)
-    if isinstance(loaded.run.source, ZoteroSourceIdentity):
-        from paper_reader.zotero_candidate import build_zotero_candidate
+    preflight = preflight_sealed_review_schema_versions(run_path)
+    if isinstance(preflight.loaded_run.run.source, ZoteroSourceIdentity):
+        from paper_reader.zotero_candidate import _build_zotero_candidate_from_preflight
 
-        return build_zotero_candidate(run_path, provider=provider)
-    return build_local_candidate(run_path)
+        return _build_zotero_candidate_from_preflight(
+            run_path,
+            preflight,
+            provider=provider,
+        )
+    return _build_local_candidate_from_preflight(run_path, preflight)
 
 
 def _build_local_candidate_locked(loaded: LoadedRun) -> BuiltLocalCandidate:
@@ -360,4 +686,13 @@ def _build_local_candidate_locked(loaded: LoadedRun) -> BuiltLocalCandidate:
             staging_anchor.close()
 
 
-__all__ = ["BuiltLocalCandidate", "build_candidate", "build_local_candidate"]
+__all__ = [
+    "BuiltLocalCandidate",
+    "PreflightCandidateBinding",
+    "SealedReviewSchemaPreflight",
+    "build_candidate",
+    "build_local_candidate",
+    "preflight_candidate_lock_artifacts",
+    "preflight_sealed_review_schema_versions",
+    "validate_candidate_binding_growth",
+]

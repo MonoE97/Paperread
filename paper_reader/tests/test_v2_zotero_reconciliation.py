@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -17,6 +19,7 @@ from paper_reader.contracts import (
     PaperReaderVerification,
 )
 from paper_reader.public_cli import app
+from paper_reader.storage import canonical_json_bytes
 
 from test_v2_zotero_authorization import (
     NOW,
@@ -47,6 +50,66 @@ def _reconcile(authorization_path: Path, provider):
         authorization_path,
         provider=provider,
     )
+
+
+def _rewrite_bound_terminal_ref(run_dir: Path, *, role: str, raw: bytes) -> None:
+    run_path = run_dir / "run.json"
+    run = json.loads(run_path.read_bytes())
+    for artifact in run["artifacts"]:
+        if artifact["role"] == role:
+            artifact["sha256"] = hashlib.sha256(raw).hexdigest()
+            artifact["size_bytes"] = len(raw)
+    run_path.write_bytes(canonical_json_bytes(run))
+
+
+def _mutate_reconciliation_terminal(
+    reconciliation_path: Path,
+    reconciliation_dir: Path,
+    *,
+    case: str,
+) -> None:
+    record_path = reconciliation_dir / "record.json"
+    if case == "extra_file":
+        (reconciliation_dir / "extra.bin").write_bytes(b"unbound")
+        return
+    if case == "nested_directory":
+        nested = reconciliation_dir / "nested"
+        nested.mkdir()
+        (nested / "member.bin").write_bytes(b"unbound")
+        return
+    if case == "record_mismatch":
+        record_path.write_bytes(b"{}")
+        return
+    if case in {"record_symlink", "record_hardlink"}:
+        outside = reconciliation_dir.parent / f"outside-{case}.json"
+        outside.write_bytes(record_path.read_bytes())
+        record_path.unlink()
+        if case == "record_symlink":
+            record_path.symlink_to(outside)
+        else:
+            os.link(outside, record_path)
+        return
+    if case == "role_filename_swap":
+        source = reconciliation_path if reconciliation_path.exists() else record_path
+        payload = json.loads(source.read_bytes())
+        artifacts = {item["role"]: item for item in payload["artifacts"]}
+        authorization = artifacts["authorization_snapshot"]
+        children = artifacts["zotero_children_snapshot"]
+        for field in ("path", "sha256", "size_bytes", "media_type"):
+            authorization[field], children[field] = children[field], authorization[field]
+        payload["authorization"] = copy.deepcopy(authorization)
+        payload["children_snapshot"] = copy.deepcopy(children)
+        rewritten = canonical_json_bytes(payload)
+        record_path.write_bytes(rewritten)
+        if reconciliation_path.exists():
+            reconciliation_path.write_bytes(rewritten)
+            _rewrite_bound_terminal_ref(
+                reconciliation_path.parents[1],
+                role="zotero_reconciliation",
+                raw=rewritten,
+            )
+        return
+    raise AssertionError(case)
 
 
 def test_reconcile_zero_is_terminal_not_found_and_requires_retry_confirmation(
@@ -325,6 +388,128 @@ def test_reconciliation_is_fixed_terminal_per_authorization(tmp_path: Path) -> N
     assert second.reconciliation.outcome == "not_found"
 
 
+_TERMINAL_SIDECAR_CASES = (
+    "extra_file",
+    "nested_directory",
+    "record_mismatch",
+    "record_symlink",
+    "record_hardlink",
+    "role_filename_swap",
+)
+
+
+@pytest.mark.parametrize("case", _TERMINAL_SIDECAR_CASES)
+@pytest.mark.parametrize("recovery_mode", ["bound_replay", "unbound_main"])
+def test_reconcile_replay_and_unbound_main_recovery_reject_tampered_closed_sidecar(
+    case: str,
+    recovery_mode: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    authorization_path, authorization = _authorized(tmp_path)
+    provider = InMemoryZoteroProvider(children=[], notes={})
+    if recovery_mode == "bound_replay":
+        first = _reconcile(authorization_path, provider)
+    else:
+        original_write = module.atomic_write_json
+        failed = False
+
+        def fail_run_binding_once(path: Path, value, **kwargs):
+            nonlocal failed
+            if Path(path).name == "run.json" and not failed:
+                failed = True
+                raise OSError("injected reconciliation run binding failure")
+            return original_write(path, value, **kwargs)
+
+        monkeypatch.setattr(module, "atomic_write_json", fail_run_binding_once)
+        with pytest.raises(module.ZoteroReconciliationError) as fault:
+            _reconcile(authorization_path, provider)
+        assert fault.value.code == "reconciliation_status_update_failed"
+        monkeypatch.setattr(module, "atomic_write_json", original_write)
+        reconciliation_path = (
+            authorization_path.parent.parent
+            / "reconciliations"
+            / f"{authorization.authorization_id}.json"
+        )
+        first = type(
+            "UnboundReconciliation",
+            (),
+            {
+                "reconciliation_path": reconciliation_path,
+                "reconciliation_dir": reconciliation_path.with_suffix(""),
+            },
+        )()
+
+    _mutate_reconciliation_terminal(
+        first.reconciliation_path,
+        first.reconciliation_dir,
+        case=case,
+    )
+
+    class ProviderMustNotRun:
+        def get_children(self, _parent_key: str):
+            raise AssertionError("tampered terminal reconciliation reached provider")
+
+    with pytest.raises(module.ZoteroReconciliationError) as exc_info:
+        _reconcile(authorization_path, ProviderMustNotRun())
+
+    assert exc_info.value.code == "reconciliation_tampered"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "extra_file",
+        "nested_directory",
+        "record_symlink",
+        "record_hardlink",
+        "role_filename_swap",
+    ],
+)
+def test_reconcile_sidecar_only_orphan_recovery_rejects_tampered_closed_sidecar(
+    case: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    authorization_path, authorization = _authorized(tmp_path)
+    provider = InMemoryZoteroProvider(children=[], notes={})
+    original_write = module.atomic_write_json
+
+    def fail_run_binding(path: Path, value, **kwargs):
+        if Path(path).name == "run.json":
+            raise OSError("injected reconciliation run binding failure")
+        return original_write(path, value, **kwargs)
+
+    monkeypatch.setattr(module, "atomic_write_json", fail_run_binding)
+    with pytest.raises(module.ZoteroReconciliationError) as fault:
+        _reconcile(authorization_path, provider)
+    assert fault.value.code == "reconciliation_status_update_failed"
+    monkeypatch.setattr(module, "atomic_write_json", original_write)
+    reconciliation_path = (
+        authorization_path.parent.parent
+        / "reconciliations"
+        / f"{authorization.authorization_id}.json"
+    )
+    reconciliation_dir = reconciliation_path.with_suffix("")
+    reconciliation_path.unlink()
+    _mutate_reconciliation_terminal(
+        reconciliation_path,
+        reconciliation_dir,
+        case=case,
+    )
+
+    class ProviderMustNotRun:
+        def get_children(self, _parent_key: str):
+            raise AssertionError("tampered terminal reconciliation reached provider")
+
+    with pytest.raises(module.ZoteroReconciliationError) as exc_info:
+        _reconcile(authorization_path, ProviderMustNotRun())
+
+    assert exc_info.value.code == "reconciliation_tampered"
+
+
 def test_reconcile_cli_emits_one_structured_terminal_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -344,6 +529,86 @@ def test_reconcile_cli_emits_one_structured_terminal_result(
     assert payload["code"] == "reconciliation_not_found"
     assert payload["data"]["outcome"] == "not_found"
     assert payload["data"]["retry_confirmation_required"] is True
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "safe_message"),
+    [
+        ("children", "read-only Zotero reconciliation children read failed"),
+        ("note", "read-only Zotero reconciliation note read failed"),
+    ],
+)
+def test_reconcile_provider_failure_keeps_original_exception_only_as_cause(
+    failure_stage: str,
+    safe_message: str,
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    authorization_path, authorization = _authorized(tmp_path)
+    exact = _note_snapshot(authorization, requested_key="NOTE1")
+    secret = f"secret-reconcile-{failure_stage}-provider-token"
+
+    class FailingProvider:
+        def get_children(self, _parent_key: str):
+            if failure_stage == "children":
+                raise OSError(secret)
+            return [exact]
+
+        def get_note(self, _note_key: str):
+            raise OSError(secret)
+
+    with pytest.raises(module.ZoteroReconciliationError) as exc_info:
+        _reconcile(authorization_path, FailingProvider())
+
+    assert exc_info.value.code == "zotero_read_failed"
+    assert str(exc_info.value) == safe_message
+    assert exc_info.value.data == {}
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert secret in str(exc_info.value.__cause__)
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "safe_message"),
+    [
+        ("children", "read-only Zotero reconciliation children read failed"),
+        ("note", "read-only Zotero reconciliation note read failed"),
+    ],
+)
+def test_reconcile_cli_does_not_leak_provider_failure_text(
+    failure_stage: str,
+    safe_message: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    authorization_path, authorization = _authorized(tmp_path)
+    exact = _note_snapshot(authorization, requested_key="NOTE1")
+    secret = f"secret-reconcile-{failure_stage}-provider-token"
+
+    class FailingProvider:
+        def get_children(self, _parent_key: str):
+            if failure_stage == "children":
+                raise OSError(secret)
+            return [exact]
+
+        def get_note(self, _note_key: str):
+            raise OSError(secret)
+
+    monkeypatch.setattr(module, "LocalApiZoteroReadProvider", FailingProvider)
+
+    result = CliRunner().invoke(
+        app,
+        ["zotero", "reconcile", str(authorization_path)],
+    )
+
+    assert result.exit_code == 1
+    assert secret not in result.stdout
+    assert secret not in result.stderr
+    payload = json.loads(result.stdout)
+    PaperReaderCommandResult.model_validate(payload)
+    assert payload["code"] == "zotero_read_failed"
+    assert payload["message"] == safe_message
+    assert payload["data"] == {}
 
 
 def test_concurrent_reconcile_converges_on_one_fixed_terminal_tree(tmp_path: Path) -> None:

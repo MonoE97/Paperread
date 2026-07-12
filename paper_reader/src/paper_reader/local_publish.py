@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -29,8 +29,9 @@ from paper_reader.contracts import (
     ZoteroSourceIdentity,
 )
 from paper_reader.note_hash import canonicalize_note_html_for_hash, note_html_sha256
+from paper_reader.raw_schema import require_raw_schema_version
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
-from paper_reader.run_lock import locked_v2_run
+from paper_reader.run_lock import ExpectedRunArtifact, locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
     PublishConflictError,
@@ -40,9 +41,17 @@ from paper_reader.storage import (
     canonical_json_bytes,
     publish_bytes_no_replace,
     read_anchored_bytes,
+    snapshot_anchored_tree,
+    tree_snapshot_from_hashes,
     validate_directory_anchor,
 )
-from paper_reader.v2_loader import DirectoryAnchor, LoadedRun, RunLoadError, load_v2_run
+from paper_reader.v2_loader import (
+    DirectoryAnchor,
+    LoadedRun,
+    RunLoadError,
+    _load_v2_run_from_anchor,
+    load_v2_run,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +64,17 @@ class PublishedLocalCandidate:
     content_sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class LocalCandidatePublicationPreflight:
+    run_dir: Path
+    run_device: int
+    run_inode: int
+    run_manifest_sha256: str
+    candidate_path: Path
+    candidate_bytes: bytes
+    candidate_digest: str
+
+
 def _load_candidate(
     candidate_input: Path,
     *,
@@ -65,27 +85,45 @@ def _load_candidate(
     if requested.is_symlink() or requested.parent.is_symlink():
         raise LocalPublicationError("candidate_tampered", "candidate path must not use symlinks")
     candidate_path = Path(os.path.abspath(requested))
-    if loaded_run is not None and loaded_run.run_directory_anchor is not None:
-        try:
-            raw = read_anchored_bytes(loaded_run.run_directory_anchor, candidate_path)
-        except (OSError, ValueError) as exc:
-            raise LocalPublicationError(
-                "candidate_tampered",
-                f"candidate is not an anchored single-link file: {requested}: {exc}",
-            ) from exc
-    else:
-        try:
-            candidate_path = requested.resolve(strict=True)
-            raw = candidate_path.read_bytes()
-        except OSError as exc:
-            raise LocalPublicationError("candidate_unreadable", f"candidate is unreadable: {requested}: {exc}") from exc
     candidate_dir = candidate_path.parent
-    if candidate_dir.parent.name != "candidates":
+    if candidate_path.name != "candidate.json" or candidate_dir.parent.name != "candidates":
         raise LocalPublicationError("candidate_tampered", "candidate left its run candidates directory")
     run_dir = candidate_dir.parent.parent
     loaded = loaded_run or load_v2_run(run_dir)
     if loaded.manifest_path.parent != run_dir:
         raise LocalPublicationError("candidate_tampered", "candidate run directory binding mismatch")
+    anchor = loaded.run_directory_anchor
+    if anchor is None:
+        with DirectoryAnchor.open(run_dir, manifest_path=loaded.manifest_path) as opened_anchor:
+            if (opened_anchor.device, opened_anchor.inode) != (
+                loaded.run_directory_device,
+                loaded.run_directory_inode,
+            ):
+                raise LocalPublicationError(
+                    "candidate_tampered",
+                    "candidate run directory changed before it was validated",
+                )
+            anchored = replace(loaded, run_directory_anchor=opened_anchor)
+            result = _load_candidate(
+                candidate_path,
+                loaded_run=anchored,
+                require_local=require_local,
+            )
+        return loaded, *result[1:]
+
+    try:
+        before_snapshot = snapshot_anchored_tree(anchor, candidate_dir)
+        raw = read_anchored_bytes(anchor, candidate_path)
+    except (OSError, ValueError) as exc:
+        raise LocalPublicationError(
+            "candidate_tampered",
+            "candidate tree cannot be read as an anchored immutable tree",
+        ) from exc
+    require_raw_schema_version(
+        raw,
+        expected="paper_reader.candidate.v2",
+        artifact_path=candidate_path,
+    )
     try:
         candidate = PaperReaderCandidate.model_validate_json(raw)
     except ValidationError as exc:
@@ -112,17 +150,27 @@ def _load_candidate(
         raise LocalPublicationError("not_implemented", "local publish accepts only local candidates")
 
     verified: dict[str, list[tuple[Path, bytes]]] = {}
+    expected_members = {
+        "candidate.json": (len(raw), hashlib.sha256(raw).hexdigest()),
+    }
     for artifact in candidate.artifacts:
         try:
             path, content = verify_artifact_ref(
                 run_dir,
                 artifact,
-                anchor=loaded.run_directory_anchor,
+                anchor=anchor,
             )
         except LocalPublicationError as exc:
             raise LocalPublicationError("candidate_tampered", str(exc)) from exc
         if not path.is_relative_to(candidate_dir):
             raise LocalPublicationError("candidate_tampered", "candidate artifact escapes its tree")
+        relative_member = path.relative_to(candidate_dir).as_posix()
+        if relative_member in expected_members:
+            raise LocalPublicationError(
+                "candidate_tampered",
+                "candidate artifact paths must be unique and must not replace candidate.json",
+            )
+        expected_members[relative_member] = (artifact.size_bytes, artifact.sha256)
         verified.setdefault(artifact.role, []).append((path, content))
     required = {
         "run_snapshot",
@@ -173,6 +221,24 @@ def _load_candidate(
             raise LocalPublicationError("candidate_tampered", "candidate HTML/live binding mismatch")
     else:  # pragma: no cover - strict target discriminator makes this unreachable
         raise LocalPublicationError("candidate_tampered", "candidate target type is invalid")
+    try:
+        after_snapshot = snapshot_anchored_tree(anchor, candidate_dir)
+        expected_snapshot = tree_snapshot_from_hashes(expected_members)
+    except (OSError, ValueError) as exc:
+        raise LocalPublicationError(
+            "candidate_tampered",
+            "candidate tree cannot be revalidated as an anchored immutable tree",
+        ) from exc
+    if before_snapshot != after_snapshot:
+        raise LocalPublicationError(
+            "candidate_tampered",
+            "candidate tree changed while it was validated",
+        )
+    if after_snapshot != expected_snapshot:
+        raise LocalPublicationError(
+            "candidate_tampered",
+            "candidate tree contains files or directories not bound by candidate.json",
+        )
     return loaded, candidate_path, candidate, digest, {
         role: tuple(items) for role, items in verified.items()
     }
@@ -545,36 +611,159 @@ def _publish_or_verify_receipt(
     return receipt_path, receipt_ref
 
 
-def _candidate_run_dir(candidate_input: Path) -> Path:
-    requested = candidate_manifest_path(candidate_input)
-    if requested.is_symlink() or requested.parent.is_symlink():
-        raise LocalPublicationError("candidate_tampered", "candidate path must not use symlinks")
+def _lexical_candidate_manifest_path(candidate_input: Path) -> Path:
+    requested = Path(candidate_input).expanduser()
     try:
-        candidate_path = requested.resolve(strict=True)
+        metadata = os.lstat(requested)
+    except FileNotFoundError:
+        metadata = None
+    if (
+        metadata is not None
+        and stat.S_ISDIR(metadata.st_mode)
+        or metadata is None
+        and requested.suffix.lower() != ".json"
+    ):
+        requested = requested / "candidate.json"
+    return Path(os.path.abspath(requested))
+
+
+def _preflight_local_candidate(
+    candidate_input: Path,
+) -> LocalCandidatePublicationPreflight:
+    candidate_path = _lexical_candidate_manifest_path(candidate_input)
+    candidate_dir = candidate_path.parent
+    if (
+        candidate_path.name != "candidate.json"
+        or candidate_dir.parent.name != "candidates"
+    ):
+        raise LocalPublicationError(
+            "candidate_tampered",
+            "candidate must use candidates/<candidate_id>/candidate.json",
+        )
+    run_dir = candidate_dir.parent.parent
+    manifest_path = run_dir / "run.json"
+    try:
+        anchor_context = DirectoryAnchor.open(
+            run_dir,
+            manifest_path=manifest_path,
+        )
+    except RunLoadError:
+        raise
+    with anchor_context as anchor:
+        loaded = _load_v2_run_from_anchor(
+            anchor,
+            manifest_name="run.json",
+            manifest_path=manifest_path,
+        )
+        try:
+            raw = read_anchored_bytes(anchor, candidate_path)
+        except (OSError, ValueError) as exc:
+            raise LocalPublicationError(
+                "candidate_tampered",
+                "candidate must be a stable single-link file inside its run",
+            ) from exc
+        require_raw_schema_version(
+            raw,
+            expected="paper_reader.candidate.v2",
+            artifact_path=candidate_path,
+        )
+        validate_directory_anchor(anchor)
+    return LocalCandidatePublicationPreflight(
+        run_dir=run_dir,
+        run_device=loaded.run_directory_device,
+        run_inode=loaded.run_directory_inode,
+        run_manifest_sha256=loaded.manifest_sha256,
+        candidate_path=candidate_path,
+        candidate_bytes=raw,
+        candidate_digest=hashlib.sha256(raw).hexdigest(),
+    )
+
+
+def _candidate_run_dir(candidate_input: Path) -> Path:
+    """Compatibility helper for internal callers; publication uses the full preflight."""
+
+    try:
+        return _preflight_local_candidate(candidate_input).run_dir
     except OSError as exc:
         raise LocalPublicationError(
             "candidate_unreadable",
-            f"candidate is unreadable: {requested}: {exc}",
+            "candidate cannot be inspected safely",
         ) from exc
-    if candidate_path.parent.parent.name != "candidates":
-        raise LocalPublicationError("candidate_tampered", "candidate left its run candidates directory")
-    return candidate_path.parent.parent.parent
 
 
 def publish_local_candidate(candidate_input: Path) -> PublishedLocalCandidate:
-    run_dir = _candidate_run_dir(candidate_input)
-    with locked_v2_run(run_dir) as loaded:
-        return _publish_local_candidate_locked(candidate_input, loaded)
+    preflight = _preflight_local_candidate(candidate_input)
+    try:
+        return _publish_local_candidate_from_preflight(candidate_input, preflight)
+    except RunLoadError as exc:
+        if exc.code not in {"run_manifest_changed", "run_artifact_changed"}:
+            raise
+    refreshed = _preflight_local_candidate(candidate_input)
+    if (
+        refreshed.run_dir != preflight.run_dir
+        or refreshed.run_device != preflight.run_device
+        or refreshed.run_inode != preflight.run_inode
+    ):
+        raise RunLoadError(
+            "run_directory_changed",
+            f"run directory changed during local publication retry: {refreshed.run_dir}",
+            manifest_path=refreshed.run_dir / "run.json",
+        )
+    if (
+        refreshed.candidate_path != preflight.candidate_path
+        or refreshed.candidate_bytes != preflight.candidate_bytes
+        or refreshed.candidate_digest != preflight.candidate_digest
+    ):
+        raise LocalPublicationError(
+            "candidate_tampered",
+            "candidate changed during local publication retry",
+        )
+    return _publish_local_candidate_from_preflight(candidate_input, refreshed)
+
+
+def _publish_local_candidate_from_preflight(
+    candidate_input: Path,
+    preflight: LocalCandidatePublicationPreflight,
+) -> PublishedLocalCandidate:
+    with locked_v2_run(
+        preflight.run_dir,
+        expected_run_path=preflight.run_dir,
+        expected_run_device=preflight.run_device,
+        expected_run_inode=preflight.run_inode,
+        expected_run_manifest_sha256=preflight.run_manifest_sha256,
+        expected_artifacts=(
+            ExpectedRunArtifact(
+                path=preflight.candidate_path.relative_to(preflight.run_dir).as_posix(),
+                sha256=preflight.candidate_digest,
+            ),
+        ),
+    ) as loaded:
+        return _publish_local_candidate_locked(
+            candidate_input,
+            loaded,
+            preflight=preflight,
+        )
 
 
 def _publish_local_candidate_locked(
     candidate_input: Path,
     locked_run: LoadedRun,
+    *,
+    preflight: LocalCandidatePublicationPreflight | None = None,
 ) -> PublishedLocalCandidate:
     loaded, candidate_path, candidate, digest, verified = _load_candidate(
         candidate_input,
         loaded_run=locked_run,
     )
+    if preflight is not None and (
+        candidate_path != preflight.candidate_path
+        or canonical_json_bytes(candidate) != preflight.candidate_bytes
+        or digest != preflight.candidate_digest
+    ):
+        raise LocalPublicationError(
+            "candidate_tampered",
+            "candidate changed after its read-only publication preflight",
+        )
     source = candidate.source
     target = candidate.target
     assert isinstance(source, LocalSourceIdentity)

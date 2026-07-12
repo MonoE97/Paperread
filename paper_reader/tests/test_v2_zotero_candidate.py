@@ -8,10 +8,12 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
-from paper_reader.contracts import PaperReaderCandidate
+from paper_reader.contracts import PaperReaderCandidate, PaperReaderCommandResult
 from paper_reader.note import render_note_html
 from paper_reader.note_hash import canonicalize_note_html_for_hash, note_html_sha256
+from paper_reader.public_cli import app
 from paper_reader.zotero_candidate import _markdown_literal_note_title, _rewrite_markdown_h1
 from paper_reader.zotero_live import _parse_headings
 
@@ -217,6 +219,69 @@ def test_zotero_candidate_blocks_fresh_parent_fingerprint_mismatch_before_public
 
     assert getattr(exc_info.value, "code", None) == "parent_fingerprint_mismatch"
     assert (run_dir / "run.json").read_bytes() == run_before
+    assert not (run_dir / "candidates").exists()
+
+
+@pytest.mark.parametrize("failure_stage", ["parent", "children"])
+def test_zotero_candidate_provider_failure_keeps_original_exception_only_as_cause(
+    failure_stage: str,
+    tmp_path: Path,
+) -> None:
+    run_dir = _sealed_zotero_run(tmp_path)
+    secret = f"secret-candidate-{failure_stage}-provider-token"
+
+    class FailingProvider:
+        def get_parent(self, _item_key: str):
+            if failure_stage == "parent":
+                raise OSError(secret)
+            return _parent()
+
+        def get_children(self, _parent_key: str):
+            raise OSError(secret)
+
+    with pytest.raises(Exception) as exc_info:
+        _build(run_dir, FailingProvider())
+
+    assert getattr(exc_info.value, "code", None) == "zotero_read_failed"
+    assert str(exc_info.value) == "read-only Zotero preflight failed"
+    assert exc_info.value.data == {}
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert secret in str(exc_info.value.__cause__)
+    assert not (run_dir / "candidates").exists()
+
+
+@pytest.mark.parametrize("failure_stage", ["parent", "children"])
+def test_zotero_candidate_cli_does_not_leak_provider_failure_text(
+    failure_stage: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.zotero_candidate as module
+
+    run_dir = _sealed_zotero_run(tmp_path)
+    secret = f"secret-candidate-{failure_stage}-provider-token"
+
+    class FailingProvider:
+        def get_parent(self, _item_key: str):
+            if failure_stage == "parent":
+                raise OSError(secret)
+            return _parent()
+
+        def get_children(self, _parent_key: str):
+            raise OSError(secret)
+
+    monkeypatch.setattr(module, "LocalApiZoteroReadProvider", FailingProvider)
+
+    result = CliRunner().invoke(app, ["candidate", "build", str(run_dir)])
+
+    assert result.exit_code == 1
+    assert secret not in result.stdout
+    assert secret not in result.stderr
+    payload = json.loads(result.stdout)
+    PaperReaderCommandResult.model_validate(payload)
+    assert payload["code"] == "zotero_read_failed"
+    assert payload["message"] == "read-only Zotero preflight failed"
+    assert payload["data"] == {}
     assert not (run_dir / "candidates").exists()
 
 

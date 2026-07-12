@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -14,6 +16,24 @@ from paper_reader.storage import canonical_json_bytes, rfc3339_utc
 from paper_reader.v2_loader import RunLoadError, load_v2_run
 
 
+_RESULT_EMITTED: ContextVar[bool] = ContextVar(
+    "paper_reader_result_emitted",
+    default=False,
+)
+_PUBLIC_GROUPS = frozenset(
+    {"run", "review", "candidate", "local", "zotero", "maintenance"}
+)
+
+
+def _command_from_args(raw_args: Sequence[str]) -> str:
+    command_tokens = [token for token in raw_args if not token.startswith("-")]
+    if command_tokens and command_tokens[0] in _PUBLIC_GROUPS:
+        if len(command_tokens) > 1:
+            return " ".join(command_tokens[:2])
+        return command_tokens[0]
+    return command_tokens[0] if command_tokens else "paper_reader"
+
+
 class StructuredTyperGroup(TyperGroup):
     def main(
         self,
@@ -24,40 +44,59 @@ class StructuredTyperGroup(TyperGroup):
         windows_expand_args: bool = True,
         **extra: Any,
     ) -> Any:
+        raw_args = list(sys.argv[1:] if args is None else args)
+        result_token = _RESULT_EMITTED.set(False)
         try:
-            outcome = super().main(
-                args=args,
-                prog_name=prog_name,
-                complete_var=complete_var,
-                standalone_mode=False,
-                windows_expand_args=windows_expand_args,
-                **extra,
-            )
-        except click.UsageError as exc:
-            if isinstance(exc, click.exceptions.NoArgsIsHelpError):
+            try:
+                outcome = super().main(
+                    args=args,
+                    prog_name=prog_name,
+                    complete_var=complete_var,
+                    standalone_mode=False,
+                    windows_expand_args=windows_expand_args,
+                    **extra,
+                )
+            except click.UsageError as exc:
+                if isinstance(exc, click.exceptions.NoArgsIsHelpError):
+                    if standalone_mode:
+                        raise SystemExit(exc.exit_code) from None
+                    return exc.exit_code
+                command_path = exc.ctx.command_path if exc.ctx is not None else "paper_reader"
+                path_parts = command_path.split()
+                command = " ".join(path_parts[1:]) if len(path_parts) > 1 else "paper_reader"
+                message = exc.format_message()
+                _write_result(
+                    command=command,
+                    ok=False,
+                    code="invalid_command_usage",
+                    data={"error_type": type(exc).__name__},
+                    message=message,
+                )
+                typer.echo(f"{command}: {message}", err=True)
                 if standalone_mode:
                     raise SystemExit(exc.exit_code) from None
                 return exc.exit_code
-            command_path = exc.ctx.command_path if exc.ctx is not None else "paper_reader"
-            path_parts = command_path.split()
-            command = " ".join(path_parts[1:]) if len(path_parts) > 1 else "paper_reader"
-            message = exc.format_message()
-            _write_result(
-                command=command,
-                ok=False,
-                code="invalid_command_usage",
-                data={"error_type": type(exc).__name__},
-                message=message,
-            )
-            typer.echo(f"{command}: {message}", err=True)
-            if standalone_mode:
-                raise SystemExit(exc.exit_code) from None
-            return exc.exit_code
+            except Exception as exc:
+                command = _command_from_args(raw_args)
+                if not _RESULT_EMITTED.get():
+                    _write_result(
+                        command=command,
+                        ok=False,
+                        code="internal_error",
+                        data={"error_type": type(exc).__name__},
+                        message="unexpected internal error",
+                    )
+                typer.echo(f"{command}: internal_error ({type(exc).__name__})", err=True)
+                if standalone_mode:
+                    raise SystemExit(1) from None
+                return 1
 
-        if standalone_mode:
-            exit_code = outcome if isinstance(outcome, int) else 0
-            raise SystemExit(exit_code)
-        return outcome
+            if standalone_mode:
+                exit_code = outcome if isinstance(outcome, int) else 0
+                raise SystemExit(exit_code)
+            return outcome
+        finally:
+            _RESULT_EMITTED.reset(result_token)
 
 
 app = typer.Typer(
@@ -165,6 +204,7 @@ def _write_result(
         data=data or {},
     )
     typer.echo(canonical_json_bytes(result).decode("utf-8"))
+    _RESULT_EMITTED.set(True)
 
 
 def _not_implemented(command: str, **data: str | int | None) -> None:
@@ -752,8 +792,8 @@ def maintenance_extract_pdf(
 
     try:
         extraction = extract_pdf(pdf_path, max_pages=max_pages)
-    except Exception as exc:
-        message = f"PDF extraction failed: {exc}"
+    except (FileNotFoundError, ValueError):
+        message = "PDF extraction failed for the requested input"
         _finish(
             "maintenance extract-pdf",
             ok=False,

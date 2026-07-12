@@ -5,7 +5,9 @@ import importlib.util
 import json
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Lock, get_ident
 
 import pytest
 from typer.main import get_command
@@ -183,6 +185,178 @@ def test_console_entrypoint_parse_errors_emit_one_structured_result(
     assert payload["code"] == "invalid_command_usage"
     assert payload["command"] == expected_command
     assert result.stderr.strip()
+
+
+@pytest.mark.parametrize(
+    ("arguments", "callback_name", "expected_command"),
+    [
+        (["route", "A paper title fragment"], "route_input", "route"),
+        (["run", "status", "/tmp/run"], "load_v2_run", "run status"),
+    ],
+)
+def test_unexpected_operation_failure_emits_one_safe_structured_result(
+    arguments: list[str],
+    callback_name: str,
+    expected_command: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _public_cli_module()
+
+    def explode(_input_value: str):
+        raise RuntimeError("sensitive local detail")
+
+    monkeypatch.setattr(module, callback_name, explode)
+
+    result = _invoke(arguments)
+
+    assert result.exit_code != 0
+    payload = _result_payload(result)
+    assert payload == {
+        "schema_version": "paper_reader.command-result.v2",
+        "command": expected_command,
+        "ok": False,
+        "code": "internal_error",
+        "created_at": payload["created_at"],
+        "message": "unexpected internal error",
+        "data": {"error_type": "RuntimeError"},
+    }
+    assert "internal_error" in result.stderr
+    assert "sensitive local detail" not in result.stdout + result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_unexpected_extract_pdf_failure_uses_safe_top_level_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pdf_extract = importlib.import_module("paper_reader.pdf_extract")
+    sensitive_path = tmp_path / "sensitive-paper.pdf"
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("sensitive extraction detail")
+
+    monkeypatch.setattr(pdf_extract, "extract_pdf", explode)
+
+    result = _invoke(["maintenance", "extract-pdf", str(sensitive_path)])
+
+    assert result.exit_code != 0
+    payload = _result_payload(result)
+    assert payload == {
+        "schema_version": "paper_reader.command-result.v2",
+        "command": "maintenance extract-pdf",
+        "ok": False,
+        "code": "internal_error",
+        "created_at": payload["created_at"],
+        "message": "unexpected internal error",
+        "data": {"error_type": "RuntimeError"},
+    }
+    combined_output = result.stdout + result.stderr
+    assert "sensitive extraction detail" not in combined_output
+    assert str(sensitive_path) not in combined_output
+
+
+def test_unexpected_failure_after_result_output_does_not_emit_a_second_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _public_cli_module()
+
+    def emit_then_explode(*_args, **_kwargs) -> None:
+        module._write_result(
+            command="route",
+            ok=False,
+            code="known_failure",
+            message="known failure",
+        )
+        raise RuntimeError("sensitive post-envelope detail")
+
+    monkeypatch.setattr(module, "_finish", emit_then_explode)
+
+    result = _invoke(["route", "A paper title fragment"])
+
+    assert result.exit_code != 0
+    payload = _result_payload(result)
+    assert payload["code"] == "known_failure"
+    assert "internal_error" in result.stderr
+    assert "sensitive post-envelope detail" not in result.stdout + result.stderr
+
+
+def test_result_emission_state_is_reset_between_consecutive_invocations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _public_cli_module()
+    command = get_command(module.app)
+    emitted_codes: list[str] = []
+
+    def record_result(*, command, ok, code, data=None, message=None) -> None:
+        emitted_codes.append(code)
+        module._RESULT_EMITTED.set(True)
+
+    def route_then_fail(input_value: str):
+        if input_value == "emit":
+            module._write_result(
+                command="route",
+                ok=False,
+                code="known_failure",
+                message="known failure",
+            )
+        raise RuntimeError("sensitive invocation detail")
+
+    monkeypatch.setattr(module, "_write_result", record_result)
+    monkeypatch.setattr(module, "route_input", route_then_fail)
+    monkeypatch.setattr(module.typer, "echo", lambda *_args, **_kwargs: None)
+
+    assert command.main(args=["route", "emit"], standalone_mode=False) == 1
+    assert module._RESULT_EMITTED.get() is False
+    assert command.main(args=["route", "no-emit"], standalone_mode=False) == 1
+    assert module._RESULT_EMITTED.get() is False
+    assert emitted_codes == ["known_failure", "internal_error"]
+
+
+def test_result_emission_state_is_isolated_between_concurrent_invocations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _public_cli_module()
+    command = get_command(module.app)
+    barrier = Barrier(2)
+    output_lock = Lock()
+    emitted_codes: dict[int, list[str]] = {}
+
+    def record_result(*, command, ok, code, data=None, message=None) -> None:
+        with output_lock:
+            emitted_codes.setdefault(get_ident(), []).append(code)
+        module._RESULT_EMITTED.set(True)
+
+    def route_then_fail(input_value: str):
+        if input_value == "emit":
+            module._write_result(
+                command="route",
+                ok=False,
+                code="known_failure",
+                message="known failure",
+            )
+        barrier.wait(timeout=5)
+        raise RuntimeError("sensitive invocation detail")
+
+    def invoke(input_value: str) -> tuple[str, int, int]:
+        thread_id = get_ident()
+        outcome = command.main(
+            args=["route", input_value],
+            standalone_mode=False,
+        )
+        return input_value, thread_id, outcome
+
+    monkeypatch.setattr(module, "_write_result", record_result)
+    monkeypatch.setattr(module, "route_input", route_then_fail)
+    monkeypatch.setattr(module.typer, "echo", lambda *_args, **_kwargs: None)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        invocations = list(executor.map(invoke, ("emit", "no-emit")))
+
+    by_input = {input_value: (thread_id, outcome) for input_value, thread_id, outcome in invocations}
+    assert by_input["emit"][1] == 1
+    assert by_input["no-emit"][1] == 1
+    assert emitted_codes[by_input["emit"][0]] == ["known_failure"]
+    assert emitted_codes[by_input["no-emit"][0]] == ["internal_error"]
 
 
 def test_route_is_path_first_for_pdf_directory_missing_path_and_title(tmp_path: Path) -> None:

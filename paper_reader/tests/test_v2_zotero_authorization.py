@@ -5,6 +5,7 @@ import importlib
 import importlib.util
 import json
 import os
+import shutil
 import stat
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
@@ -165,6 +166,23 @@ def _authorize(
     )
 
 
+def _install_authorization_clock(
+    module,
+    monkeypatch: pytest.MonkeyPatch,
+    initial: datetime,
+) -> dict[str, datetime]:
+    clock = {"now": initial}
+
+    class FakeDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            instant = clock["now"]
+            return instant if tz is None else instant.astimezone(tz)
+
+    monkeypatch.setattr(module, "datetime", FakeDateTime)
+    return clock
+
+
 def test_direct_authorization_binds_exact_envelope_and_returns_token_only_once(
     tmp_path: Path,
 ) -> None:
@@ -231,6 +249,40 @@ def test_authorization_main_artifact_uses_required_topology(tmp_path: Path) -> N
     assert authorized.authorization_path == expected
     assert expected.is_file()
     assert authorized.authorization_dir == expected.with_suffix("")
+
+
+@pytest.mark.parametrize("extra_path", ["extra.bin", "unreferenced/extra.bin"])
+def test_authorize_rejects_unreferenced_candidate_tree_members_before_provider(
+    extra_path: str,
+    tmp_path: Path,
+) -> None:
+    candidate_path, _provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    extra = candidate_path.parent / extra_path
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    extra.write_bytes(b"unreferenced candidate bytes")
+    run_before = (run_dir / "run.json").read_bytes()
+
+    class ProviderSpy:
+        calls = 0
+
+        def get_parent(self, _item_key: str):
+            self.calls += 1
+            raise AssertionError("unreferenced candidate member reached provider")
+
+        def get_children(self, _parent_key: str):
+            self.calls += 1
+            raise AssertionError("unreferenced candidate member reached provider")
+
+    provider = ProviderSpy()
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider)
+
+    assert getattr(exc_info.value, "code", None) == "candidate_tampered"
+    assert provider.calls == 0
+    assert (run_dir / "run.json").read_bytes() == run_before
+    assert not (run_dir / "authorizations").exists()
 
 
 @pytest.mark.parametrize(
@@ -345,6 +397,41 @@ def test_authorize_root_swap_before_sidecar_publication_cannot_escape_anchor(
     assert not (outside / authorization_id).exists()
     assert not os.path.lexists(outside / f"{authorization_id}.json")
     assert not tuple(run_dir.glob(".*.staging"))
+
+
+def test_authorize_rejects_skill_root_replacement_between_preflight_and_parent_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    skill_root = run_dir.parent.parent.parent
+    replacement = tmp_path / "replacement-skill"
+    detached = tmp_path / "detached-skill"
+    shutil.copytree(skill_root, replacement)
+    original_lock = module.locked_zotero_parent
+    swapped = False
+
+    @contextmanager
+    def swap_before_lock(run_path: Path, parent_key: str, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            skill_root.rename(detached)
+            replacement.rename(skill_root)
+            swapped = True
+        with original_lock(run_path, parent_key, **kwargs) as locked:
+            yield locked
+
+    monkeypatch.setattr(module, "locked_zotero_parent", swap_before_lock)
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider)
+
+    assert getattr(exc_info.value, "code", None) == "run_directory_changed"
+    assert swapped is True
+    assert not (skill_root / ".zotero-authorization-reservations").exists()
+    assert not (detached / ".zotero-authorization-reservations").exists()
 
 
 def test_batch_authorization_preserves_both_external_identities(tmp_path: Path) -> None:
@@ -474,6 +561,37 @@ def test_authorization_rejects_local_candidate_before_any_provider_read(tmp_path
     assert getattr(exc_info.value, "code", None) == "local_candidate_forbidden"
 
 
+@pytest.mark.parametrize("alias_kind", ["symlink", "hardlink"])
+def test_authorization_rejects_candidate_alias_before_parent_lock(
+    alias_kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    alias = candidate_path.with_name(f"candidate-{alias_kind}.json")
+    if alias_kind == "symlink":
+        alias.symlink_to(candidate_path)
+    else:
+        os.link(candidate_path, alias)
+    lock_entered = False
+
+    @contextmanager
+    def forbidden_parent_lock(*_args, **_kwargs):
+        nonlocal lock_entered
+        lock_entered = True
+        raise AssertionError("candidate alias reached parent lock")
+        yield
+
+    monkeypatch.setattr(module, "locked_zotero_parent", forbidden_parent_lock)
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(alias, provider)
+
+    assert getattr(exc_info.value, "code", None) == "candidate_unreadable"
+    assert lock_entered is False
+
+
 def test_authorization_detects_same_title_suffix_race_as_stale_candidate(
     tmp_path: Path,
 ) -> None:
@@ -510,6 +628,75 @@ def test_only_one_unexpired_authorization_can_bind_a_candidate_then_expiry_allow
     assert second.authorization.nonce != first.authorization.nonce
     assert second.authorization.token_sha256 != first.authorization.token_sha256
     assert second.write_token != first.write_token
+
+
+def test_production_ttl_starts_after_lock_wait_and_live_readback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    clock = _install_authorization_clock(module, monkeypatch, NOW)
+    original_parent_lock = module.locked_zotero_parent
+
+    @contextmanager
+    def delayed_parent_lock(*args, **kwargs):
+        clock["now"] += timedelta(seconds=120)
+        with original_parent_lock(*args, **kwargs) as locked:
+            yield locked
+
+    class SlowProvider:
+        def get_parent(self, item_key: str):
+            return provider.get_parent(item_key)
+
+        def get_children(self, parent_key: str):
+            children = provider.get_children(parent_key)
+            clock["now"] += timedelta(seconds=120)
+            return children
+
+    monkeypatch.setattr(module, "locked_zotero_parent", delayed_parent_lock)
+
+    authorized = module.authorize_zotero_candidate(
+        candidate_path,
+        provider=SlowProvider(),
+        now=None,
+        ttl_seconds=1,
+    )
+
+    assert authorized.authorization.created_at == "2026-07-10T12:04:00Z"
+    assert authorized.authorization.expires_at == "2026-07-10T12:04:01Z"
+    assert authorized.authorization.live_preflight.captured_at == "2026-07-10T12:04:00Z"
+
+
+def test_expired_authorization_commit_never_returns_plaintext_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    clock = _install_authorization_clock(module, monkeypatch, NOW)
+    original_write = module.atomic_write_json
+
+    def commit_then_expire(path: Path, value, **kwargs):
+        result = original_write(path, value, **kwargs)
+        if Path(path).name == "run.json":
+            clock["now"] += timedelta(seconds=2)
+        return result
+
+    monkeypatch.setattr(module, "atomic_write_json", commit_then_expire)
+
+    with pytest.raises(module.ZoteroAuthorizationError) as exc_info:
+        module.authorize_zotero_candidate(
+            candidate_path,
+            provider=provider,
+            now=None,
+            ttl_seconds=1,
+        )
+
+    assert exc_info.value.code == "authorization_expired_before_return"
+    run_dir = candidate_path.parent.parent.parent
+    run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert [item["role"] for item in run["artifacts"]].count("write_authorization") == 1
 
 
 def test_unexpired_authorization_blocks_second_candidate_for_same_parent_and_title(
@@ -561,6 +748,156 @@ def test_authorize_cli_returns_one_command_result_with_plaintext_token_once(
     assert payload["data"]["mcp_envelope"]["action"] == "create"
 
 
+def test_source_change_is_a_structured_zotero_authorization_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    source_path = Path(candidate["source"]["attachment"]["resolved_path"])
+    source_path.write_bytes(source_path.read_bytes() + b"\nsource changed")
+    monkeypatch.setattr(module, "LocalApiZoteroReadProvider", lambda: provider)
+
+    with pytest.raises(module.ZoteroAuthorizationError) as exc_info:
+        _authorize(candidate_path, provider)
+
+    assert exc_info.value.code == "source_changed"
+
+    result = CliRunner().invoke(app, ["zotero", "authorize", str(candidate_path)])
+
+    assert result.exit_code != 0
+    lines = result.stdout.splitlines()
+    assert len(lines) == 1, result.stdout
+    payload = json.loads(lines[0])
+    PaperReaderCommandResult.model_validate(payload)
+    assert payload["command"] == "zotero authorize"
+    assert payload["ok"] is False
+    assert payload["code"] == "source_changed"
+    assert result.stderr.strip()
+    assert not (candidate_path.parent.parent.parent / "authorizations").exists()
+
+
+def test_bound_authorization_schema_is_rejected_before_parent_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    authorized = _authorize(candidate_path, provider, ttl_seconds=1)
+    authorized.authorization_path.write_bytes(
+        b'{"schema_version":"paper_reader.write-authorization.v1"}'
+    )
+    run_dir = candidate_path.parent.parent.parent
+    run_before = (run_dir / "run.json").read_bytes()
+
+    @contextmanager
+    def forbidden_parent_lock(*_args, **_kwargs):
+        raise AssertionError("unsupported bound authorization reached parent lock")
+        yield
+
+    monkeypatch.setattr(module, "locked_zotero_parent", forbidden_parent_lock)
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider, now=NOW + timedelta(seconds=2))
+
+    assert getattr(exc_info.value, "code", None) == "unsupported_run_schema"
+    assert (run_dir / "run.json").read_bytes() == run_before
+
+
+def test_orphan_authorization_schema_is_rejected_before_parent_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    original_write = module.atomic_write_json
+    failed = False
+
+    def fail_binding_once(path: Path, value, **kwargs):
+        nonlocal failed
+        if Path(path).name == "run.json" and not failed:
+            failed = True
+            raise OSError("injected authorization run binding failure")
+        return original_write(path, value, **kwargs)
+
+    monkeypatch.setattr(module, "atomic_write_json", fail_binding_once)
+    with pytest.raises(Exception) as first_error:
+        _authorize(candidate_path, provider, ttl_seconds=1)
+    assert getattr(first_error.value, "code", None) == "authorization_status_update_failed"
+    orphan_path = next((run_dir / "authorizations").glob("*.json"))
+    orphan_path.write_bytes(
+        b'{"schema_version":"paper_reader.write-authorization.v1"}'
+    )
+    run_before = (run_dir / "run.json").read_bytes()
+    monkeypatch.setattr(module, "atomic_write_json", original_write)
+
+    @contextmanager
+    def forbidden_parent_lock(*_args, **_kwargs):
+        raise AssertionError("unsupported orphan authorization reached parent lock")
+        yield
+
+    monkeypatch.setattr(module, "locked_zotero_parent", forbidden_parent_lock)
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider, now=NOW + timedelta(seconds=2))
+
+    assert getattr(exc_info.value, "code", None) == "unsupported_run_schema"
+    assert (run_dir / "run.json").read_bytes() == run_before
+
+
+def test_authorization_publication_failure_does_not_leak_exception_text_through_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    secret = "secret-publication-path-and-token"
+
+    def fail_publication(*_args, **_kwargs):
+        raise OSError(secret)
+
+    monkeypatch.setattr(module, "LocalApiZoteroReadProvider", lambda: provider)
+    monkeypatch.setattr(module, "anchored_artifact_publication", fail_publication)
+
+    result = CliRunner().invoke(app, ["zotero", "authorize", str(candidate_path)])
+
+    assert result.exit_code != 0
+    assert secret not in result.stdout
+    assert secret not in result.stderr
+    payload = json.loads(result.stdout)
+    PaperReaderCommandResult.model_validate(payload)
+    assert payload["code"] == "authorization_publication_failed"
+
+
+def test_authorization_read_failure_does_not_leak_provider_exception_through_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, _provider = _candidate(tmp_path)
+    secret = "secret-provider-response-and-token"
+
+    class FailingProvider:
+        def get_parent(self, _parent_key: str):
+            raise OSError(secret)
+
+        def get_children(self, _parent_key: str):
+            raise AssertionError("get_children must not run after parent failure")
+
+    monkeypatch.setattr(module, "LocalApiZoteroReadProvider", FailingProvider)
+
+    result = CliRunner().invoke(app, ["zotero", "authorize", str(candidate_path)])
+
+    assert result.exit_code != 0
+    assert secret not in result.stdout
+    assert secret not in result.stderr
+    payload = json.loads(result.stdout)
+    PaperReaderCommandResult.model_validate(payload)
+    assert payload["code"] == "zotero_read_failed"
+
+
 def test_concurrent_authorize_allows_one_active_authorization(tmp_path: Path) -> None:
     candidate_path, provider = _candidate(tmp_path)
 
@@ -581,6 +918,148 @@ def test_concurrent_authorize_allows_one_active_authorization(tmp_path: Path) ->
     run_dir = candidate_path.parent.parent.parent
     run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     assert [item["role"] for item in run["artifacts"]].count("write_authorization") == 1
+
+
+def test_manifest_change_repreflights_once_before_provider_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    original_parent_lock = module._locked_parent_for_preflight
+    attempts = 0
+    provider_calls: list[str] = []
+
+    @contextmanager
+    def change_once(inspected):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise module.ZoteroAuthorizationError(
+                "run_manifest_changed",
+                "injected optimistic manifest race",
+            )
+        with original_parent_lock(inspected) as locked:
+            yield locked
+
+    class CountingProvider:
+        def get_parent(self, item_key: str):
+            provider_calls.append("parent")
+            return provider.get_parent(item_key)
+
+        def get_children(self, parent_key: str):
+            provider_calls.append("children")
+            return provider.get_children(parent_key)
+
+    monkeypatch.setattr(module, "_locked_parent_for_preflight", change_once)
+
+    authorized = module.authorize_zotero_candidate(
+        candidate_path,
+        provider=CountingProvider(),
+        now=NOW,
+    )
+
+    assert authorized.authorization.schema_version == "paper_reader.write-authorization.v2"
+    assert attempts == 2
+    assert provider_calls == ["parent", "children"]
+
+
+def test_manifest_change_retry_is_bounded_to_one_repreflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, _provider = _candidate(tmp_path)
+    attempts = 0
+
+    @contextmanager
+    def always_changed(_inspected):
+        nonlocal attempts
+        attempts += 1
+        raise module.ZoteroAuthorizationError(
+            "run_manifest_changed",
+            "injected repeated optimistic manifest race",
+        )
+        yield
+
+    class NetworkForbiddenProvider:
+        def get_parent(self, _item_key: str):
+            raise AssertionError("manifest retry reached provider read")
+
+        def get_children(self, _parent_key: str):
+            raise AssertionError("manifest retry reached provider read")
+
+    monkeypatch.setattr(module, "_locked_parent_for_preflight", always_changed)
+
+    with pytest.raises(module.ZoteroAuthorizationError) as exc_info:
+        module.authorize_zotero_candidate(
+            candidate_path,
+            provider=NetworkForbiddenProvider(),
+            now=NOW,
+        )
+
+    assert exc_info.value.code == "run_manifest_changed"
+    assert attempts == 2
+
+
+def test_manifest_change_retry_rejects_skill_root_identity_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    skill_root = run_dir.parent.parent.parent
+    replacement = tmp_path / "replacement-retry-skill-root"
+    detached = tmp_path / "detached-retry-skill-root"
+    shutil.copytree(skill_root, replacement)
+    original_parent_lock = module._locked_parent_for_preflight
+    attempts = 0
+    provider_calls = 0
+
+    @contextmanager
+    def change_then_replace_root(inspected):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            skill_root.rename(detached)
+            replacement.rename(skill_root)
+            raise module.ZoteroAuthorizationError(
+                "run_manifest_changed",
+                "injected manifest race followed by root replacement",
+            )
+        with original_parent_lock(inspected) as locked:
+            yield locked
+
+    class CountingProvider:
+        def get_parent(self, item_key: str):
+            nonlocal provider_calls
+            provider_calls += 1
+            return provider.get_parent(item_key)
+
+        def get_children(self, parent_key: str):
+            nonlocal provider_calls
+            provider_calls += 1
+            return provider.get_children(parent_key)
+
+    monkeypatch.setattr(
+        module,
+        "_locked_parent_for_preflight",
+        change_then_replace_root,
+    )
+
+    with pytest.raises(module.ZoteroAuthorizationError) as exc_info:
+        module.authorize_zotero_candidate(
+            candidate_path,
+            provider=CountingProvider(),
+            now=NOW,
+        )
+
+    assert exc_info.value.code == "run_directory_changed"
+    assert attempts == 1
+    assert provider_calls == 0
+    assert not (skill_root / ".zotero-authorization-reservations").exists()
+    assert not (detached / ".zotero-authorization-reservations").exists()
 
 
 def test_authorization_rehashes_candidate_and_rechecks_parent_before_live_grant(
