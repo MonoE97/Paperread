@@ -1,3 +1,4 @@
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ BATCH_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = BATCH_ROOT.parent
 SKILL = BATCH_ROOT / "SKILL.md"
 OPENAI_YAML = BATCH_ROOT / "agents" / "openai.yaml"
+PYPROJECT = BATCH_ROOT / "pyproject.toml"
 BATCH_WORKFLOW = BATCH_ROOT / "references" / "batch-workflow.md"
 PARALLEL_DISPATCH = BATCH_ROOT / "references" / "parallel-dispatch.md"
 WORKER_RESULT_CONTRACT = BATCH_ROOT / "references" / "worker-result-contract.md"
@@ -343,21 +345,39 @@ def test_root_readmes_publish_v2_release_and_clean_install() -> None:
             assert phrase in text
 
 
+def test_batch_project_version_is_2_0_0() -> None:
+    project = tomllib.loads(read(PYPROJECT))["project"]
+
+    assert project["name"] == "paper_reader_batch"
+    assert project["version"] == "2.0.0"
+    assert project["scripts"] == {"paper_reader_batch": "paper_reader_batch.v2_cli:app"}
+
+
 def test_batch_validator_tracks_required_runtime_modules() -> None:
     validator = read(BATCH_ROOT / "scripts" / "validate-skill.py")
 
     for phrase in [
-        "src/paper_reader_batch/io.py",
-        "src/paper_reader_batch/manifest.py",
-        "src/paper_reader_batch/runs.py",
-        "src/paper_reader_batch/state.py",
-        "src/paper_reader_batch/takeaway.py",
-        "src/paper_reader_batch/report.py",
-        "src/paper_reader_batch/local_prepare.py",
-        "src/paper_reader_batch/worker_contract.py",
-        "src/paper_reader_batch/cli.py",
+        "src/paper_reader_batch/v2_cli.py",
+        "src/paper_reader_batch/v2_artifacts.py",
+        "src/paper_reader_batch/v2_contracts.py",
+        "src/paper_reader_batch/v2_errors.py",
+        "src/paper_reader_batch/v2_journal.py",
+        "src/paper_reader_batch/v2_json.py",
+        "src/paper_reader_batch/v2_manifest.py",
+        "src/paper_reader_batch/v2_receipts.py",
+        "src/paper_reader_batch/v2_reducer.py",
+        "src/paper_reader_batch/v2_run.py",
+        "src/paper_reader_batch/v2_worker.py",
+        "src/paper_reader_batch/v2_local_prepare.py",
+        "src/paper_reader_batch/v2_write.py",
+        "src/paper_reader_batch/v2_report.py",
+        "references/schemas/paper_reader_batch.manifest.v2.schema.json",
+        "references/schemas/paper_reader_batch.command-result.v2.schema.json",
         "references/batch-workflow.md",
         "references/parallel-dispatch.md",
         "references/worker-result-contract.md",
+        "paper_reader_batch.v2_cli:app",
+        "pyproject project.version must be 2.0.0",
+        "uv.lock paper-reader-batch package version must be 2.0.0",
     ]:
         assert phrase in validator

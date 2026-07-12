@@ -188,6 +188,7 @@ def test_project_metadata_is_skill_root_relative() -> None:
     project = pyproject["project"]
 
     assert project["name"] == "paper_reader"
+    assert project["version"] == "2.0.0"
     assert "readme" not in project
     assert project["scripts"] == {"paper_reader": "paper_reader.public_cli:app"}
     assert pyproject["tool"]["pytest"]["ini_options"]["testpaths"] == ["tests"]
@@ -526,6 +527,28 @@ def test_root_readmes_publish_v2_clean_install_contract() -> None:
             "unsupported_run_schema",
         ]:
             assert phrase in text
+
+
+def test_single_validator_tracks_v2_runtime_and_schemas() -> None:
+    validator = read(VALIDATE_SCRIPT)
+
+    for phrase in [
+        "src/paper_reader/public_cli.py",
+        "src/paper_reader/contracts.py",
+        "src/paper_reader/evidence_bundle.py",
+        "src/paper_reader/review_package.py",
+        "src/paper_reader/candidate_builder.py",
+        "src/paper_reader/candidate_integrity.py",
+        "src/paper_reader/local_publish.py",
+        "src/paper_reader/pdf_extract.py",
+        "src/paper_reader/zotero_lifecycle.py",
+        "references/schemas/paper_reader.run.v2.schema.json",
+        "references/schemas/paper_reader.command-result.v2.schema.json",
+        "paper_reader.public_cli:app",
+        "pyproject project.version must be 2.0.0",
+        "uv.lock paper-reader package version must be 2.0.0",
+    ]:
+        assert phrase in validator
 
 
 def test_capture_secondary_script_is_in_skill_bundle() -> None:

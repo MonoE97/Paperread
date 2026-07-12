@@ -10,7 +10,7 @@ def test_version_command_prints_version() -> None:
     result = runner.invoke(app, ["version"])
 
     assert result.exit_code == 0
-    assert result.stdout.strip() == "0.1.0"
+    assert result.stdout.strip() == "2.0.0"
 
 
 def test_cli_help_and_package_docstring_describe_zotero_and_local_pdf_paths() -> None:

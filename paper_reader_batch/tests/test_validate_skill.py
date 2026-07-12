@@ -12,7 +12,10 @@ def test_paper_reader_batch_bundle_contains_required_runtime_assets() -> None:
         BATCH_ROOT / "pyproject.toml",
         BATCH_ROOT / "uv.lock",
         BATCH_ROOT / "src" / "paper_reader_batch" / "__init__.py",
-        BATCH_ROOT / "src" / "paper_reader_batch" / "cli.py",
+        BATCH_ROOT / "src" / "paper_reader_batch" / "v2_cli.py",
+        BATCH_ROOT / "src" / "paper_reader_batch" / "v2_contracts.py",
+        BATCH_ROOT / "src" / "paper_reader_batch" / "v2_journal.py",
+        BATCH_ROOT / "src" / "paper_reader_batch" / "v2_write.py",
         BATCH_ROOT / "references" / "batch-workflow.md",
         BATCH_ROOT / "scripts" / "validate-skill.py",
     ]
