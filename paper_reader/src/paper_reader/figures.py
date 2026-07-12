@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Any, Literal, NotRequired, TypedDict
 import fitz
 
 from paper_reader import arxiv_source
+from paper_reader.resource_policy import V2_RESOURCE_POLICY
 
 CAPTION_PATTERN = re.compile(
     r"^\s*(figure|fig\.?|scheme)\s+([A-Za-z0-9]+)(?:\s*[\.:_-]\s*|\s*$)",
@@ -148,6 +150,13 @@ class FigureCandidateLimitError(ValueError):
         self.limit = limit
 
 
+class FigurePixelLimitError(ValueError):
+    def __init__(self, *, actual: int, limit: int) -> None:
+        super().__init__(f"figure pixels {actual} exceeds {limit}")
+        self.actual = actual
+        self.limit = limit
+
+
 @dataclass(frozen=True, slots=True)
 class FigureCandidateSelection:
     selected: tuple[FigureExtraction, ...]
@@ -215,12 +224,28 @@ def extract_figures(
         pdf_path=resolved,
     )
 
+    pdf_candidate_count = 0
+    source_candidate_limit = max_candidates
+    if (
+        allow_network_source
+        and resolved_arxiv_id is not None
+        and max_candidates is not None
+    ):
+        pdf_candidate_count = _count_pdf_candidates(
+            resolved,
+            max_pages=max_pages,
+            max_candidates=max_candidates,
+        )
+        source_candidate_limit = max_candidates - pdf_candidate_count
+
     if allow_network_source:
         source_candidates = _collect_source_candidates(
             resolved_arxiv_id,
             output_root,
             source_attempts,
             warnings,
+            max_candidates=source_candidate_limit,
+            candidate_offset=pdf_candidate_count,
         )
     else:
         source_attempts.append(
@@ -275,6 +300,8 @@ def assess_image_quality(image_path: Path) -> dict[str, Any]:
     """Assess whether a rendered figure crop contains enough visual content."""
     try:
         pixmap = _load_quality_pixmap(Path(image_path).expanduser())
+    except FigurePixelLimitError:
+        raise
     except Exception:
         return {
             "status": "poor",
@@ -333,6 +360,8 @@ def assess_image_quality(image_path: Path) -> dict[str, Any]:
 
 
 def _load_quality_pixmap(image_path: Path) -> fitz.Pixmap:
+    width, height = _image_dimensions(image_path)
+    _enforce_pixel_limit(width, height)
     if image_path.suffix.lower() == ".pdf":
         with fitz.open(image_path) as doc:
             if doc.page_count < 1:
@@ -436,6 +465,9 @@ def _collect_source_candidates(
     output_root: Path,
     source_attempts: list[dict[str, Any]],
     warnings: list[str],
+    *,
+    max_candidates: int | None,
+    candidate_offset: int,
 ) -> list[FigureExtraction]:
     if arxiv_id is None:
         source_attempts.append(
@@ -452,6 +484,12 @@ def _collect_source_candidates(
             arxiv_id,
             output_root / "arxiv-source",
         )
+    except arxiv_source.FigureCandidateLimitError as exc:
+        source_limit = exc.limit if max_candidates is None else max_candidates
+        raise FigureCandidateLimitError(
+            actual=candidate_offset + exc.actual,
+            limit=candidate_offset + source_limit,
+        ) from exc
     except Exception:
         source_attempts.append(
             {"stage": "download", "status": "error", "arxiv_id": arxiv_id}
@@ -492,11 +530,31 @@ def _collect_source_candidates(
         source_figures = arxiv_source.collect_source_figures(
             source_path,
             output_root / "source-figures",
+            max_candidates=max_candidates,
         )
+    except arxiv_source.FigureCandidateLimitError as exc:
+        raise FigureCandidateLimitError(
+            actual=candidate_offset + exc.actual,
+            limit=candidate_offset + exc.limit,
+        ) from exc
+    except Exception:
+        source_attempts.append({"stage": "collect", "status": "error"})
+        warnings.append("arxiv_source_collect_failed")
+        return []
+
+    if max_candidates is not None and len(source_figures) > max_candidates:
+        raise FigureCandidateLimitError(
+            actual=candidate_offset + len(source_figures),
+            limit=candidate_offset + max_candidates,
+        )
+
+    try:
         rendered_pdf_figures = arxiv_source.render_source_figure_pdfs(
             source_figures,
             output_root / "source-rendered",
         )
+    except arxiv_source.FigurePixelLimitError as exc:
+        raise FigurePixelLimitError(actual=exc.actual, limit=exc.limit) from exc
     except Exception:
         source_attempts.append({"stage": "collect", "status": "error"})
         warnings.append("arxiv_source_collect_failed")
@@ -529,6 +587,7 @@ def _source_entries_to_candidates(entries: list[dict[str, Any]]) -> list[FigureE
             continue
 
         width, height = _image_dimensions(image_path)
+        _enforce_pixel_limit(width, height)
         bbox = fitz.Rect(0, 0, width, height)
         caption = _source_caption(entry)
         priority = _source_priority_score(source, entry, caption, bbox)
@@ -604,6 +663,81 @@ def _dedupe_candidates(
     return list(deduped.values())
 
 
+def _discover_pdf_candidates(
+    doc: fitz.Document,
+    *,
+    max_pages: int | None,
+    max_candidates: int | None,
+    candidate_offset: int = 0,
+) -> list[PendingFigure]:
+    page_limit = doc.page_count if max_pages is None else min(doc.page_count, max_pages)
+    pending: list[PendingFigure] = []
+    for page_index in range(page_limit):
+        page = doc.load_page(page_index)
+        captions = _detect_captions(page)
+        vector_regions = _detect_graphic_regions(page)
+        image_regions = _detect_embedded_image_regions(page)
+        used_regions: list[fitz.Rect] = []
+        claimed_caption_indices: set[int] = set()
+
+        for caption_index, caption in enumerate(captions):
+            bbox = _select_owned_bbox(
+                vector_regions,
+                captions,
+                caption_index,
+                page.rect,
+            )
+            if bbox is None:
+                continue
+            used_regions.append(bbox)
+            claimed_caption_indices.add(caption_index)
+            pending.append(
+                PendingFigure(
+                    page=page,
+                    page_number=page_index + 1,
+                    figure_index=caption_index + 1,
+                    caption=caption,
+                    bbox=bbox,
+                    source="deterministic-pdf",
+                    caption_confidence=None,
+                )
+            )
+
+        pending.extend(
+            _supplement_embedded_images(
+                page=page,
+                page_number=page_index + 1,
+                captions=captions,
+                image_regions=image_regions,
+                claimed_caption_indices=claimed_caption_indices,
+                used_regions=used_regions,
+            )
+        )
+        actual_candidates = candidate_offset + len(pending)
+        if max_candidates is not None and actual_candidates > max_candidates:
+            raise FigureCandidateLimitError(
+                actual=actual_candidates,
+                limit=max_candidates,
+            )
+    return pending
+
+
+def _count_pdf_candidates(
+    pdf_path: Path,
+    *,
+    max_pages: int | None,
+    max_candidates: int | None,
+) -> int:
+    with fitz.open(pdf_path) as doc:
+        return len(
+            _discover_pdf_candidates(
+                doc,
+                max_pages=max_pages,
+                max_candidates=max_candidates,
+            )
+        )
+
+
 def _extract_pdf_candidates(
     pdf_path: Path,
     output_root: Path,
@@ -614,50 +748,12 @@ def _extract_pdf_candidates(
     top_k: int | None = None,
 ) -> FigureCandidateSelection:
     with fitz.open(pdf_path) as doc:
-        page_limit = doc.page_count if max_pages is None else min(doc.page_count, max_pages)
-        pending: list[PendingFigure] = []
-        for page_index in range(page_limit):
-            page = doc.load_page(page_index)
-            captions = _detect_captions(page)
-            vector_regions = _detect_graphic_regions(page)
-            image_regions = _detect_embedded_image_regions(page)
-            used_regions: list[fitz.Rect] = []
-            claimed_caption_indices: set[int] = set()
-
-            for caption_index, caption in enumerate(captions):
-                bbox = _select_owned_bbox(
-                    vector_regions,
-                    captions,
-                    caption_index,
-                    page.rect,
-                )
-                if bbox is None:
-                    continue
-                used_regions.append(bbox)
-                claimed_caption_indices.add(caption_index)
-                pending.append(
-                    PendingFigure(
-                        page=page,
-                        page_number=page_index + 1,
-                        figure_index=caption_index + 1,
-                        caption=caption,
-                        bbox=bbox,
-                        source="deterministic-pdf",
-                        caption_confidence=None,
-                    )
-                )
-
-            pending.extend(
-                _supplement_embedded_images(
-                    page=page,
-                    page_number=page_index + 1,
-                    captions=captions,
-                    image_regions=image_regions,
-                    claimed_caption_indices=claimed_caption_indices,
-                    used_regions=used_regions,
-                    output_root=output_root,
-                )
-            )
+        pending = _discover_pdf_candidates(
+            doc,
+            max_pages=max_pages,
+            max_candidates=max_candidates,
+            candidate_offset=existing_candidates,
+        )
         actual_candidates = existing_candidates + len(pending)
         if max_candidates is not None and actual_candidates > max_candidates:
             raise FigureCandidateLimitError(
@@ -686,8 +782,16 @@ def _extract_pdf_candidates(
                 deduped[key] = entry
         ranked = sorted(deduped.values(), key=lambda entry: _ranking_key(entry[0]))
         selected_count = len(ranked) if top_k is None else max(top_k, 0)
+        selected_entries = ranked[:selected_count]
+        for _metadata, pending_item, _existing_item in selected_entries:
+            if pending_item is not None:
+                _enforce_pixel_limit(
+                    pending_item["bbox"].width,
+                    pending_item["bbox"].height,
+                    dpi=144,
+                )
         selected: list[FigureExtraction] = []
-        for _metadata, pending_item, existing_item in ranked[:selected_count]:
+        for _metadata, pending_item, existing_item in selected_entries:
             if existing_item is not None:
                 selected.append(existing_item)
                 continue
@@ -752,7 +856,6 @@ def _supplement_embedded_images(
     image_regions: list[fitz.Rect],
     claimed_caption_indices: set[int],
     used_regions: list[fitz.Rect],
-    output_root: Path,
 ) -> list[PendingFigure]:
     supplements: list[PendingFigure] = []
     supplement_index = 1
@@ -947,6 +1050,7 @@ def _rasterize_figure(
     caption_confidence: float | None = None,
 ) -> FigureExtraction:
     image_path = output_root / f"figure-p{page_number}-{figure_index}.png"
+    _enforce_pixel_limit(bbox.width, bbox.height, dpi=144)
     pixmap = page.get_pixmap(clip=bbox, dpi=144, alpha=False)
     pixmap.save(image_path)
 
@@ -1316,13 +1420,36 @@ def _ranking_key(item: FigureExtraction) -> tuple[float, float, float, float]:
 
 
 def _image_dimensions(path: Path) -> tuple[float, float]:
-    if path.suffix.lower() == ".pdf":
-        with fitz.open(path) as doc:
-            page = doc.load_page(0)
+    with fitz.open(path) as doc:
+        if doc.page_count < 1:
+            raise ValueError("figure has no pages")
+        page = doc.load_page(0)
+        if path.suffix.lower() == ".pdf":
             rect = page.rect
             return float(rect.width), float(rect.height)
-    pixmap = fitz.Pixmap(str(path))
-    return float(pixmap.width), float(pixmap.height)
+        image_info = page.get_image_info()
+        if len(image_info) != 1:
+            raise ValueError("raster figure metadata is unavailable")
+        width = image_info[0].get("width")
+        height = image_info[0].get("height")
+        if not isinstance(width, int) or isinstance(width, bool) or width < 0:
+            raise ValueError("raster figure width metadata is invalid")
+        if not isinstance(height, int) or isinstance(height, bool) or height < 0:
+            raise ValueError("raster figure height metadata is invalid")
+        return float(width), float(height)
+
+
+def _enforce_pixel_limit(width: float, height: float, *, dpi: int = 72) -> int:
+    scale = float(dpi) / 72.0
+    pixel_width = max(math.ceil(float(width) * scale), 0)
+    pixel_height = max(math.ceil(float(height) * scale), 0)
+    pixels = pixel_width * pixel_height
+    if pixels > V2_RESOURCE_POLICY.figure_max_pixels_each:
+        raise FigurePixelLimitError(
+            actual=pixels,
+            limit=V2_RESOURCE_POLICY.figure_max_pixels_each,
+        )
+    return pixels
 
 
 def _source_caption(entry: dict[str, Any]) -> str:

@@ -301,6 +301,65 @@ def test_prepare_degrades_complete_evidence_when_figure_candidate_cap_is_exceede
 
 
 @pytest.mark.parametrize(
+    ("case", "expected_name", "expected_actual", "expected_limit"),
+    [
+        ("candidates", "figure_candidate_count", 1_002, 200),
+        ("pixels", "figure_pixels_each", 25_000_000, 20_000_000),
+    ],
+)
+def test_preallocation_resource_limit_degrades_only_complete_pdf_evidence(
+    case: str,
+    expected_name: str,
+    expected_actual: int,
+    expected_limit: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from paper_reader.figures import FigureCandidateLimitError, FigurePixelLimitError
+
+    def preallocation_failure(*_args, **_kwargs):
+        if case == "candidates":
+            raise FigureCandidateLimitError(actual=1_002, limit=200)
+        raise FigurePixelLimitError(actual=25_000_000, limit=20_000_000)
+
+    monkeypatch.setattr("paper_reader.evidence_figures.extract_figures", preallocation_failure)
+
+    preview_source = tmp_path / f"preview-{case}.pdf"
+    shutil.copyfile(FIXTURE_PDF, preview_source)
+    preview_initialized = _invoke(["run", "init-local", str(preview_source)])
+    preview_run = Path(_result_payload(preview_initialized)["data"]["run_dir"])
+
+    preview_result = _invoke(
+        ["run", "prepare", str(preview_run), "--preview-pages", "1"]
+    )
+
+    assert preview_result.exit_code == 1
+    assert _result_payload(preview_result)["code"] == "figure_extraction_failed"
+    assert not (preview_run / "evidence").exists()
+
+    complete_source = tmp_path / f"complete-{case}.pdf"
+    shutil.copyfile(FIXTURE_PDF, complete_source)
+    complete_initialized = _invoke(["run", "init-local", str(complete_source)])
+    complete_run = Path(_result_payload(complete_initialized)["data"]["run_dir"])
+
+    complete_result = _invoke(["run", "prepare", str(complete_run)])
+
+    assert complete_result.exit_code == 0, complete_result.stderr
+    payload = _result_payload(complete_result)
+    assert payload["data"]["complete"] is True
+    assert payload["data"]["degraded"] is True
+    manifest = json.loads(
+        (Path(payload["data"]["evidence_dir"]) / "evidence.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    checks = {item["name"]: item for item in manifest["resource_checks"]}
+    assert checks[expected_name]["status"] == "degraded"
+    assert checks[expected_name]["actual"] == expected_actual
+    assert checks[expected_name]["limit"] == expected_limit
+
+
+@pytest.mark.parametrize(
     ("case", "figure_limit", "expected_name", "expected_actual", "expected_limit"),
     [
         ("each_pixels", 1, "figure_pixels_each", 25_000_000, 20_000_000),

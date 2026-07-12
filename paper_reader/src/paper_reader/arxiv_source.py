@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import shutil
 import tarfile
@@ -21,6 +22,20 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".we
 PDF_SUFFIXES = {".pdf"}
 DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = V2_RESOURCE_POLICY.arxiv_timeout_seconds
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+class FigureCandidateLimitError(ValueError):
+    def __init__(self, *, actual: int, limit: int) -> None:
+        super().__init__(f"figure candidate count {actual} exceeds {limit}")
+        self.actual = actual
+        self.limit = limit
+
+
+class FigurePixelLimitError(ValueError):
+    def __init__(self, *, actual: int, limit: int) -> None:
+        super().__init__(f"figure pixels {actual} exceeds {limit}")
+        self.actual = actual
+        self.limit = limit
 
 
 def resolve_arxiv_id(details: dict[str, Any], pdf_path: Path | None = None) -> str | None:
@@ -74,6 +89,9 @@ def download_arxiv_source(
         extract_source_package(archive_path, temp_root)
         temp_root.replace(source_root)
         return source_root
+    except FigureCandidateLimitError:
+        shutil.rmtree(temp_root, ignore_errors=True)
+        raise
     except (OSError, tarfile.TarError, urllib.error.URLError, ValueError):
         shutil.rmtree(temp_root, ignore_errors=True)
         return None
@@ -120,10 +138,14 @@ def extract_source_package(archive_path: Path, output_dir: Path) -> Path:
     return destination
 
 
-def collect_source_figures(source_root: Path, output_dir: Path) -> list[dict[str, Any]]:
+def collect_source_figures(
+    source_root: Path,
+    output_dir: Path,
+    *,
+    max_candidates: int | None = None,
+) -> list[dict[str, Any]]:
     root = Path(source_root).expanduser().resolve()
     destination = Path(output_dir).expanduser()
-    destination.mkdir(parents=True, exist_ok=True)
 
     candidates: dict[str, Path] = {}
     for child in root.iterdir():
@@ -138,9 +160,22 @@ def collect_source_figures(source_root: Path, output_dir: Path) -> list[dict[str
         rel_path = child.relative_to(root).as_posix()
         candidates[rel_path] = child
 
+    candidate_limit = (
+        V2_RESOURCE_POLICY.figure_max_candidates
+        if max_candidates is None
+        else max_candidates
+    )
+    if candidate_limit < 0:
+        raise ValueError("figure candidate limit must be non-negative")
+    if len(candidates) > candidate_limit:
+        raise FigureCandidateLimitError(
+            actual=len(candidates),
+            limit=candidate_limit,
+        )
     if len(candidates) > V2_RESOURCE_POLICY.arxiv_max_figure_files:
         raise ValueError("arXiv source figure count exceeds the V2 cap")
 
+    destination.mkdir(parents=True, exist_ok=True)
     figures: list[dict[str, Any]] = []
     for rel_path, source_path in sorted(candidates.items()):
         copied_name = _copied_name(rel_path)
@@ -163,15 +198,28 @@ def render_source_figure_pdfs(
     source_figures: list[dict[str, Any]],
     output_dir: Path,
 ) -> list[dict[str, Any]]:
-    destination = Path(output_dir).expanduser()
-    destination.mkdir(parents=True, exist_ok=True)
+    if len(source_figures) > V2_RESOURCE_POLICY.figure_max_candidates:
+        raise FigureCandidateLimitError(
+            actual=len(source_figures),
+            limit=V2_RESOURCE_POLICY.figure_max_candidates,
+        )
 
-    rendered: list[dict[str, Any]] = []
+    destination = Path(output_dir).expanduser()
+    pdf_figures: list[tuple[dict[str, Any], Path]] = []
     for figure in source_figures:
         figure_path = Path(str(figure["image_path"]))
         if figure_path.suffix.lower() != ".pdf":
             continue
+        with fitz.open(figure_path) as doc:
+            if doc.page_count < 1:
+                raise ValueError("source figure PDF has no pages")
+            page = doc.load_page(0)
+            _enforce_pixel_limit(page.rect.width, page.rect.height)
+        pdf_figures.append((figure, figure_path))
 
+    destination.mkdir(parents=True, exist_ok=True)
+    rendered: list[dict[str, Any]] = []
+    for figure, figure_path in pdf_figures:
         image_name = _rendered_pdf_name(figure, figure_path)
         image_path = destination / image_name
         with fitz.open(figure_path) as doc:
@@ -189,6 +237,18 @@ def render_source_figure_pdfs(
         )
 
     return rendered
+
+
+def _enforce_pixel_limit(width: float, height: float) -> int:
+    pixel_width = max(math.ceil(float(width)), 0)
+    pixel_height = max(math.ceil(float(height)), 0)
+    pixels = pixel_width * pixel_height
+    if pixels > V2_RESOURCE_POLICY.figure_max_pixels_each:
+        raise FigurePixelLimitError(
+            actual=pixels,
+            limit=V2_RESOURCE_POLICY.figure_max_pixels_each,
+        )
+    return pixels
 
 
 def _extract_arxiv_id(value: Any) -> str | None:
@@ -240,8 +300,14 @@ def _validate_archive_members(members: list[tarfile.TarInfo]) -> None:
             raise ValueError("arXiv source expanded size exceeds the V2 cap")
         if _is_supported_figure(relative_path):
             figure_count += 1
-            if figure_count > V2_RESOURCE_POLICY.arxiv_max_figure_files:
-                raise ValueError("arXiv source figure count exceeds the V2 cap")
+
+    if figure_count > V2_RESOURCE_POLICY.figure_max_candidates:
+        raise FigureCandidateLimitError(
+            actual=figure_count,
+            limit=V2_RESOURCE_POLICY.figure_max_candidates,
+        )
+    if figure_count > V2_RESOURCE_POLICY.arxiv_max_figure_files:
+        raise ValueError("arXiv source figure count exceeds the V2 cap")
 
 
 def _cache_name_for_arxiv_id(arxiv_id: str) -> str:

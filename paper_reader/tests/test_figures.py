@@ -1207,7 +1207,7 @@ def test_extract_figures_ranks_source_figures_above_embedded_image_supplements_w
     )
     monkeypatch.setattr(
         "paper_reader.figures.arxiv_source.collect_source_figures",
-        lambda source_root, output_dir: [
+        lambda source_root, output_dir, **_kwargs: [
             {
                 "rel_path": "figure-source.png",
                 "image_path": str(source_image_path),
@@ -1274,7 +1274,7 @@ def test_extract_figures_normalizes_source_provenance_and_uses_1_based_pages(
     )
     monkeypatch.setattr(
         "paper_reader.figures.arxiv_source.collect_source_figures",
-        lambda source_root, output_dir: [
+        lambda source_root, output_dir, **_kwargs: [
             {
                 "rel_path": "figure-source.png",
                 "image_path": str(image_path),
@@ -1338,7 +1338,7 @@ def test_extract_figures_keeps_selected_source_figure_paths_raster_safe(
     )
     monkeypatch.setattr(
         "paper_reader.figures.arxiv_source.collect_source_figures",
-        lambda source_root, output_dir: [
+        lambda source_root, output_dir, **_kwargs: [
             {
                 "rel_path": "figures/figure-source.pdf",
                 "image_path": str(pdf_figure_path),
@@ -1399,7 +1399,7 @@ def test_extract_figures_dedupes_same_caption_across_source_and_pdf_candidates(
     )
     monkeypatch.setattr(
         "paper_reader.figures.arxiv_source.collect_source_figures",
-        lambda source_root, output_dir: [
+        lambda source_root, output_dir, **_kwargs: [
             {
                 "rel_path": "figures/figure-source.png",
                 "image_path": str(source_image_path),
@@ -1491,7 +1491,7 @@ def test_extract_figures_ranks_source_model_image_above_source_stats_image(
     )
     monkeypatch.setattr(
         "paper_reader.figures.arxiv_source.collect_source_figures",
-        lambda source_root, output_dir: [
+        lambda source_root, output_dir, **_kwargs: [
             {
                 "rel_path": "crystalgrw_model_new.png",
                 "image_path": str(model_image_path),
@@ -1551,7 +1551,7 @@ def test_extract_figures_keeps_generic_unlabeled_source_images_behind_embedded_s
     )
     monkeypatch.setattr(
         "paper_reader.figures.arxiv_source.collect_source_figures",
-        lambda source_root, output_dir: [
+        lambda source_root, output_dir, **_kwargs: [
             {
                 "rel_path": "pg_alexmp20_gs05.png",
                 "image_path": str(source_image_path),
@@ -1605,7 +1605,7 @@ def test_extract_figures_does_not_let_low_value_source_stats_dominate_real_pdf_f
     )
     monkeypatch.setattr(
         "paper_reader.figures.arxiv_source.collect_source_figures",
-        lambda source_root, output_dir: [
+        lambda source_root, output_dir, **_kwargs: [
             {
                 "rel_path": "alexmp20_stats.png",
                 "image_path": str(stats_image_path),
@@ -1628,6 +1628,169 @@ def test_extract_figures_does_not_let_low_value_source_stats_dominate_real_pdf_f
 
     captions = [figure["caption"] for figure in _selected(payload)]
     assert captions[0] == "Figure 1. Proposed pipeline for the full workflow."
+
+
+def test_source_candidate_cap_is_checked_before_source_pdf_rendering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pdf_path = tmp_path / "paper.pdf"
+    make_captioned_pdf(pdf_path)
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source_candidates = [
+        {
+            "rel_path": f"figures/figure-{index:03d}.pdf",
+            "media_type": "pdf",
+            "image_path": str(source_root / f"figure-{index:03d}.pdf"),
+            "source_path": str(source_root / f"figure-{index:03d}.pdf"),
+            "source": "arxiv-source",
+        }
+        for index in range(201)
+    ]
+
+    monkeypatch.setattr(
+        "paper_reader.figures.arxiv_source.resolve_arxiv_id",
+        lambda details, pdf_path=None: "2501.00001",
+    )
+    monkeypatch.setattr(
+        "paper_reader.figures.arxiv_source.download_arxiv_source",
+        lambda arxiv_id, workdir: source_root,
+    )
+    monkeypatch.setattr(
+        "paper_reader.figures.arxiv_source.collect_source_figures",
+        lambda source_root, output_dir, **_kwargs: source_candidates,
+    )
+
+    def forbidden_render(*_args: object, **_kwargs: object) -> list[dict]:
+        pytest.fail("candidate scan cap was checked only after PDF rendering")
+
+    monkeypatch.setattr(
+        "paper_reader.figures.arxiv_source.render_source_figure_pdfs",
+        forbidden_render,
+    )
+
+    with pytest.raises(ValueError, match=r"figure candidate count 202 exceeds 200"):
+        extract_figures(
+            pdf_path,
+            tmp_path / "figures",
+            max_candidates=200,
+        )
+
+
+def test_combined_source_and_pdf_candidate_cap_is_checked_before_source_materialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.figures as figures
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"placeholder")
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    for index in range(150):
+        (source_root / f"source-{index:03d}.png").write_bytes(b"candidate")
+
+    page = type("FakePage", (), {"rect": fitz.Rect(0, 0, 400, 600)})()
+
+    class FakeDocument:
+        page_count = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def load_page(self, index: int):
+            assert index == 0
+            return page
+
+    captions = [
+        {"caption": f"Figure {index}.", "rect": fitz.Rect(10, 10, 100, 30)}
+        for index in range(51)
+    ]
+    monkeypatch.setattr(figures.fitz, "open", lambda _path: FakeDocument())
+    monkeypatch.setattr(figures, "_detect_captions", lambda _page: captions)
+    monkeypatch.setattr(
+        figures,
+        "_detect_graphic_regions",
+        lambda _page: [fitz.Rect(10, 40, 200, 200)],
+    )
+    monkeypatch.setattr(figures, "_detect_embedded_image_regions", lambda _page: [])
+    monkeypatch.setattr(
+        figures,
+        "_select_owned_bbox",
+        lambda *args, **kwargs: fitz.Rect(10, 40, 200, 200),
+    )
+    monkeypatch.setattr(
+        "paper_reader.figures.arxiv_source.resolve_arxiv_id",
+        lambda details, pdf_path=None: "2501.00001",
+    )
+    monkeypatch.setattr(
+        "paper_reader.figures.arxiv_source.download_arxiv_source",
+        lambda arxiv_id, workdir: source_root,
+    )
+
+    def forbidden_copy(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("combined candidate cap was checked only after source copying")
+
+    def forbidden_render(*_args: object, **_kwargs: object) -> list[dict]:
+        pytest.fail("combined candidate cap was checked only after source rendering")
+
+    monkeypatch.setattr("paper_reader.arxiv_source.shutil.copy2", forbidden_copy)
+    monkeypatch.setattr(
+        "paper_reader.figures.arxiv_source.render_source_figure_pdfs",
+        forbidden_render,
+    )
+
+    with pytest.raises(figures.FigureCandidateLimitError) as exc_info:
+        extract_figures(
+            pdf_path,
+            tmp_path / "figures",
+            max_candidates=200,
+        )
+
+    assert exc_info.value.actual == 201
+    assert exc_info.value.limit == 200
+
+
+def test_source_over_arxiv_cap_remains_structured_before_source_materialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.figures as figures
+
+    pdf_path = tmp_path / "paper.pdf"
+    make_captioned_pdf(pdf_path)
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    for index in range(1_001):
+        (source_root / f"source-{index:04d}.png").write_bytes(b"candidate")
+
+    monkeypatch.setattr(
+        "paper_reader.figures.arxiv_source.resolve_arxiv_id",
+        lambda details, pdf_path=None: "2501.00001",
+    )
+    monkeypatch.setattr(
+        "paper_reader.figures.arxiv_source.download_arxiv_source",
+        lambda arxiv_id, workdir: source_root,
+    )
+
+    def forbidden_copy(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("source over arXiv cap reached copy2")
+
+    monkeypatch.setattr("paper_reader.arxiv_source.shutil.copy2", forbidden_copy)
+
+    with pytest.raises(figures.FigureCandidateLimitError) as exc_info:
+        extract_figures(
+            pdf_path,
+            tmp_path / "figures",
+            max_candidates=200,
+        )
+
+    assert exc_info.value.actual == 1_002
+    assert exc_info.value.limit == 200
 
 
 def test_pdf_candidate_cap_is_checked_before_any_rasterization(
@@ -1682,6 +1845,79 @@ def test_pdf_candidate_cap_is_checked_before_any_rasterization(
 
     assert exc_info.value.actual == 201
     assert exc_info.value.limit == 200
+
+
+def test_pdf_crop_pixel_cap_is_checked_before_get_pixmap(tmp_path: Path) -> None:
+    import paper_reader.figures as figures
+
+    class FakePage:
+        def get_pixmap(self, **_kwargs):
+            pytest.fail("oversized PDF crop reached get_pixmap")
+
+    with pytest.raises(ValueError, match=r"figure pixels 36000000 exceeds 20000000"):
+        figures._rasterize_figure(
+            page=FakePage(),
+            page_number=1,
+            figure_index=1,
+            caption={"caption": "Figure 1.", "rect": fitz.Rect(0, 0, 100, 20)},
+            bbox=fitz.Rect(0, 0, 3_000, 3_000),
+            output_root=tmp_path,
+            source="deterministic-pdf",
+        )
+
+    assert not list(tmp_path.glob("*.png"))
+
+
+def test_raster_candidate_pixel_cap_is_checked_before_pixmap_allocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.figures as figures
+
+    image_path = tmp_path / "oversized.png"
+    image_path.write_bytes(b"placeholder")
+
+    class FakePage:
+        rect = fitz.Rect(0, 0, 3_750, 3_750)
+
+        def get_image_info(self):
+            return [{"width": 5_000, "height": 5_000}]
+
+        def get_pixmap(self, **_kwargs):
+            pytest.fail("oversized raster reached get_pixmap")
+
+    class FakeDocument:
+        page_count = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def load_page(self, index: int):
+            assert index == 0
+            return FakePage()
+
+    monkeypatch.setattr(figures.fitz, "open", lambda _path: FakeDocument())
+
+    def forbidden_pixmap(*_args: object, **_kwargs: object):
+        pytest.fail("oversized raster reached Pixmap allocation")
+
+    monkeypatch.setattr(figures.fitz, "Pixmap", forbidden_pixmap)
+
+    with pytest.raises(ValueError, match=r"figure pixels 25000000 exceeds 20000000"):
+        figures._source_entries_to_candidates(
+            [
+                {
+                    "rel_path": "figures/oversized.png",
+                    "media_type": "image",
+                    "image_path": str(image_path),
+                    "source_path": str(image_path),
+                    "source": "arxiv-source",
+                }
+            ]
+        )
 
 
 def test_pdf_geometry_ranking_rasterizes_only_selected_top_k(

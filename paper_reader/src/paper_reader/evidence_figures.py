@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from paper_reader.evidence_manifest import EvidenceFigureMember, EvidenceResourceCheck
-from paper_reader.figures import extract_figures
+from paper_reader.figures import (
+    FigureCandidateLimitError,
+    FigurePixelLimitError,
+    extract_figures,
+)
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.storage import (
     DirectoryAnchorLike,
@@ -39,6 +43,26 @@ class FigureResourceLimitError(ValueError):
     def __init__(self, check: EvidenceResourceCheck) -> None:
         super().__init__(check.message or check.name)
         self.check = check
+
+
+def _preallocation_resource_check(exc: Exception) -> EvidenceResourceCheck | None:
+    if isinstance(exc, FigureCandidateLimitError):
+        return EvidenceResourceCheck(
+            name="figure_candidate_count",
+            status="degraded",
+            actual=exc.actual,
+            limit=exc.limit,
+            message="figure candidate count exceeds the V2 cap",
+        )
+    if isinstance(exc, FigurePixelLimitError):
+        return EvidenceResourceCheck(
+            name="figure_pixels_each",
+            status="degraded",
+            actual=exc.actual,
+            limit=exc.limit,
+            message="one or more figure images exceed the V2 per-image pixel cap",
+        )
+    return None
 
 
 def _resource_checks(
@@ -271,7 +295,11 @@ def prepare_figure_artifacts(
         remove_anchored_file(staging_anchor, staging / "figure_context.md")
         if not complete:
             raise IncompleteFigureEvidenceError(str(exc)) from exc
-        resource_checks = (exc.check,) if isinstance(exc, FigureResourceLimitError) else ()
+        if isinstance(exc, FigureResourceLimitError):
+            resource_checks = (exc.check,)
+        else:
+            preallocation_check = _preallocation_resource_check(exc)
+            resource_checks = (preallocation_check,) if preallocation_check is not None else ()
         return PreparedFigures(
             artifacts=(),
             members=(),
