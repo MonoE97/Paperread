@@ -345,6 +345,26 @@ def test_root_readmes_publish_v2_release_and_clean_install() -> None:
             assert phrase in text
 
 
+def test_root_readmes_use_independent_skill_roots_and_distinguish_write_recovery() -> None:
+    if not (REPO_ROOT / "README.md").exists():
+        pytest.skip("root documentation is validated only in the source repository")
+
+    for text in [read(REPO_ROOT / "README.md"), read(REPO_ROOT / "README.zh-CN.md")]:
+        for phrase in [
+            'PAPER_READER_ROOT="/path/to/paper_reader"',
+            'PAPER_READER_BATCH_ROOT="/path/to/paper_reader_batch"',
+            '(cd "$PAPER_READER_ROOT" && uv run paper_reader zotero authorize',
+            '(cd "$PAPER_READER_ROOT" && uv run paper_reader zotero verify',
+            '(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch write begin',
+            '(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch write mark-uncertain',
+            '(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch run recover',
+        ]:
+            assert phrase in text
+
+        assert "unexpired started claim" in text
+        assert "expired started claim" in text
+
+
 def test_batch_project_version_is_2_0_0() -> None:
     project = tomllib.loads(read(PYPROJECT))["project"]
 

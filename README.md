@@ -137,30 +137,33 @@ Use `paper_reader_batch` when the request contains multiple papers. Install both
 Typical grouped batch CLI shape (every mutation includes a fresh UUID request id):
 
 ```bash
-uv run paper_reader_batch manifest from-zotero-titles titles.txt --batch-title "my batch" --output manifest.json --request-id UUID
-uv run paper_reader_batch run init --manifest manifest.json --request-id UUID
-uv run paper_reader_batch run validate <batch_run_dir>
-uv run paper_reader_batch worker claim <batch_run_dir> --worker-id <worker_id> --request-id UUID
-uv run paper_reader_batch worker prompt <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id>
-uv run paper_reader_batch worker finish <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --result <result.json> --request-id UUID
-uv run paper_reader_batch write claim <batch_run_dir> --writer-id <writer_id> --request-id UUID
-uv run paper_reader_batch write preview <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id>
-uv run paper_reader zotero authorize <candidate.json> --external-claim-id <claim_id> --write-attempt-id <write_attempt_id>
-uv run paper_reader_batch write begin <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id> --authorization <authorization.json> --request-id UUID
-uv run paper_reader zotero verify <authorization.json> --note-key <note_key>
-uv run paper_reader_batch write commit <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id> --result <write-result.json> --request-id UUID
-uv run paper_reader_batch run report <batch_run_dir>
+PAPER_READER_ROOT="/path/to/paper_reader"
+PAPER_READER_BATCH_ROOT="/path/to/paper_reader_batch"
+
+(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch manifest from-zotero-titles titles.txt --batch-title "my batch" --output manifest.json --request-id UUID)
+(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch run init --manifest manifest.json --request-id UUID)
+(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch run validate <batch_run_dir>)
+(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch worker claim <batch_run_dir> --worker-id <worker_id> --request-id UUID)
+(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch worker prompt <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id>)
+(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch worker finish <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --result <result.json> --request-id UUID)
+(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch write claim <batch_run_dir> --writer-id <writer_id> --request-id UUID)
+(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch write preview <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id>)
+(cd "$PAPER_READER_ROOT" && uv run paper_reader zotero authorize <candidate.json> --external-claim-id <claim_id> --write-attempt-id <write_attempt_id>)
+(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch write begin <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id> --authorization <authorization.json> --request-id UUID)
+(cd "$PAPER_READER_ROOT" && uv run paper_reader zotero verify <authorization.json> --note-key <note_key>)
+(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch write commit <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id> --result <write-result.json> --request-id UUID)
+(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch run report <batch_run_dir>)
 ```
 
-`write begin` first commits `write.started`, then returns the only MCP envelope the external agent may send. After that one MCP `write_note` create call, build the strict write result from read-only single-paper verification and commit it. Only an abnormal started attempt with an unknown outcome belongs on the recovery path: `uv run paper_reader_batch run recover <batch_run_dir> --request-id UUID --paper-reader-root /path/to/paper_reader`.
+`write begin` first commits `write.started`, then returns the only MCP envelope the external agent may send. After that one MCP `write_note` create call, build the strict write result from read-only single-paper verification and commit it. For an unexpired started claim whose outcome becomes unknown, the active writer records uncertainty with its exact live claim identity: `(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch write mark-uncertain <batch_run_dir> <item_id> --writer-id <writer_id> --claim-id <claim_id> --lease-token <lease_token> --write-attempt-id <write_attempt_id> --reason <reason> --request-id UUID)`. An expired started claim must not reuse its lease token or send the MCP request again; its recovery path is read-only: `(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch run recover <batch_run_dir> --request-id UUID --paper-reader-root "$PAPER_READER_ROOT")`.
 
 Repeat `worker claim -> prompt -> finish` until there are no eligible items. `worker prompt` is a read-only handoff to an outer agent or subagent; the batch CLI does not read papers or dispatch an LLM by itself.
 
 For local PDF batches when outer-agent parallelism is unavailable:
 
 ```bash
-uv run paper_reader_batch local-prepare claim <batch_run_dir> --worker-id <worker_id> --request-id UUID
-uv run paper_reader_batch local-prepare run <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --paper-reader-root /path/to/paper_reader --request-id UUID
+(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch local-prepare claim <batch_run_dir> --worker-id <worker_id> --request-id UUID)
+(cd "$PAPER_READER_BATCH_ROOT" && uv run paper_reader_batch local-prepare run <batch_run_dir> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --paper-reader-root "$PAPER_READER_ROOT" --request-id UUID)
 ```
 
 For Zotero-backed items, the default write policy is `zotero_write`. Pass `--write-policy prepare_only` to manifest builders for dry-run. PDF batch items remain local-output only and skip Zotero lookup or duplicate checks.
