@@ -184,6 +184,8 @@ def claim_worker(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=request_id,
         command="worker.claim",
         request_fingerprint=fingerprint,
@@ -342,6 +344,8 @@ def renew_worker(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=request_id,
         command="worker.renew",
         request_fingerprint=fingerprint,
@@ -430,6 +434,8 @@ def release_worker(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=request_id,
         command="worker.release",
         request_fingerprint=fingerprint,
@@ -564,6 +570,8 @@ def finish_worker(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=request_id,
         command="worker.finish",
         request_fingerprint=fingerprint,
@@ -637,6 +645,8 @@ def retry_worker(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=request_id,
         command="worker.retry",
         request_fingerprint=fingerprint,

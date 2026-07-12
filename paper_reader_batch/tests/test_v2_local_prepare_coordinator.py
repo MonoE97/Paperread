@@ -14,7 +14,10 @@ from paper_reader_batch.v2_errors import BatchRuntimeError
 from paper_reader_batch.v2_journal import load_run_view
 from paper_reader_batch.v2_json import canonical_json_bytes, canonical_sha256
 from paper_reader_batch.v2_local_prepare import (
+    _ChildCommandResult,
+    _ChildProtocolError,
     _default_child_runner,
+    _validate_initialized_child,
     claim_local_prepare,
     local_prepare_attempt_has_execution_side_effects,
     release_local_prepare,
@@ -373,6 +376,79 @@ def test_child_stdout_must_be_exactly_one_strict_command_result(tmp_path: Path) 
     result_path = Path(outcome.result["result_path"])
     payload = json.loads(result_path.read_text(encoding="utf-8"))
     assert payload["error"]["code"] == "invalid_child_envelope"
+
+
+def test_initialized_child_requires_exact_target_parent_inode(tmp_path: Path) -> None:
+    run_dir, _source_path, _assignment = _batch_run(tmp_path)
+    source = load_run_view(run_dir).manifest.items[0].source
+    source_path = Path(source.path)
+    child_run_dir = source_path.parent / "child-run"
+    (child_run_dir / "source").mkdir(parents=True)
+    target_path = source_path.parent / "paper_note.md"
+    run_id = "run_parent_inode_binding"
+    source_payload = {
+        "source_type": "local_pdf",
+        "requested_path": source.path,
+        "resolved_path": source.path,
+        "sha256": source.sha256,
+        "size_bytes": source.size_bytes,
+        "device": source.file_identity.device,
+        "inode": source.file_identity.inode,
+    }
+    parent_metadata = os.stat(source_path.parent, follow_symlinks=False)
+    target_payload = {
+        "target_type": "local",
+        "resolved_path": str(target_path),
+        "parent_device": parent_metadata.st_dev,
+        "parent_inode": parent_metadata.st_ino,
+    }
+    child_run = {
+        "schema_version": "paper_reader.run.v2",
+        "run_id": run_id,
+        "created_at": "2026-07-11T00:00:02Z",
+        "source": source_payload,
+        "target": target_payload,
+        "status": "initialized",
+        "artifacts": [],
+        "gate": {
+            "status": "not_evaluated",
+            "blockers": [],
+            "checks": [],
+            "evaluated_at": None,
+        },
+        "live_preflight": None,
+    }
+    (child_run_dir / "run.json").write_bytes(canonical_json_bytes(child_run))
+    (child_run_dir / "source" / "source.json").write_bytes(
+        canonical_json_bytes(source_payload)
+    )
+    envelope = _ChildCommandResult(
+        schema_version="paper_reader.command-result.v2",
+        command="run init-local",
+        ok=True,
+        code="initialized",
+        created_at="2026-07-11T00:00:02Z",
+        data={
+            "run_dir": str(child_run_dir),
+            "run_id": run_id,
+            "target_path": str(target_path),
+        },
+    )
+
+    assert _validate_initialized_child(envelope, source) == (
+        child_run_dir,
+        run_id,
+        target_path,
+    )
+
+    child_run["target"] = {
+        **target_payload,
+        "parent_inode": parent_metadata.st_ino + 1,
+    }
+    (child_run_dir / "run.json").write_bytes(canonical_json_bytes(child_run))
+    with pytest.raises(_ChildProtocolError) as exc_info:
+        _validate_initialized_child(envelope, source)
+    assert exc_info.value.code == "child_artifact_mismatch"
 
 
 def test_insufficient_remaining_lease_time_rejects_before_any_child_or_coordination(

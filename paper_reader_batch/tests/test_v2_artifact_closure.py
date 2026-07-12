@@ -588,6 +588,7 @@ def _local_fixture(
         "target_type": "local",
         "resolved_path": str(tmp_path / "paper_note.md"),
         "parent_device": tmp_path.stat().st_dev,
+        "parent_inode": tmp_path.stat().st_ino,
     }
     reviewed_run = {
         "schema_version": "paper_reader.run.v2",

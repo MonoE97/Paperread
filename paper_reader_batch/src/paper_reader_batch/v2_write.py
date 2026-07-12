@@ -913,6 +913,8 @@ def claim_write(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=request_id,
         command="write.claim",
         request_fingerprint=fingerprint,
@@ -1059,6 +1061,8 @@ def renew_write(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=request_id,
         command="write.renew",
         request_fingerprint=fingerprint,
@@ -1129,6 +1133,8 @@ def release_write(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=request_id,
         command="write.release",
         request_fingerprint=fingerprint,
@@ -1308,6 +1314,8 @@ def begin_write(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=request_id,
         command="write.begin",
         request_fingerprint=fingerprint,
@@ -1535,6 +1543,8 @@ def commit_write(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=request_id,
         command="write.commit",
         request_fingerprint=fingerprint,
@@ -1627,6 +1637,8 @@ def mark_write_uncertain(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=request_id,
         command="write.mark-uncertain",
         request_fingerprint=fingerprint,
@@ -2134,6 +2146,8 @@ def reconcile_write(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=request_id,
         command="write.reconcile",
         request_fingerprint=fingerprint,
@@ -2234,6 +2248,8 @@ def retry_write(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=request_id,
         command="write.retry",
         request_fingerprint=fingerprint,

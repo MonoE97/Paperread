@@ -103,6 +103,7 @@ def _make_authorization(
     created_at: str = "2026-07-10T00:00:05Z",
     expires_at: str = "2026-07-10T00:05:05Z",
     ttl_seconds: int = 300,
+    nonce: str = "nonce_" + "n" * 37,
 ) -> tuple[Path, dict[str, object]]:
     candidate_path = ready.built.candidate_path
     candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
@@ -172,7 +173,6 @@ def _make_authorization(
         ],
         "blockers": [],
     }
-    nonce = "nonce_" + "n" * 37
     authorization = {
         "schema_version": "paper_reader.write-authorization.v2",
         "authorization_id": authorization_id,

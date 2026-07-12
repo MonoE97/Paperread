@@ -11,7 +11,13 @@ from paper_reader_batch.v2_errors import BatchRuntimeError
 from paper_reader_batch.v2_json import canonical_json_bytes, sha256_bytes
 from paper_reader_batch.v2_journal import load_run_view
 from paper_reader_batch.v2_run import recover_run
-from paper_reader_batch.v2_write import begin_write, claim_write, release_write
+from paper_reader_batch.v2_write import (
+    begin_write,
+    claim_write,
+    reconcile_write,
+    release_write,
+    retry_write,
+)
 from test_v2_write_runtime import (
     REQUEST_WRITE_BEGIN,
     REQUEST_WRITE_CLAIM,
@@ -24,6 +30,13 @@ from test_v2_write_runtime import (
 
 REQUEST_RECOVER_CLAIMED = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 REQUEST_RECOVER_STARTED = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+REQUEST_RECOVER_CONTINUE = "abababab-abab-4bab-8bab-abababababab"
+REQUEST_RECOVER_RECEIPT = "acacacac-acac-4cac-8cac-acacacacacac"
+REQUEST_RECONCILE_OTHER = "adadadad-adad-4dad-8dad-adadadadadad"
+REQUEST_RETRY_OTHER = "aeaeaeae-aeae-4eae-8eae-aeaeaeaeaeae"
+REQUEST_CLAIM_AFTER = "afafafaf-afaf-4faf-8faf-afafafafafaf"
+REQUEST_BEGIN_AFTER = "b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0"
+REQUEST_RECOVER_AFTER = "b1b1b1b1-b1b1-41b1-81b1-b1b1b1b1b1b1"
 REQUEST_RELEASE_ONE = "ffffffff-ffff-4fff-8fff-ffffffffffff"
 REQUEST_CLAIM_TWO = "12121212-1212-4212-8212-121212121212"
 REQUEST_RELEASE_TWO = "13131313-1313-4313-8313-131313131313"
@@ -84,6 +97,7 @@ def _child_result(
     authorization_path: Path,
     outcome: str,
     matched_note_keys: tuple[str, ...],
+    created_at: str = "2026-07-10T00:02:04.000000Z",
 ) -> subprocess.CompletedProcess[bytes]:
     reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
     ok = outcome == "verified"
@@ -93,7 +107,7 @@ def _child_result(
         "command": "zotero reconcile",
         "ok": ok,
         "code": code,
-        "created_at": "2026-07-10T00:02:04.000000Z",
+        "created_at": created_at,
         "message": None if ok else f"Zotero reconciliation ended as {outcome}",
         "data": {
             "reconciliation_path": str(reconciliation_path),
@@ -193,7 +207,10 @@ def test_recover_expired_started_write_is_uncertain_and_never_requeued(tmp_path:
         {
             "item_id": "001",
             "authorization_sha256": item.authorization_sha256,
-            "next_action": "rerun run recover with an explicit --paper-reader-root",
+            "next_action": (
+                "rerun run recover with an explicit --paper-reader-root "
+                "and a new request id"
+            ),
         }
     ]
 
@@ -337,6 +354,274 @@ def test_recover_retries_read_only_child_after_uncertain_event_without_reissuing
     assert sum(event.data.kind == "write.lease_expired_uncertain" for event in final_view.events) == 1
     assert sum(event.data.kind == "write.reconciled" for event in final_view.events) == 1
     assert all("mcp_envelope" not in event.command_result.model_dump_json() for event in final_view.events)
+
+
+def test_rootless_recover_continues_uncertain_write_with_new_root_bound_request(
+    tmp_path: Path,
+) -> None:
+    ready, _claimed, authorization_path, authorization = _started_write(tmp_path)
+    rootless = recover_run(
+        ready.run_dir,
+        request_id=REQUEST_RECOVER_STARTED,
+        now="2026-07-10T00:02:03Z",
+    )
+    assert rootless.result["expired_write_started_items"] == ["001"]
+    next_action = rootless.result["reconciliation_required"][0]["next_action"]
+
+    paper_reader_root = _fake_paper_reader_root(tmp_path)
+    calls = 0
+
+    def runner(_argv: tuple[str, ...], _cwd: Path, _timeout_seconds: int):
+        nonlocal calls
+        calls += 1
+        reconciliation_path = _make_reconciliation_matches(
+            ready,
+            authorization_path,
+            authorization,
+            note_keys=("NOTE1",),
+        )
+        return _child_result(
+            reconciliation_path=reconciliation_path,
+            authorization_path=authorization_path,
+            outcome="verified",
+            matched_note_keys=("NOTE1",),
+        )
+
+    continued = recover_run(
+        ready.run_dir,
+        request_id=REQUEST_RECOVER_CONTINUE,
+        now="2026-07-10T00:02:05Z",
+        paper_reader_root=paper_reader_root,
+        reconciliation_runner=runner,
+        reconciliation_timeout_seconds=45,
+    )
+    assert continued.result["reconciliation"]["status"] == "written"
+    assert "new request id" in next_action
+    assert calls == 1
+
+    def forbidden_runner(*_args):
+        pytest.fail("a committed root-bound continuation re-executed reconciliation")
+
+    replay = recover_run(
+        ready.run_dir,
+        request_id=REQUEST_RECOVER_CONTINUE,
+        now="2026-07-10T00:02:05Z",
+        paper_reader_root=paper_reader_root,
+        reconciliation_runner=forbidden_runner,
+        reconciliation_timeout_seconds=45,
+    )
+    assert replay.replayed is True
+    assert replay.result == continued.result
+
+    with pytest.raises(BatchRuntimeError) as drift_error:
+        recover_run(
+            ready.run_dir,
+            request_id=REQUEST_RECOVER_CONTINUE,
+            now="2026-07-10T00:02:05Z",
+            paper_reader_root=paper_reader_root,
+            reconciliation_runner=forbidden_runner,
+            reconciliation_timeout_seconds=46,
+        )
+    assert drift_error.value.code == "idempotency_conflict"
+
+    view = load_run_view(ready.run_dir)
+    kinds = [event.data.kind for event in view.events]
+    assert kinds.count("write.lease_expired_uncertain") == 1
+    assert kinds.count("run.recovered") == 1
+    assert kinds.count("write.reconciled") == 1
+
+
+def test_continuation_receipt_replay_rejects_a_new_uncertain_attempt_before_child(
+    tmp_path: Path,
+) -> None:
+    ready, first_claim, first_authorization_path, first_authorization = _started_write(
+        tmp_path
+    )
+    recover_run(
+        ready.run_dir,
+        request_id=REQUEST_RECOVER_STARTED,
+        now="2026-07-10T00:02:03Z",
+    )
+    paper_reader_root = _fake_paper_reader_root(tmp_path)
+
+    class InjectedCrash(RuntimeError):
+        pass
+
+    def crash_after_receipt(stage: str) -> None:
+        if stage == "after_event":
+            raise InjectedCrash("receipt committed before reconciliation")
+
+    def forbidden_initial_runner(*_args):
+        pytest.fail("reconciliation child ran after the injected receipt crash")
+
+    with pytest.raises(InjectedCrash):
+        recover_run(
+            ready.run_dir,
+            request_id=REQUEST_RECOVER_RECEIPT,
+            now="2026-07-10T00:02:05Z",
+            paper_reader_root=paper_reader_root,
+            reconciliation_runner=forbidden_initial_runner,
+            reconciliation_timeout_seconds=45,
+            fault=crash_after_receipt,
+        )
+
+    first_not_found_path = _make_reconciliation_not_found(
+        ready,
+        first_authorization_path,
+        first_authorization,
+    )
+    reconcile_write(
+        ready.run_dir,
+        "001",
+        readback_path=first_not_found_path,
+        request_id=REQUEST_RECONCILE_OTHER,
+        now="2026-07-10T00:02:06Z",
+    )
+    retry_write(
+        ready.run_dir,
+        "001",
+        acknowledge_no_match=True,
+        request_id=REQUEST_RETRY_OTHER,
+        now="2026-07-10T00:02:07Z",
+    )
+    second_claim = claim_write(
+        ready.run_dir,
+        writer_id="writer-2",
+        request_id=REQUEST_CLAIM_AFTER,
+        now="2026-07-10T00:02:08Z",
+    ).result
+    second_authorization_path, _second_authorization = _make_authorization(
+        ready,
+        second_claim,
+        created_at="2026-07-10T00:02:09Z",
+        expires_at="2026-07-10T00:07:09Z",
+        nonce="nonce_" + "b" * 37,
+    )
+    begin_write(
+        ready.run_dir,
+        "001",
+        writer_id="writer-2",
+        claim_id=second_claim["claim_id"],
+        lease_token=second_claim["lease_token"],
+        write_attempt_id=second_claim["write_attempt_id"],
+        authorization_path=second_authorization_path,
+        request_id=REQUEST_BEGIN_AFTER,
+        now="2026-07-10T00:02:10Z",
+    )
+    recover_run(
+        ready.run_dir,
+        request_id=REQUEST_RECOVER_AFTER,
+        now="2026-07-10T00:04:09Z",
+    )
+
+    current = load_run_view(ready.run_dir).state.items[0]
+    assert current.write_status == "uncertain"
+    assert current.write_last_attempt_id == second_claim["write_attempt_id"]
+    assert current.write_last_attempt_id != first_claim["write_attempt_id"]
+    calls = 0
+
+    def forbidden_replay_runner(*_args):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("receipt replay selected the new uncertain attempt")
+
+    with pytest.raises(BatchRuntimeError) as drift_error:
+        recover_run(
+            ready.run_dir,
+            request_id=REQUEST_RECOVER_RECEIPT,
+            now="2026-07-10T00:02:05Z",
+            paper_reader_root=paper_reader_root,
+            reconciliation_runner=forbidden_replay_runner,
+            reconciliation_timeout_seconds=45,
+        )
+
+    assert drift_error.value.code == "recovery_target_drift"
+    assert calls == 0
+
+
+@pytest.mark.parametrize("drift", ["paper_reader_root", "reconciliation_timeout"])
+def test_recover_replay_rejects_changed_reconciliation_inputs(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    ready, _claimed, _authorization_path, _authorization = _started_write(tmp_path)
+    paper_reader_root = _fake_paper_reader_root(tmp_path)
+    calls = 0
+
+    def runner(_argv: tuple[str, ...], _cwd: Path, _timeout_seconds: int):
+        nonlocal calls
+        calls += 1
+        raise OSError("injected launcher result loss")
+
+    with pytest.raises(BatchRuntimeError) as first_error:
+        recover_run(
+            ready.run_dir,
+            request_id=REQUEST_RECOVER_STARTED,
+            now="2026-07-10T00:02:03Z",
+            paper_reader_root=paper_reader_root,
+            reconciliation_runner=runner,
+            reconciliation_timeout_seconds=45,
+        )
+    assert first_error.value.code == "reconciliation_child_failed"
+    event_count = len(load_run_view(ready.run_dir).events)
+
+    timeout_seconds = 45
+    if drift == "paper_reader_root":
+        (paper_reader_root / "SKILL.md").write_text(
+            "# paper_reader V2 changed\n",
+            encoding="utf-8",
+        )
+    else:
+        timeout_seconds = 46
+
+    with pytest.raises(BatchRuntimeError) as replay_error:
+        recover_run(
+            ready.run_dir,
+            request_id=REQUEST_RECOVER_STARTED,
+            now="2026-07-10T00:02:03Z",
+            paper_reader_root=paper_reader_root,
+            reconciliation_runner=runner,
+            reconciliation_timeout_seconds=timeout_seconds,
+        )
+
+    assert replay_error.value.code == "idempotency_conflict"
+    assert calls == 1
+    assert len(load_run_view(ready.run_dir).events) == event_count
+
+
+def test_recover_reconciliation_event_uses_trusted_batch_time_not_future_child_time(
+    tmp_path: Path,
+) -> None:
+    ready, _claimed, authorization_path, authorization = _started_write(tmp_path)
+    paper_reader_root = _fake_paper_reader_root(tmp_path)
+
+    def runner(_argv: tuple[str, ...], _cwd: Path, _timeout_seconds: int):
+        reconciliation_path = _make_reconciliation_matches(
+            ready,
+            authorization_path,
+            authorization,
+            note_keys=("NOTE1",),
+        )
+        return _child_result(
+            reconciliation_path=reconciliation_path,
+            authorization_path=authorization_path,
+            outcome="verified",
+            matched_note_keys=("NOTE1",),
+            created_at="2099-01-01T00:00:00.000000Z",
+        )
+
+    recover_run(
+        ready.run_dir,
+        request_id=REQUEST_RECOVER_STARTED,
+        now="2026-07-10T00:02:03Z",
+        paper_reader_root=paper_reader_root,
+        reconciliation_runner=runner,
+        reconciliation_timeout_seconds=45,
+    )
+
+    view = load_run_view(ready.run_dir)
+    assert view.events[-1].data.kind == "write.reconciled"
+    assert view.events[-1].occurred_at == "2026-07-10T00:02:03Z"
 
 
 def test_append_rejects_reusing_an_older_write_identity_before_poisoning_journal(

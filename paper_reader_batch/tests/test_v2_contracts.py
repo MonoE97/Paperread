@@ -14,6 +14,7 @@ from paper_reader_batch.v2_contracts import (
     CommandResult,
     EventCommandResultSnapshot,
     PdfSource,
+    RecoveredUncertainWrite,
     ReconciliationResult,
     Rfc3339Utc,
     ReportItem,
@@ -140,6 +141,35 @@ def test_checked_in_contract_schemas_match_export() -> None:
     for schema_version, schema in exported.items():
         path = SCHEMA_ROOT / schema_filename(schema_version)
         assert json.loads(path.read_text(encoding="utf-8")) == schema
+
+
+def test_recover_receipt_schema_binds_the_complete_uncertain_write_identity() -> None:
+    event_schema = BatchEvent.model_json_schema()
+    recovered_schema = event_schema["$defs"]["RecoveredUncertainWrite"]
+    run_recovered_schema = event_schema["$defs"]["RunRecoveredData"]
+
+    assert RecoveredUncertainWrite.model_config["strict"] is True
+    assert recovered_schema["additionalProperties"] is False
+    assert set(recovered_schema["required"]) == {
+        "item_id",
+        "writer_id",
+        "claim_id",
+        "write_attempt_id",
+        "attempt_number",
+        "lease_token_sha256",
+        "candidate_sha256",
+        "authorization_id",
+        "authorization_path",
+        "authorization_sha256",
+        "authorization_nonce_sha256",
+        "external_claim_id",
+        "write_started_event_sha256",
+    }
+    assert "reconciliation_write" in run_recovered_schema["required"]
+    assert run_recovered_schema["properties"]["reconciliation_write"]["anyOf"] == [
+        {"$ref": "#/$defs/RecoveredUncertainWrite"},
+        {"type": "null"},
+    ]
 
 
 def test_command_result_forbids_extra_fields_and_wrong_version() -> None:

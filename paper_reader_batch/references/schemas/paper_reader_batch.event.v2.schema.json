@@ -555,6 +555,90 @@
       "title": "RecoveredLease",
       "type": "object"
     },
+    "RecoveredUncertainWrite": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_number": {
+          "minimum": 1,
+          "title": "Attempt Number",
+          "type": "integer"
+        },
+        "authorization_id": {
+          "minLength": 1,
+          "title": "Authorization Id",
+          "type": "string"
+        },
+        "authorization_nonce_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Authorization Nonce Sha256",
+          "type": "string"
+        },
+        "authorization_path": {
+          "minLength": 1,
+          "title": "Authorization Path",
+          "type": "string"
+        },
+        "authorization_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Authorization Sha256",
+          "type": "string"
+        },
+        "candidate_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidate Sha256",
+          "type": "string"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "external_claim_id": {
+          "title": "External Claim Id",
+          "type": "string"
+        },
+        "item_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+          "title": "Item Id",
+          "type": "string"
+        },
+        "lease_token_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lease Token Sha256",
+          "type": "string"
+        },
+        "write_attempt_id": {
+          "title": "Write Attempt Id",
+          "type": "string"
+        },
+        "write_started_event_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Write Started Event Sha256",
+          "type": "string"
+        },
+        "writer_id": {
+          "minLength": 1,
+          "title": "Writer Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "writer_id",
+        "claim_id",
+        "write_attempt_id",
+        "attempt_number",
+        "lease_token_sha256",
+        "candidate_sha256",
+        "authorization_id",
+        "authorization_path",
+        "authorization_sha256",
+        "authorization_nonce_sha256",
+        "external_claim_id",
+        "write_started_event_sha256"
+      ],
+      "title": "RecoveredUncertainWrite",
+      "type": "object"
+    },
     "ResumedLocalPrepareLease": {
       "additionalProperties": false,
       "properties": {
@@ -737,6 +821,16 @@
           "title": "Kind",
           "type": "string"
         },
+        "reconciliation_write": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoveredUncertainWrite"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "resumed_local_prepare_leases": {
           "items": {
             "$ref": "#/$defs/ResumedLocalPrepareLease"
@@ -750,7 +844,8 @@
         }
       },
       "required": [
-        "snapshot_repaired"
+        "snapshot_repaired",
+        "reconciliation_write"
       ],
       "title": "RunRecoveredData",
       "type": "object"

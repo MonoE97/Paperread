@@ -353,6 +353,17 @@ def test_batch_project_version_is_2_0_0() -> None:
     assert project["scripts"] == {"paper_reader_batch": "paper_reader_batch.v2_cli:app"}
 
 
+def test_recovery_docs_bind_receipts_to_one_exact_uncertain_write() -> None:
+    skill = read(BATCH_ROOT / "SKILL.md")
+    workflow = read(BATCH_ROOT / "references" / "batch-workflow.md")
+    dispatch = read(BATCH_ROOT / "references" / "parallel-dispatch.md")
+
+    for text in [skill, workflow, dispatch]:
+        assert "complete uncertain" in text
+        assert "recovery_target_drift" in text
+        assert "new request id" in text
+
+
 def test_batch_validator_tracks_required_runtime_modules() -> None:
     validator = read(BATCH_ROOT / "scripts" / "validate-skill.py")
 

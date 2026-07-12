@@ -609,12 +609,29 @@ class ResumedLocalPrepareLease(StrictModel):
     expires_at: Rfc3339Utc
 
 
+class RecoveredUncertainWrite(StrictModel):
+    item_id: ItemId
+    writer_id: NonEmptyString
+    claim_id: UuidString
+    write_attempt_id: UuidString
+    attempt_number: PositiveInt
+    lease_token_sha256: Sha256
+    candidate_sha256: Sha256
+    authorization_id: NonEmptyString
+    authorization_path: AbsolutePath
+    authorization_sha256: Sha256
+    authorization_nonce_sha256: Sha256
+    external_claim_id: UuidString
+    write_started_event_sha256: Sha256
+
+
 class RunRecoveredData(StrictModel):
     kind: Literal["run.recovered"] = "run.recovered"
     expired_worker_leases: list[RecoveredLease] = Field(default_factory=list)
     expired_local_prepare_leases: list[RecoveredLease] = Field(default_factory=list)
     resumed_local_prepare_leases: list[ResumedLocalPrepareLease] = Field(default_factory=list)
     snapshot_repaired: bool
+    reconciliation_write: RecoveredUncertainWrite | None
 
 
 class WriteClaimedData(StrictModel):

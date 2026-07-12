@@ -154,6 +154,7 @@ class ForeignLocalTarget(ForeignStrictModel):
     target_type: Literal["local"] = "local"
     resolved_path: ForeignAbsolutePath
     parent_device: ForeignNonNegativeInt
+    parent_inode: ForeignNonNegativeInt
 
 
 class ForeignZoteroTarget(ForeignStrictModel):
@@ -1140,7 +1141,7 @@ def _validate_local_run_target(
     run_path: Path,
     target: ForeignLocalTarget,
     *,
-    check_parent_device: bool,
+    check_parent_identity: bool,
 ) -> None:
     source_path = Path(manifest_item.source.path)
     _require_normalized_absolute_path(
@@ -1159,13 +1160,20 @@ def _validate_local_run_target(
     expected_target = source_path.parent / f"{source_path.stem}_note{suffix}.md"
     if target.resolved_path != str(expected_target):
         raise _invalid("local_prepare_invalid", "paper_reader local target does not match run/source version")
-    if check_parent_device:
+    if check_parent_identity:
         try:
-            parent_device = source_path.parent.stat().st_dev
-        except OSError as exc:
+            with open_directory_fd(source_path.parent, create=False) as (
+                parent_descriptor,
+                _bound_parent,
+            ):
+                parent_metadata = os.fstat(parent_descriptor)
+        except (BatchRuntimeError, OSError) as exc:
             raise _invalid("source_drift", "local source parent is unavailable", exc)
-        if target.parent_device != parent_device:
-            raise _invalid("local_prepare_invalid", "paper_reader local target parent device changed")
+        if (target.parent_device, target.parent_inode) != (
+            parent_metadata.st_dev,
+            parent_metadata.st_ino,
+        ):
+            raise _invalid("local_prepare_invalid", "paper_reader local target parent identity changed")
 
 
 def _walk_regular_files(root: Path) -> set[str]:
@@ -1635,7 +1643,7 @@ def _validate_review_and_candidate(
             manifest_item,
             run_path,
             candidate.target,
-            check_parent_device=refingerprint,
+            check_parent_identity=refingerprint,
         )
     else:
         if not isinstance(candidate.target, ForeignZoteroTarget) or candidate.target.parent_key != resolved_key:
@@ -2002,7 +2010,7 @@ def validate_local_prepare_result_artifacts(
         manifest_item,
         run_path,
         run.target,
-        check_parent_device=not allow_mutable_run,
+        check_parent_identity=not allow_mutable_run,
     )
     evidence_path, _evidence_raw, evidence = _read_envelope(
         result.evidence,

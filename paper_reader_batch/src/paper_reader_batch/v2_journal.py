@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any, Callable, Iterator
@@ -36,6 +37,7 @@ from paper_reader_batch.v2_json import (
     list_directory,
     locked_file,
     normalized_absolute_path,
+    open_directory_fd,
     publish_bytes_no_replace,
     promote_bytes_no_replace,
     read_bytes,
@@ -62,6 +64,7 @@ class PendingEvent:
 @dataclass(frozen=True)
 class RunView:
     run_dir: Path
+    run_dir_identity: tuple[int, int]
     manifest: BatchManifest
     manifest_raw: bytes
     manifest_sha256: str
@@ -425,6 +428,7 @@ def _validate_finished_event_result(
 def _validation_view(
     *,
     run_dir: Path,
+    run_dir_identity: tuple[int, int],
     manifest: BatchManifest,
     manifest_raw: bytes,
     manifest_sha256: str,
@@ -433,6 +437,7 @@ def _validation_view(
 ) -> RunView:
     return RunView(
         run_dir=run_dir,
+        run_dir_identity=run_dir_identity,
         manifest=manifest,
         manifest_raw=manifest_raw,
         manifest_sha256=manifest_sha256,
@@ -498,6 +503,7 @@ def _validate_write_event_result(
 
 def _replay_with_result_validation(
     run_dir: Path,
+    run_dir_identity: tuple[int, int],
     manifest: BatchManifest,
     manifest_raw: bytes,
     manifest_sha256: str,
@@ -511,6 +517,7 @@ def _replay_with_result_validation(
         _validate_finished_event_result(run_dir, manifest, event)
         prior = _validation_view(
             run_dir=run_dir,
+            run_dir_identity=run_dir_identity,
             manifest=manifest,
             manifest_raw=manifest_raw,
             manifest_sha256=manifest_sha256,
@@ -568,14 +575,14 @@ def _load_state_staging(run_dir: Path, state: BatchState) -> tuple[str | None, t
     return None, writing
 
 
-def load_run_view(
-    run_dir: Path,
+def _load_bound_run_view(
+    root: Path,
     *,
+    run_dir_identity: tuple[int, int],
     held_lease_secret: bytes | None = None,
     lock_descriptor: int | None = None,
     lock_ancestor_descriptors: tuple[int, ...] = (),
 ) -> RunView:
-    root = normalized_absolute_path(run_dir)
     manifest, manifest_raw, manifest_sha256 = load_manifest(
         root / "manifest.json",
         validate_sources=False,
@@ -584,6 +591,7 @@ def load_run_view(
     events, pending_event, incomplete_event_writes = _load_events(root, manifest_sha256)
     state = _replay_with_result_validation(
         root,
+        run_dir_identity,
         manifest,
         manifest_raw,
         manifest_sha256,
@@ -593,6 +601,7 @@ def load_run_view(
         _validate_finished_event_result(root, manifest, pending_event.event, full_external=True)
         prior = _validation_view(
             run_dir=root,
+            run_dir_identity=run_dir_identity,
             manifest=manifest,
             manifest_raw=manifest_raw,
             manifest_sha256=manifest_sha256,
@@ -619,6 +628,7 @@ def load_run_view(
         raise BatchRuntimeError("lease_secret_mismatch", "run lease secret does not match initialized journal")
     return RunView(
         run_dir=root,
+        run_dir_identity=run_dir_identity,
         manifest=manifest,
         manifest_raw=manifest_raw,
         manifest_sha256=manifest_sha256,
@@ -636,10 +646,49 @@ def load_run_view(
     )
 
 
+def load_run_view(
+    run_dir: Path,
+    *,
+    held_lease_secret: bytes | None = None,
+    lock_descriptor: int | None = None,
+    lock_ancestor_descriptors: tuple[int, ...] = (),
+) -> RunView:
+    root = normalized_absolute_path(run_dir)
+    with open_directory_fd(root, create=False) as (run_descriptor, bound_root):
+        metadata = os.fstat(run_descriptor)
+        return _load_bound_run_view(
+            bound_root,
+            run_dir_identity=(metadata.st_dev, metadata.st_ino),
+            held_lease_secret=held_lease_secret,
+            lock_descriptor=lock_descriptor,
+            lock_ancestor_descriptors=lock_ancestor_descriptors,
+        )
+
+
+def _require_transaction_preflight(
+    view: RunView,
+    *,
+    expected_manifest_sha256: str,
+    expected_run_dir_identity: tuple[int, int],
+) -> None:
+    if view.manifest_sha256 != expected_manifest_sha256:
+        raise BatchRuntimeError(
+            "manifest_drift",
+            "run manifest differs from the caller preflight inside the transaction lock",
+        )
+    if view.run_dir_identity != expected_run_dir_identity:
+        raise BatchRuntimeError(
+            "run_identity_drift",
+            "run directory identity differs from the caller preflight inside the transaction lock",
+        )
+
+
 @contextmanager
 def locked_run(
     run_dir: Path,
     *,
+    expected_manifest_sha256: str | None = None,
+    expected_run_dir_identity: tuple[int, int] | None = None,
     incoming_request_id: str | None = None,
     incoming_command: str | None = None,
     incoming_fingerprint: str | None = None,
@@ -670,6 +719,19 @@ def locked_run(
                 held_lease_secret=lease_secret,
                 lock_descriptor=descriptor,
                 lock_ancestor_descriptors=ancestor_descriptors,
+            )
+            _require_transaction_preflight(
+                current,
+                expected_manifest_sha256=(
+                    preflight.manifest_sha256
+                    if expected_manifest_sha256 is None
+                    else expected_manifest_sha256
+                ),
+                expected_run_dir_identity=(
+                    preflight.run_dir_identity
+                    if expected_run_dir_identity is None
+                    else expected_run_dir_identity
+                ),
             )
             if incoming_request_id is not None:
                 for event in current.events:
@@ -763,6 +825,8 @@ def locked_run(
 def append_transaction(
     run_dir: Path,
     *,
+    expected_manifest_sha256: str,
+    expected_run_dir_identity: tuple[int, int],
     request_id: str,
     command: str,
     request_fingerprint: str,
@@ -774,6 +838,8 @@ def append_transaction(
     canonical_request_id = validate_request_id(request_id)
     with locked_run(
         run_dir,
+        expected_manifest_sha256=expected_manifest_sha256,
+        expected_run_dir_identity=expected_run_dir_identity,
         incoming_request_id=canonical_request_id,
         incoming_command=command,
         incoming_fingerprint=request_fingerprint,

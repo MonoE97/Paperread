@@ -116,6 +116,7 @@ def _candidate_for_fallback(
             "target_type": "local",
             "resolved_path": str(tmp_path / "paper_note.md"),
             "parent_device": 1,
+            "parent_inode": 1,
         },
         "evidence_manifest": {**placeholder, "role": "evidence_manifest_snapshot"},
         "sealed_review": placeholder,

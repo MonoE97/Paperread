@@ -1,9 +1,11 @@
 import hashlib
 import json
 from pathlib import Path
+import shutil
 
 import pytest
 
+from paper_reader_batch import v2_journal, v2_worker
 from paper_reader_batch.v2_errors import BatchRuntimeError
 from paper_reader_batch.v2_json import canonical_json_bytes, canonical_sha256
 from paper_reader_batch.v2_manifest import create_pdf_paths_manifest
@@ -139,3 +141,48 @@ def test_orphan_content_addressed_result_is_ignored_by_replay(tmp_path: Path) ->
     status = run_status(run_dir)
     assert status["state"]["items"][0]["worker_status"] == "claimed"
     assert _snapshot(run_dir) == before
+
+
+@pytest.mark.parametrize(
+    ("same_manifest", "expected_code"),
+    [
+        (True, "run_identity_drift"),
+        (False, "manifest_drift"),
+    ],
+)
+def test_transaction_rejects_run_directory_swap_after_caller_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    same_manifest: bool,
+    expected_code: str,
+) -> None:
+    run_dir = _run(tmp_path, claimed=False)
+    if same_manifest:
+        replacement = tmp_path / "replacement-run"
+        shutil.copytree(run_dir, replacement)
+    else:
+        replacement_root = tmp_path / "replacement-source"
+        replacement_root.mkdir()
+        replacement = _run(replacement_root, claimed=False)
+    moved_original = tmp_path / "original-run-moved"
+    original_before = _snapshot(run_dir)
+    replacement_before = _snapshot(replacement)
+
+    def swap_before_lock(*args, **kwargs):
+        run_dir.rename(moved_original)
+        replacement.rename(run_dir)
+        return v2_journal.append_transaction(*args, **kwargs)
+
+    monkeypatch.setattr(v2_worker, "append_transaction", swap_before_lock)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        claim_worker(
+            run_dir,
+            worker_id="worker",
+            request_id="44444444-4444-4444-8444-444444444444",
+            now="2026-07-10T00:00:01Z",
+        )
+
+    assert exc_info.value.code == expected_code
+    assert _snapshot(moved_original) == original_before
+    assert _snapshot(run_dir) == replacement_before

@@ -19,6 +19,7 @@ from paper_reader_batch.v2_contracts import (
     EventCommandResultSnapshot,
     PdfManifestItem,
     RecoveredLease,
+    RecoveredUncertainWrite,
     ResumedLocalPrepareLease,
     RunInitializedData,
     RunRecoveredData,
@@ -26,6 +27,7 @@ from paper_reader_batch.v2_contracts import (
     STATE_SCHEMA_VERSION,
     WriteReconciledData,
     WriteLeaseMutationData,
+    WriteStartedData,
     WriteUncertainData,
 )
 from paper_reader_batch.v2_errors import BatchRuntimeError
@@ -509,12 +511,125 @@ def recover_run(
                 f"{_MAX_RECONCILIATION_TIMEOUT_SECONDS} seconds"
             ),
         )
+    normalized_paper_reader_root: Path | None = None
+    bound_paper_reader_root_identity = None
+    if paper_reader_root is not None:
+        from paper_reader_batch.v2_artifacts import paper_reader_root_identity
+
+        normalized_paper_reader_root = normalized_absolute_path(paper_reader_root)
+        bound_paper_reader_root_identity = paper_reader_root_identity(
+            normalized_paper_reader_root
+        )
+
+    def uncertain_reconciliation_write(view) -> RecoveredUncertainWrite | None:
+        uncertain = [item for item in view.state.items if item.write_status == "uncertain"]
+        if len(uncertain) > 1:
+            raise BatchRuntimeError(
+                "reconciliation_target_ambiguous",
+                "run recover cannot choose among multiple uncertain write attempts",
+            )
+        if not uncertain:
+            return None
+        item = uncertain[0]
+        required_state_identity = [
+            item.write_last_writer_id,
+            item.write_last_claim_id,
+            item.write_last_attempt_id,
+            item.write_last_lease_token_sha256,
+            item.candidate_sha256,
+            item.authorization_sha256,
+            item.authorization_nonce_sha256,
+            item.external_claim_id,
+            item.write_started_event_sha256,
+        ]
+        if not all(required_state_identity):
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "uncertain write lacks its complete durable attempt identity",
+            )
+        from paper_reader_batch.v2_write import (
+            _authorization_path_for_digest,
+            _load_authorization,
+        )
+
+        authorization_path = _authorization_path_for_digest(
+            view,
+            item_id=item.item_id,
+            authorization_sha256=item.authorization_sha256,
+        )
+        normalized_authorization_path, authorization_raw, authorization, _candidate = (
+            _load_authorization(
+                view,
+                item_id=item.item_id,
+                authorization_path=authorization_path,
+                claim_id=item.write_last_claim_id,
+                write_attempt_id=item.write_last_attempt_id,
+            )
+        )
+        if (
+            sha256_bytes(authorization_raw) != item.authorization_sha256
+            or sha256_bytes(authorization.nonce.encode())
+            != item.authorization_nonce_sha256
+            or authorization.external_claim_id != item.external_claim_id
+            or authorization.write_attempt_id != item.write_last_attempt_id
+        ):
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "uncertain write authorization closure differs from batch state",
+            )
+        return RecoveredUncertainWrite(
+            item_id=item.item_id,
+            writer_id=item.write_last_writer_id,
+            claim_id=item.write_last_claim_id,
+            write_attempt_id=item.write_last_attempt_id,
+            attempt_number=item.write_attempt_count,
+            lease_token_sha256=item.write_last_lease_token_sha256,
+            candidate_sha256=item.candidate_sha256,
+            authorization_id=authorization.authorization_id,
+            authorization_path=str(normalized_authorization_path),
+            authorization_sha256=item.authorization_sha256,
+            authorization_nonce_sha256=item.authorization_nonce_sha256,
+            external_claim_id=item.external_claim_id,
+            write_started_event_sha256=item.write_started_event_sha256,
+        )
+
     preflight = load_run_view(run_dir)
+    existing_recover_event = next(
+        (
+            event
+            for event in preflight.events
+            if event.request_id == canonical_request_id
+        ),
+        None,
+    )
+    if existing_recover_event is not None:
+        preflight_reconciliation_write = (
+            existing_recover_event.data.reconciliation_write
+            if isinstance(existing_recover_event.data, RunRecoveredData)
+            else None
+        )
+    else:
+        preflight_reconciliation_write = (
+            uncertain_reconciliation_write(preflight)
+            if bound_paper_reader_root_identity is not None
+            else None
+        )
     fingerprint = canonical_sha256(
         {
             "command": "run.recover",
             "run_dir": str(preflight.run_dir),
             "manifest_sha256": preflight.manifest_sha256,
+            "paper_reader_root": (
+                bound_paper_reader_root_identity.model_dump(mode="json")
+                if bound_paper_reader_root_identity is not None
+                else None
+            ),
+            "reconciliation_timeout_seconds": reconciliation_timeout_seconds,
+            "reconciliation_write": (
+                preflight_reconciliation_write.model_dump(mode="json")
+                if preflight_reconciliation_write is not None
+                else None
+            ),
             "now_override": now,
         }
     )
@@ -532,13 +647,18 @@ def recover_run(
         )
 
     def result_for(data: RunRecoveredData) -> dict[str, Any]:
-        return {
+        result = {
             "run_dir": str(preflight.run_dir),
             "expired_worker_items": [item.item_id for item in data.expired_worker_leases],
             "expired_local_prepare_items": [item.item_id for item in data.expired_local_prepare_leases],
             "resumed_local_prepare_items": [item.item_id for item in data.resumed_local_prepare_leases],
             "snapshot_repaired": data.snapshot_repaired,
         }
+        if data.reconciliation_write is not None:
+            result["reconciliation_write"] = data.reconciliation_write.model_dump(
+                mode="json"
+            )
+        return result
 
     def write_result_for(view, data: WriteLeaseMutationData | WriteUncertainData) -> dict[str, Any]:
         started = isinstance(data, WriteUncertainData)
@@ -553,13 +673,26 @@ def recover_run(
                 {
                     "item_id": data.item_id,
                     "authorization_sha256": data.authorization_sha256,
-                    "next_action": "rerun run recover with an explicit --paper-reader-root",
+                    "next_action": (
+                        "rerun run recover with an explicit --paper-reader-root "
+                        "and a new request id"
+                    ),
                 }
             ]
         return result
 
     def propose(view, transaction_time: str) -> ProposedTransition:
         current = parse_timestamp(transaction_time)
+        current_reconciliation_write = (
+            uncertain_reconciliation_write(view)
+            if bound_paper_reader_root_identity is not None
+            else None
+        )
+        if current_reconciliation_write != preflight_reconciliation_write:
+            raise BatchRuntimeError(
+                "recovery_target_drift",
+                "uncertain write target changed between recover preflight and transaction lock",
+            )
         expired_write_items = [
             item
             for item in view.state.items
@@ -650,8 +783,15 @@ def recover_run(
             expired_local_prepare_leases=local,
             resumed_local_prepare_leases=resumed_local,
             snapshot_repaired=view.snapshot_status != "current",
+            reconciliation_write=current_reconciliation_write,
         )
-        if not worker and not local and not resumed_local and not data.snapshot_repaired:
+        if (
+            not worker
+            and not local
+            and not resumed_local
+            and not data.snapshot_repaired
+            and current_reconciliation_write is None
+        ):
             raise BatchRuntimeError("nothing_to_recover", "run has no expired lease or stale snapshot")
         return ProposedTransition(data=data, result=result_for(data))
 
@@ -670,6 +810,8 @@ def recover_run(
 
     recovered_outcome = append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=canonical_request_id,
         command="run.recover",
         request_fingerprint=fingerprint,
@@ -679,15 +821,16 @@ def recover_run(
         fault=fault,
     )
     expired_started = recovered_outcome.result.get("expired_write_started_items", [])
-    if not expired_started or paper_reader_root is None:
+    if paper_reader_root is None:
         return recovered_outcome
-    if len(expired_started) != 1 or not isinstance(expired_started[0], str):
+    if expired_started and (
+        len(expired_started) != 1 or not isinstance(expired_started[0], str)
+    ):
         raise BatchRuntimeError(
             "journal_corrupt",
             "run recovery result does not identify exactly one expired started write",
         )
 
-    item_id = expired_started[0]
     reconciliation_request_id = str(
         uuid5(UUID(canonical_request_id), _RECONCILIATION_REQUEST_NAME)
     )
@@ -706,6 +849,126 @@ def recover_run(
         }
 
     current_view = load_run_view(run_dir)
+    outer_event = next(
+        (
+            event
+            for event in current_view.events
+            if event.request_id == canonical_request_id
+        ),
+        None,
+    )
+    if outer_event is None:
+        raise BatchRuntimeError(
+            "journal_corrupt",
+            "run recover request is missing its authoritative receipt event",
+        )
+
+    def identity_from_uncertain_event(event: BatchEvent) -> RecoveredUncertainWrite:
+        data = event.data
+        if not isinstance(data, WriteUncertainData) or data.kind != "write.lease_expired_uncertain":
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "run recovery event is not an expired uncertain write",
+            )
+        started_matches = [
+            candidate
+            for candidate in current_view.events
+            if candidate.sequence < event.sequence
+            and isinstance(candidate.data, WriteStartedData)
+            and candidate.data.item_id == data.item_id
+            and candidate.data.writer_id == data.writer_id
+            and candidate.data.claim_id == data.claim_id
+            and candidate.data.write_attempt_id == data.write_attempt_id
+            and candidate.data.attempt_number == data.attempt_number
+            and candidate.data.lease_token_sha256 == data.lease_token_sha256
+            and candidate.data.candidate_sha256 == data.candidate_sha256
+            and candidate.data.authorization_sha256 == data.authorization_sha256
+        ]
+        if len(started_matches) != 1:
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "expired uncertain write does not bind one write.started event",
+            )
+        started_event = started_matches[0]
+        started = started_event.data
+        assert isinstance(started, WriteStartedData)
+        from paper_reader_batch.v2_write import (
+            _authorization_path_for_digest,
+            _load_authorization,
+        )
+
+        authorization_path = _authorization_path_for_digest(
+            current_view,
+            item_id=data.item_id,
+            authorization_sha256=data.authorization_sha256,
+        )
+        normalized_authorization_path, authorization_raw, authorization, _candidate = (
+            _load_authorization(
+                current_view,
+                item_id=data.item_id,
+                authorization_path=authorization_path,
+                claim_id=data.claim_id,
+                write_attempt_id=data.write_attempt_id,
+            )
+        )
+        if (
+            sha256_bytes(authorization_raw) != data.authorization_sha256
+            or sha256_bytes(authorization.nonce.encode())
+            != started.authorization_nonce_sha256
+            or authorization.external_claim_id != started.external_claim_id
+        ):
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "expired uncertain write authorization closure changed",
+            )
+        return RecoveredUncertainWrite(
+            item_id=data.item_id,
+            writer_id=data.writer_id,
+            claim_id=data.claim_id,
+            write_attempt_id=data.write_attempt_id,
+            attempt_number=data.attempt_number,
+            lease_token_sha256=data.lease_token_sha256,
+            candidate_sha256=data.candidate_sha256,
+            authorization_id=authorization.authorization_id,
+            authorization_path=str(normalized_authorization_path),
+            authorization_sha256=data.authorization_sha256,
+            authorization_nonce_sha256=started.authorization_nonce_sha256,
+            external_claim_id=started.external_claim_id,
+            write_started_event_sha256=started_event.event_sha256,
+        )
+
+    if isinstance(outer_event.data, RunRecoveredData):
+        reconciliation_write = outer_event.data.reconciliation_write
+    elif (
+        isinstance(outer_event.data, WriteUncertainData)
+        and outer_event.data.kind == "write.lease_expired_uncertain"
+    ):
+        reconciliation_write = identity_from_uncertain_event(outer_event)
+    else:
+        reconciliation_write = None
+    if expired_started and (
+        reconciliation_write is None
+        or reconciliation_write.item_id != expired_started[0]
+    ):
+        raise BatchRuntimeError(
+            "journal_corrupt",
+            "run recovery result differs from its uncertain write event",
+        )
+
+    def reconciliation_matches_target(data: WriteReconciledData) -> bool:
+        target = reconciliation_write
+        return bool(
+            target is not None
+            and data.item_id == target.item_id
+            and data.writer_id == target.writer_id
+            and data.claim_id == target.claim_id
+            and data.write_attempt_id == target.write_attempt_id
+            and data.attempt_number == target.attempt_number
+            and data.lease_token_sha256 == target.lease_token_sha256
+            and data.candidate_sha256 == target.candidate_sha256
+            and data.authorization_sha256 == target.authorization_sha256
+        )
+
     existing_reconciliation = next(
         (
             event
@@ -720,34 +983,41 @@ def recover_run(
                 "journal_corrupt",
                 "derived reconciliation request id points to another event type",
             )
-        summary = reconciliation_summary(existing_reconciliation.data)
-    else:
-        state_item = next(
-            (item for item in current_view.state.items if item.item_id == item_id),
-            None,
-        )
-        if (
-            state_item is None
-            or state_item.write_status != "uncertain"
-            or state_item.authorization_sha256 is None
-        ):
+        if not reconciliation_matches_target(existing_reconciliation.data):
             raise BatchRuntimeError(
                 "journal_corrupt",
-                "expired started write is no longer the exact uncertain attempt",
+                "derived reconciliation event differs from the recovered write attempt",
             )
+        summary = reconciliation_summary(existing_reconciliation.data)
+    else:
+        if reconciliation_write is None:
+            return recovered_outcome
+        current_reconciliation_write = uncertain_reconciliation_write(current_view)
+        if current_reconciliation_write != reconciliation_write:
+            raise BatchRuntimeError(
+                "recovery_target_drift",
+                "receipt-bound uncertain write is no longer the exact current attempt",
+            )
+        item_id = reconciliation_write.item_id
         from paper_reader_batch.v2_artifacts import paper_reader_root_identity
-        from paper_reader_batch.v2_write import (
-            _authorization_path_for_digest,
-            reconcile_write,
-        )
+        from paper_reader_batch.v2_write import reconcile_write
 
-        root = normalized_absolute_path(paper_reader_root)
-        root_identity = paper_reader_root_identity(root)
-        authorization_path = _authorization_path_for_digest(
-            current_view,
-            item_id=item_id,
-            authorization_sha256=state_item.authorization_sha256,
-        )
+        if (
+            normalized_paper_reader_root is None
+            or bound_paper_reader_root_identity is None
+        ):  # pragma: no cover - guarded by the paper_reader_root branch above
+            raise BatchRuntimeError(
+                "paper_reader_root_invalid",
+                "paper_reader root identity is unavailable for reconciliation",
+            )
+        root = normalized_paper_reader_root
+        root_identity = bound_paper_reader_root_identity
+        if paper_reader_root_identity(root) != root_identity:
+            raise BatchRuntimeError(
+                "paper_reader_root_drift",
+                "paper_reader root changed before read-only reconciliation",
+            )
+        authorization_path = Path(reconciliation_write.authorization_path)
         argv = (
             "uv",
             "run",
@@ -772,7 +1042,7 @@ def recover_run(
             )
         envelope = _parse_reconciliation_child_result(
             completed,
-            authorization_sha256=state_item.authorization_sha256,
+            authorization_sha256=reconciliation_write.authorization_sha256,
         )
         if paper_reader_root_identity(root) != root_identity:
             raise BatchRuntimeError(
@@ -784,7 +1054,7 @@ def recover_run(
             item_id,
             readback_path=Path(envelope.data.reconciliation_path),
             request_id=reconciliation_request_id,
-            now=envelope.created_at,
+            now=now,
             fault=fault,
         )
         if reconciled.result.get("outcome") != envelope.data.outcome:

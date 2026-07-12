@@ -801,6 +801,8 @@ def claim_local_prepare(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=request_id,
         command="local-prepare.claim",
         request_fingerprint=fingerprint,
@@ -925,10 +927,22 @@ def _validate_initialized_child(
         "device": source.file_identity.device,
         "inode": source.file_identity.inode,
     }
+    try:
+        with open_directory_fd(source_path.parent, create=False) as (
+            parent_descriptor,
+            _bound_parent,
+        ):
+            parent_metadata = os.fstat(parent_descriptor)
+    except (BatchRuntimeError, OSError) as exc:
+        raise _ChildProtocolError(
+            "child_artifact_mismatch",
+            "init-local source parent identity is unavailable or changed",
+        ) from exc
     expected_target = {
         "target_type": "local",
         "resolved_path": str(target_path),
-        "parent_device": source_path.parent.stat().st_dev,
+        "parent_device": parent_metadata.st_dev,
+        "parent_inode": parent_metadata.st_ino,
     }
     if (
         run.get("schema_version") != "paper_reader.run.v2"
@@ -1292,6 +1306,8 @@ def renew_local_prepare(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=request_id,
         command="local-prepare.renew",
         request_fingerprint=fingerprint,
@@ -1492,6 +1508,8 @@ def release_local_prepare(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=request_id,
         command="local-prepare.release",
         request_fingerprint=fingerprint,
@@ -1612,6 +1630,8 @@ def finish_local_prepare(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=request_id,
         command="local-prepare.finish",
         request_fingerprint=fingerprint,
@@ -1764,6 +1784,8 @@ def _reserve_coordination_in_journal(
 
     return append_transaction(
         run_dir,
+        expected_manifest_sha256=preflight.manifest_sha256,
+        expected_run_dir_identity=preflight.run_dir_identity,
         request_id=internal_request_id,
         command="local-prepare.run.reserve",
         request_fingerprint=fingerprint,

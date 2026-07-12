@@ -17,6 +17,7 @@ from paper_reader_batch.v2_contracts import (
     LOCAL_PREPARE_COORDINATION_UUID_NAME,
     LocalPrepareCoordinationReservedData,
     PdfManifestItem,
+    RecoveredUncertainWrite,
     RetriedData,
     RunInitializedData,
     RunRecoveredData,
@@ -796,6 +797,25 @@ def apply_event(state: BatchState, manifest: BatchManifest, event: BatchEvent) -
         return _with_items(state, items, event)
     if isinstance(data, RunRecoveredData):
         items = list(state.items)
+        reconciliation_write: RecoveredUncertainWrite | None = data.reconciliation_write
+        if reconciliation_write is not None:
+            index = _state_item_index(state, reconciliation_write.item_id)
+            item = items[index]
+            if (
+                item.write_status != "uncertain"
+                or item.write_lease is not None
+                or not _same_last_write_identity(item, reconciliation_write)
+                or item.authorization_sha256 != reconciliation_write.authorization_sha256
+                or item.authorization_nonce_sha256
+                != reconciliation_write.authorization_nonce_sha256
+                or item.external_claim_id != reconciliation_write.external_claim_id
+                or item.write_started_event_sha256
+                != reconciliation_write.write_started_event_sha256
+            ):
+                raise _corrupt(
+                    f"recover reconciliation receipt differs from uncertain write: "
+                    f"{reconciliation_write.item_id}"
+                )
         seen: set[tuple[str, str]] = set()
         for recovered in [
             *data.expired_worker_leases,
