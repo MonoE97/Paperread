@@ -14,7 +14,7 @@
 - `paper_reader_batch` 的活动 schema 只能是 `paper_reader_batch.manifest.v2`、`paper_reader_batch.state.v2`、`paper_reader_batch.event.v2`、`paper_reader_batch.worker-result.v2`、`paper_reader_batch.local-prepare-result.v2`、`paper_reader_batch.write-result.v2`、`paper_reader_batch.reconciliation.v2`、`paper_reader_batch.report.v2` 和 `paper_reader_batch.command-result.v2`。
 - 所有 V2 模型使用 Pydantic v2 strict mode 与 `extra=forbid`；不接受未知字段、隐式类型转换或模糊 schema。
 - V1/unversioned artifacts are historical-only。它们只能作为不可变历史证据存在；V2 loader 必须在加锁、写文件、分配输出、网络调用或任何其他 mutation 之前以结构化错误码 `unsupported_run_schema` 拒绝 V1、无版本和未知版本。
-- There are no aliases, migration loaders, dual readers, schema guessing, compatibility shims or hidden V1 fallbacks。旧 flat commands 在 V2 public CLI 中不可达；物理删除其源码、测试或 reference 仍需 second explicit deletion authorization。
+- There are no aliases, migration loaders, dual readers, schema guessing, compatibility shims or hidden V1 fallbacks。V1 runtime surface has been removed；active source tree 只保留 V2 runtime，以及用于证明历史 schema 被只读拒绝的测试。
 - 所有 operational commands 的 stdout 必须恰好是一份对应的 `*.command-result.v2` JSON；诊断写 stderr。`--help` 和 `--version` 可保持 human-oriented。
 
 ### Grouped CLI
@@ -117,7 +117,7 @@ Do not add `README.md`, `INSTALLATION_GUIDE.md`, `QUICK_REFERENCE.md`, or `CHANG
 
 - Use `paper_reader`: 单篇论文阅读。先执行 path-first route，再通过 V2 grouped CLI 完成 run、review、candidate 与 local/Zotero 生命周期。单篇 skill 独占 extraction、summary/review schema、render、candidate、authorization、verification 和 reconciliation 规则。
 - Use `paper_reader_batch`: 多篇论文调度。Batch skill 独占 manifest、journal、lease、claim/recover/report 与 serial write lane；每篇深度阅读仍派发给 `$paper_reader`。PDF folder/path items 保持 local-output only 且不做 Zotero lookup / duplicate check。
-- 本文列出的 grouped CLI 是 2.0 public runtime。`--help`、`--version` 与 schema export 必须持续匹配它；仍暂存于源码树中的 V1 文件不构成可调用兼容入口。
+- 本文列出的 grouped CLI 是 2.0 public runtime。`--help`、`--version` 与 schema export 必须持续匹配它；不得重新引入 V1 flat module、命令注册或兼容入口。
 
 ## Git 与发布
 
@@ -125,8 +125,8 @@ Do not add `README.md`, `INSTALLATION_GUIDE.md`, `QUICK_REFERENCE.md`, or `CHANG
 - 功能开发在 feature branch 或 worktree 中进行。
 - 可以创建本地 commit。
 - 禁止在未获用户明确确认前执行 `git push`、创建 GitHub remote、公开发布或部署。
-- 删除文件、目录或 git history 命中用户 redline。V2 替代实现完成后也必须停止，等待 second explicit deletion authorization，才可物理删除 V1 source files、tests、references 或任何其他 tracked 文件；实现授权和删除授权是两次独立批准。
-- Historical run/output artifacts 永远视为用户数据，不因第二次删除授权自动进入删除范围。
+- 删除文件、目录或 git history 命中用户 redline，未来任何删除仍需新的明确授权。本次 2.0 迁移的 V1 source/test 删除已取得并执行独立授权。
+- Historical run/output artifacts 永远视为用户数据；本次 V1 runtime 删除未触碰、移动、迁移或重新索引任何历史产物。
 - `.DS_Store`、虚拟环境、缓存、本地预览文件、PDF 分析目录、生成笔记和本地 `docs/` scratch 必须被 `.gitignore` 忽略。
 - `docs/` 不是发布内容；不要重新引入 tracked `docs/` 规划文档或根文档 validator，除非用户明确要求恢复公开文档树。
 - 2.0 安装文档采用 clean install：复制两个独立 skill source 到全新目标目录，禁止覆盖旧安装。旧安装目录可只读保留，但不得被 V2 自动发现、迁移或索引。
@@ -166,7 +166,7 @@ uv run paper_reader_batch --help
 uv run python scripts/validate-skill.py .
 ```
 
-只改合同文档时，至少运行受影响的 `tests/test_default_workflow_docs.py` 与两套 portable validator；若同一 task 改动运行时，再扩展到各自 full pytest、grouped help/version 与最小 PDF smoke。Legacy flat command 是否仍暂时存在不能作为 GREEN 证据。
+只改合同文档时，至少运行受影响的 `tests/test_default_workflow_docs.py` 与两套 portable validator；若同一 task 改动运行时，再扩展到各自 full pytest、grouped help/version 与最小 PDF smoke。发布扫描必须证明 active source 不含 V1 flat runtime surface。
 
 涉及根 README、中文 README、AGENTS 或安装说明时，必须运行与修改范围对应的 skill-root 验证命令；仓库根目录不维护单独的根文档 validator。
 
