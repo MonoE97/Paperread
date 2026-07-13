@@ -55,12 +55,22 @@ def _preallocation_resource_check(exc: Exception) -> EvidenceResourceCheck | Non
             message="figure candidate count exceeds the V2 cap",
         )
     if isinstance(exc, FigurePixelLimitError):
+        resource_name = (
+            "figure_pixels_total"
+            if getattr(exc, "resource_name", "") == "figure_pixels_total"
+            else "figure_pixels_each"
+        )
+        message = (
+            "selected figure images exceed the V2 aggregate pixel cap"
+            if resource_name == "figure_pixels_total"
+            else "one or more figure images exceed the V2 per-image pixel cap"
+        )
         return EvidenceResourceCheck(
-            name="figure_pixels_each",
+            name=resource_name,
             status="degraded",
             actual=exc.actual,
             limit=exc.limit,
-            message="one or more figure images exceed the V2 per-image pixel cap",
+            message=message,
         )
     return None
 

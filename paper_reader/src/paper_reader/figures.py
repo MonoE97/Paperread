@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
@@ -151,10 +152,18 @@ class FigureCandidateLimitError(ValueError):
 
 
 class FigurePixelLimitError(ValueError):
-    def __init__(self, *, actual: int, limit: int) -> None:
-        super().__init__(f"figure pixels {actual} exceeds {limit}")
+    def __init__(
+        self,
+        *,
+        actual: int,
+        limit: int,
+        resource_name: str = "figure_pixels_each",
+    ) -> None:
+        label = "figure pixels total" if resource_name == "figure_pixels_total" else "figure pixels"
+        super().__init__(f"{label} {actual} exceeds {limit}")
         self.actual = actual
         self.limit = limit
+        self.resource_name = resource_name
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +255,16 @@ def extract_figures(
             warnings,
             max_candidates=source_candidate_limit,
             candidate_offset=pdf_candidate_count,
+            pre_render_pixel_gate=lambda metadata_candidates: _extract_pdf_candidates(
+                pdf_path=resolved,
+                output_root=output_root,
+                max_pages=max_pages,
+                max_candidates=max_candidates,
+                existing_candidates=len(metadata_candidates),
+                competing_candidates=metadata_candidates,
+                top_k=top_k,
+                materialize=False,
+            ),
         )
     else:
         source_attempts.append(
@@ -468,6 +487,7 @@ def _collect_source_candidates(
     *,
     max_candidates: int | None,
     candidate_offset: int,
+    pre_render_pixel_gate: Callable[[list[FigureExtraction]], object] | None = None,
 ) -> list[FigureExtraction]:
     if arxiv_id is None:
         source_attempts.append(
@@ -548,6 +568,10 @@ def _collect_source_candidates(
             limit=candidate_offset + max_candidates,
         )
 
+    source_metadata_candidates = _source_entries_to_candidates(source_figures)
+    if pre_render_pixel_gate is not None:
+        pre_render_pixel_gate(source_metadata_candidates)
+
     try:
         rendered_pdf_figures = arxiv_source.render_source_figure_pdfs(
             source_figures,
@@ -570,7 +594,7 @@ def _collect_source_candidates(
     )
 
     candidates = [
-        *_source_entries_to_candidates(source_figures),
+        *source_metadata_candidates,
         *_source_entries_to_candidates(rendered_pdf_figures),
     ]
     return _dedupe_source_candidates(candidates)
@@ -746,6 +770,8 @@ def _extract_pdf_candidates(
     existing_candidates: int = 0,
     competing_candidates: list[FigureExtraction] | None = None,
     top_k: int | None = None,
+    *,
+    materialize: bool = True,
 ) -> FigureCandidateSelection:
     with fitz.open(pdf_path) as doc:
         pending = _discover_pdf_candidates(
@@ -783,19 +809,33 @@ def _extract_pdf_candidates(
         ranked = sorted(deduped.values(), key=lambda entry: _ranking_key(entry[0]))
         selected_count = len(ranked) if top_k is None else max(top_k, 0)
         selected_entries = ranked[:selected_count]
-        for _metadata, pending_item, _existing_item in selected_entries:
+        selected_pixels = 0
+        for _metadata, pending_item, existing_item in selected_entries:
             if pending_item is not None:
-                _enforce_pixel_limit(
+                selected_pixels += _enforce_pixel_limit(
                     pending_item["bbox"].width,
                     pending_item["bbox"].height,
                     dpi=144,
                 )
+                continue
+            assert existing_item is not None
+            width, height = _image_dimensions(Path(existing_item["image_path"]))
+            selected_pixels += _enforce_pixel_limit(width, height)
+        if selected_pixels > V2_RESOURCE_POLICY.figure_max_pixels_total:
+            raise FigurePixelLimitError(
+                actual=selected_pixels,
+                limit=V2_RESOURCE_POLICY.figure_max_pixels_total,
+                resource_name="figure_pixels_total",
+            )
         selected: list[FigureExtraction] = []
-        for _metadata, pending_item, existing_item in selected_entries:
+        for metadata, pending_item, existing_item in selected_entries:
             if existing_item is not None:
                 selected.append(existing_item)
                 continue
             assert pending_item is not None
+            if not materialize:
+                selected.append(metadata)
+                continue
             selected.append(
                 _rasterize_figure(
                     page=pending_item["page"],

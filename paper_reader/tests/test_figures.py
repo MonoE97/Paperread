@@ -1920,6 +1920,262 @@ def test_raster_candidate_pixel_cap_is_checked_before_pixmap_allocation(
         )
 
 
+def test_selected_pdf_pixel_total_is_checked_before_any_rasterization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.figures as figures
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"placeholder")
+    page = type("FakePage", (), {"rect": fitz.Rect(0, 0, 3_000, 15_000)})()
+
+    class FakeDocument:
+        page_count = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def load_page(self, index: int):
+            assert index == 0
+            return page
+
+    captions = [
+        {
+            "caption": f"Figure {index + 1}. Aggregate limit candidate.",
+            "rect": fitz.Rect(0, index * 2_100, 100, (index * 2_100) + 20),
+        }
+        for index in range(6)
+    ]
+    monkeypatch.setattr(figures.fitz, "open", lambda _path: FakeDocument())
+    monkeypatch.setattr(figures, "_detect_captions", lambda _page: captions)
+    monkeypatch.setattr(figures, "_detect_graphic_regions", lambda _page: [])
+    monkeypatch.setattr(figures, "_detect_embedded_image_regions", lambda _page: [])
+    monkeypatch.setattr(
+        figures,
+        "_select_owned_bbox",
+        lambda _regions, _captions, index, _page_rect: fitz.Rect(
+            0,
+            index * 2_100,
+            2_000,
+            (index * 2_100) + 2_000,
+        ),
+    )
+
+    def forbidden_raster(*_args: object, **_kwargs: object):
+        pytest.fail("aggregate pixel cap was checked only after rasterization")
+
+    monkeypatch.setattr(figures, "_rasterize_figure", forbidden_raster)
+
+    with pytest.raises(
+        ValueError,
+        match=r"figure pixels total 96000000 exceeds 80000000",
+    ):
+        figures._extract_pdf_candidates(
+            pdf_path,
+            tmp_path / "figures",
+            max_pages=None,
+            max_candidates=200,
+            top_k=6,
+        )
+
+    assert not list((tmp_path / "figures").glob("*.png"))
+
+
+def test_selected_source_pixels_are_included_before_any_rasterization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.figures as figures
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"placeholder")
+    source_path = tmp_path / "source.png"
+    source_path.write_bytes(b"placeholder")
+    page = type("FakePage", (), {"rect": fitz.Rect(0, 0, 3_000, 12_000)})()
+
+    class FakeDocument:
+        page_count = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def load_page(self, index: int):
+            assert index == 0
+            return page
+
+    captions = [
+        {
+            "caption": f"Figure {index + 1}. Pending candidate.",
+            "rect": fitz.Rect(0, index * 2_100, 100, (index * 2_100) + 20),
+        }
+        for index in range(5)
+    ]
+    source_candidate = {
+        "figure_id": "source-1-source",
+        "caption": "Source aggregate candidate",
+        "caption_confidence": 0.2,
+        "caption_bbox": [0.0, 0.0, 1.0, 1.0],
+        "bbox": [0.0, 0.0, 1.0, 1.0],
+        "page": 1,
+        "area": 1.0,
+        "image_path": str(source_path),
+        "priority_score": 1.0,
+        "source": "arxiv-source",
+        "extraction_strategy": "deterministic",
+        "extraction_confidence": 0.98,
+        "fallback_reason": None,
+        "needs_fallback": False,
+    }
+
+    monkeypatch.setattr(figures.fitz, "open", lambda _path: FakeDocument())
+    monkeypatch.setattr(figures, "_detect_captions", lambda _page: captions)
+    monkeypatch.setattr(figures, "_detect_graphic_regions", lambda _page: [])
+    monkeypatch.setattr(figures, "_detect_embedded_image_regions", lambda _page: [])
+    monkeypatch.setattr(
+        figures,
+        "_select_owned_bbox",
+        lambda _regions, _captions, index, _page_rect: fitz.Rect(
+            0,
+            index * 2_100,
+            2_000,
+            (index * 2_100) + 2_000,
+        ),
+    )
+    metadata_reads: list[Path] = []
+
+    def source_dimensions(path: Path) -> tuple[float, float]:
+        metadata_reads.append(path)
+        return (1.0, 1.0)
+
+    monkeypatch.setattr(figures, "_image_dimensions", source_dimensions)
+
+    def forbidden_raster(*_args: object, **_kwargs: object):
+        pytest.fail("source pixels were counted only after rasterization")
+
+    monkeypatch.setattr(figures, "_rasterize_figure", forbidden_raster)
+
+    with pytest.raises(
+        ValueError,
+        match=r"figure pixels total 80000001 exceeds 80000000",
+    ):
+        figures._extract_pdf_candidates(
+            pdf_path,
+            tmp_path / "figures",
+            max_pages=None,
+            max_candidates=200,
+            competing_candidates=[source_candidate],
+            existing_candidates=1,
+            top_k=6,
+        )
+
+    assert metadata_reads == [source_path]
+
+
+def test_selected_source_pdf_is_not_rendered_before_aggregate_pixel_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.figures as figures
+
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"placeholder")
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source_pdf = source_root / "source.pdf"
+    source_pdf.write_bytes(b"placeholder")
+    paper_page = type("FakePaperPage", (), {"rect": fitz.Rect(0, 0, 3_000, 12_000)})()
+    source_page = type("FakeSourcePage", (), {"rect": fitz.Rect(0, 0, 1, 1)})()
+
+    class FakeDocument:
+        page_count = 1
+
+        def __init__(self, page) -> None:
+            self.page = page
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def load_page(self, index: int):
+            assert index == 0
+            return self.page
+
+    captions = [
+        {
+            "caption": f"Figure {index + 1}. Pending candidate.",
+            "rect": fitz.Rect(0, index * 2_100, 100, (index * 2_100) + 20),
+        }
+        for index in range(5)
+    ]
+
+    def fake_open(path):
+        return FakeDocument(source_page if Path(path) == source_pdf else paper_page)
+
+    monkeypatch.setattr(figures.fitz, "open", fake_open)
+    monkeypatch.setattr(figures, "_detect_captions", lambda _page: captions)
+    monkeypatch.setattr(figures, "_detect_graphic_regions", lambda _page: [])
+    monkeypatch.setattr(figures, "_detect_embedded_image_regions", lambda _page: [])
+    monkeypatch.setattr(
+        figures,
+        "_select_owned_bbox",
+        lambda _regions, _captions, index, _page_rect: fitz.Rect(
+            0,
+            index * 2_100,
+            2_000,
+            (index * 2_100) + 2_000,
+        ),
+    )
+    monkeypatch.setattr(
+        "paper_reader.figures.arxiv_source.resolve_arxiv_id",
+        lambda details, pdf_path=None: "2501.00001",
+    )
+    monkeypatch.setattr(
+        "paper_reader.figures.arxiv_source.download_arxiv_source",
+        lambda arxiv_id, workdir: source_root,
+    )
+    monkeypatch.setattr(
+        "paper_reader.figures.arxiv_source.collect_source_figures",
+        lambda source_root, output_dir, **_kwargs: [
+            {
+                "rel_path": "source.pdf",
+                "media_type": "pdf",
+                "image_path": str(source_pdf),
+                "source_path": str(source_pdf),
+                "source": "arxiv-source",
+            }
+        ],
+    )
+
+    def forbidden_source_render(*_args: object, **_kwargs: object):
+        pytest.fail("source PDF was rendered before the aggregate pixel gate")
+
+    monkeypatch.setattr(
+        "paper_reader.figures.arxiv_source.render_source_figure_pdfs",
+        forbidden_source_render,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"figure pixels total 80000001 exceeds 80000000",
+    ):
+        extract_figures(
+            pdf_path,
+            tmp_path / "figures",
+            item_details={"url": "https://arxiv.org/abs/2501.00001"},
+            max_candidates=200,
+            top_k=6,
+        )
+
+
 def test_pdf_geometry_ranking_rasterizes_only_selected_top_k(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

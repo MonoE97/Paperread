@@ -305,6 +305,7 @@ def test_prepare_degrades_complete_evidence_when_figure_candidate_cap_is_exceede
     [
         ("candidates", "figure_candidate_count", 1_002, 200),
         ("pixels", "figure_pixels_each", 25_000_000, 20_000_000),
+        ("total_pixels", "figure_pixels_total", 96_000_000, 80_000_000),
     ],
 )
 def test_preallocation_resource_limit_degrades_only_complete_pdf_evidence(
@@ -320,7 +321,13 @@ def test_preallocation_resource_limit_degrades_only_complete_pdf_evidence(
     def preallocation_failure(*_args, **_kwargs):
         if case == "candidates":
             raise FigureCandidateLimitError(actual=1_002, limit=200)
-        raise FigurePixelLimitError(actual=25_000_000, limit=20_000_000)
+        if case == "pixels":
+            raise FigurePixelLimitError(actual=25_000_000, limit=20_000_000)
+        raise FigurePixelLimitError(
+            actual=96_000_000,
+            limit=80_000_000,
+            resource_name="figure_pixels_total",
+        )
 
     monkeypatch.setattr("paper_reader.evidence_figures.extract_figures", preallocation_failure)
 
