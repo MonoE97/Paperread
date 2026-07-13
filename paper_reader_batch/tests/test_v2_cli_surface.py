@@ -8,6 +8,7 @@ from paper_reader_batch.v2_cli import app
 from paper_reader_batch.v2_contracts import COMMAND_RESULT_SCHEMA_VERSION
 from paper_reader_batch.v2_errors import BatchRuntimeError
 from paper_reader_batch.v2_json import canonical_json_bytes
+from paper_reader_batch.v2_local_prepare import MAX_CHILD_TIMEOUT_SECONDS
 from paper_reader_batch.v2_receipts import RequestOutcome
 
 
@@ -458,6 +459,47 @@ def test_local_prepare_run_cli_binds_exact_identity_root_and_timeout(tmp_path: P
         "request_id": "33333333-3333-4333-8333-333333333333",
         "timeout_seconds": 321,
     }
+
+
+def test_local_prepare_run_cli_rejects_timeout_above_maximum_lease_budget(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    called = False
+
+    def must_not_run(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("runtime callback received an impossible timeout")
+
+    monkeypatch.setattr("paper_reader_batch.v2_cli.run_local_prepare", must_not_run)
+    payload = _invoke_json(
+        [
+            "local-prepare",
+            "run",
+            str(tmp_path / "batch-run"),
+            "001",
+            "--worker-id",
+            "preparer",
+            "--claim-id",
+            "11111111-1111-4111-8111-111111111111",
+            "--lease-token",
+            "opaque-lease-token",
+            "--attempt-id",
+            "22222222-2222-4222-8222-222222222222",
+            "--paper-reader-root",
+            str(tmp_path / "paper-reader"),
+            "--request-id",
+            "33333333-3333-4333-8333-333333333333",
+            "--timeout-seconds",
+            str(MAX_CHILD_TIMEOUT_SECONDS + 1),
+        ],
+        expected_command="local-prepare.run",
+        ok=False,
+    )
+
+    assert payload["error"]["code"] == "invalid_cli_usage"
+    assert called is False
 
 
 def test_all_cli_parse_failures_use_one_command_result_envelope() -> None:

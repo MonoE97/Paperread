@@ -28,6 +28,7 @@ from paper_reader_batch.v2_contracts import (
     StateItem,
     WorkerResult,
     WriteResult,
+    local_prepare_result_canonical_payload,
 )
 from paper_reader_batch.v2_errors import BatchRuntimeError
 from paper_reader_batch.v2_json import (
@@ -321,7 +322,12 @@ def _load_result(
         result = model_type.model_validate(payload)
     except ValidationError as exc:
         raise BatchRuntimeError("journal_corrupt", f"{lane} result fails strict validation") from exc
-    if raw != canonical_json_bytes(result):
+    canonical_result = (
+        local_prepare_result_canonical_payload(result)
+        if isinstance(result, LocalPrepareResult)
+        else result
+    )
+    if raw != canonical_json_bytes(canonical_result):
         raise BatchRuntimeError("journal_corrupt", f"{lane} result is not canonical JSON")
     return result
 

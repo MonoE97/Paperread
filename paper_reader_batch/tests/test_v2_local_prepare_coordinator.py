@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import fcntl
 import json
 import multiprocessing
 import os
 from pathlib import Path
 import shutil
+import signal
+import subprocess
+import sys
+import threading
 import time
 
 import pytest
@@ -14,9 +19,12 @@ from paper_reader_batch.v2_errors import BatchRuntimeError
 from paper_reader_batch.v2_journal import load_run_view
 from paper_reader_batch.v2_json import canonical_json_bytes, canonical_sha256
 from paper_reader_batch.v2_local_prepare import (
+    MAX_CHILD_TIMEOUT_SECONDS,
     _ChildCommandResult,
+    _ChildInvocation,
     _ChildProtocolError,
     _default_child_runner,
+    _parse_child_envelope,
     _validate_initialized_child,
     claim_local_prepare,
     local_prepare_attempt_has_execution_side_effects,
@@ -496,6 +504,96 @@ def test_insufficient_remaining_lease_time_rejects_before_any_child_or_coordinat
     ).exists()
 
 
+def test_timeout_above_maximum_lease_budget_is_rejected_before_run_access(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        run_local_prepare(
+            run_dir=tmp_path / "missing-run",
+            item_id="001",
+            worker_id="preparer",
+            claim_id="11111111-1111-4111-8111-111111111111",
+            lease_token="opaque-lease-token",
+            attempt_id="22222222-2222-4222-8222-222222222222",
+            paper_reader_root=tmp_path / "missing-paper-reader",
+            request_id="33333333-3333-4333-8333-333333333333",
+            timeout_seconds=MAX_CHILD_TIMEOUT_SECONDS + 1,
+        )
+
+    assert exc_info.value.code == "invalid_timeout"
+    assert str(MAX_CHILD_TIMEOUT_SECONDS) in exc_info.value.message
+
+
+def test_maximum_timeout_retains_sixty_seconds_for_claim_to_run_coordination(
+    tmp_path: Path,
+) -> None:
+    run_dir, source, original = _batch_run(tmp_path)
+    release_local_prepare(
+        run_dir,
+        original["item_id"],
+        worker_id=original["worker_id"],
+        claim_id=original["claim_id"],
+        lease_token=original["lease_token"],
+        attempt_id=original["attempt_id"],
+        acknowledge_no_side_effects=True,
+        request_id="abababab-abab-4bab-8bab-abababababab",
+        now="2026-07-11T00:00:02Z",
+    )
+    assignment = claim_local_prepare(
+        run_dir,
+        worker_id="max-lease",
+        request_id="bcbcbcbc-bcbc-4cbc-8cbc-bcbcbcbcbcbc",
+        lease_seconds=3600,
+        now="2026-07-11T00:00:03Z",
+    ).result["assignments"][0]
+    root = _fake_paper_reader_root(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    def failing_init_runner(argv, _cwd, _timeout_seconds, invocation) -> int:
+        calls.append(argv)
+        invocation.mark_started()
+        invocation.write_stdout(
+            canonical_json_bytes(
+                {
+                    "schema_version": "paper_reader.command-result.v2",
+                    "command": "run init-local",
+                    "ok": False,
+                    "code": "fixture_failure",
+                    "created_at": "2026-07-11T00:01:03Z",
+                    "message": "stop after proving the child launch boundary",
+                    "data": {"source_pdf": str(source)},
+                }
+            )
+            + b"\n"
+        )
+        return 1
+
+    request_id = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd"
+    outcome = run_local_prepare(
+        **{
+            **_run_kwargs(run_dir, assignment, request_id),
+            "paper_reader_root": root,
+            "now": "2026-07-11T00:01:03Z",
+        },
+        timeout_seconds=MAX_CHILD_TIMEOUT_SECONDS,
+        runner=failing_init_runner,
+    )
+
+    assert outcome.result["status"] == "failed"
+    assert len(calls) == 1
+    record = json.loads(
+        (
+            run_dir
+            / "results"
+            / "local-prepare"
+            / ".coordination"
+            / request_id
+            / "record.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert record["timeout_seconds"] == MAX_CHILD_TIMEOUT_SECONDS
+
+
 def test_claim_rejects_source_drift_before_journal_or_state_mutation(tmp_path: Path) -> None:
     run_dir, source, assignment = _batch_run(tmp_path)
     release_local_prepare(
@@ -764,6 +862,466 @@ def test_gated_executor_runs_exact_argv_when_supervisor_crashes_after_marker(
     assert sum("paper_reader run prepare" in call for call in calls) == 1
     assert (source.parent / "paper_analysis").is_dir()
     assert not (source.parent / "paper_analysis_v2").exists()
+
+
+def test_launcher_ack_timeout_cannot_race_a_committed_start_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started_path = tmp_path / "init.started"
+    stdout_path = tmp_path / "init.stdout"
+    started_payload = b'{"started":true}'
+    metadata = tmp_path.stat()
+    invocation = _ChildInvocation(
+        started_path=started_path,
+        stdout_path=stdout_path,
+        started_payload=started_payload,
+        request_dir_device=metadata.st_dev,
+        request_dir_inode=metadata.st_ino,
+        run_lock_descriptors=(),
+    )
+
+    import paper_reader_batch.v2_local_prepare as local_prepare_module
+
+    real_select = local_prepare_module.select.select
+    target_started = threading.Event()
+    killed_process_groups: list[int] = []
+
+    class ControlledLauncher:
+        pid = 424242
+
+        def __init__(self, argv) -> None:
+            self.argv = argv
+            self.returncode = None
+            self.new_protocol = argv[5] == "commit-v1"
+            if self.new_protocol:
+                acknowledgement_fd = os.dup(int(argv[4]))
+                decision_fd = os.dup(int(argv[6]))
+
+                def commit_marker_after_parent_decision() -> None:
+                    try:
+                        os.write(acknowledgement_fd, b"R")
+                        if os.read(decision_fd, 1) == b"1":
+                            started_path.write_bytes(started_payload)
+                            target_started.set()
+                    finally:
+                        os.close(acknowledgement_fd)
+                        os.close(decision_fd)
+
+                threading.Thread(
+                    target=commit_marker_after_parent_decision,
+                    daemon=True,
+                ).start()
+
+        def poll(self):
+            if not self.new_protocol and not target_started.is_set():
+                assert started_path.exists() is False
+                started_path.write_bytes(started_payload)
+                target_started.set()
+            return self.returncode
+
+        def wait(self, timeout=None):
+            if self.new_protocol and not target_started.wait(timeout):
+                raise subprocess.TimeoutExpired(self.argv, timeout)
+            self.returncode = 0
+            return 0
+
+    controlled: ControlledLauncher | None = None
+
+    def fake_popen(argv, **_kwargs):
+        nonlocal controlled
+        controlled = ControlledLauncher(argv)
+        return controlled
+
+    def select_without_guessing(readers, writers, errors, timeout):
+        if controlled is not None and controlled.new_protocol:
+            return real_select(readers, writers, errors, timeout)
+        return [], [], []
+
+    monkeypatch.setattr(local_prepare_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(local_prepare_module.select, "select", select_without_guessing)
+    monkeypatch.setattr(
+        local_prepare_module.os,
+        "killpg",
+        lambda process_group, _signal: killed_process_groups.append(process_group),
+    )
+
+    handle = _default_child_runner(
+        (sys.executable, "-c", "raise SystemExit(0)"),
+        tmp_path,
+        30,
+        invocation,
+    )
+
+    handle.wait()
+    assert target_started.is_set()
+    assert started_path.read_bytes() == started_payload
+    assert killed_process_groups == []
+
+
+def test_started_handle_uses_cli_envelope_instead_of_supervisor_exit_status(
+    tmp_path: Path,
+) -> None:
+    started_path = tmp_path / "init.started"
+    metadata = tmp_path.stat()
+    invocation = _ChildInvocation(
+        started_path=started_path,
+        stdout_path=tmp_path / "init.stdout",
+        started_payload=b'{"started":true}',
+        request_dir_device=metadata.st_dev,
+        request_dir_inode=metadata.st_ino,
+        run_lock_descriptors=(),
+    )
+    envelope = canonical_json_bytes(
+        {
+            "schema_version": "paper_reader.command-result.v2",
+            "command": "run init-local",
+            "ok": False,
+            "code": "fixture_failure",
+            "created_at": "2026-07-11T00:00:02Z",
+            "message": "target failed after durable start",
+            "data": {},
+        }
+    ) + b"\n"
+
+    handle = _default_child_runner(
+        (
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.buffer.write(bytes.fromhex('"
+            + envelope.hex()
+            + "')); raise SystemExit(7)",
+        ),
+        tmp_path,
+        30,
+        invocation,
+    )
+
+    assert handle.wait() is None
+    assert started_path.read_bytes() == invocation.started_payload
+    parsed = _parse_child_envelope(
+        invocation.stdout_path.read_bytes(),
+        expected_command="run init-local",
+        returncode=None,
+    )
+    assert parsed.ok is False
+    assert parsed.code == "fixture_failure"
+
+
+def test_started_ack_resets_target_deadline_after_slow_marker_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader_batch.v2_local_prepare as local_prepare_module
+
+    clock = [0.0]
+    marker_committed = threading.Event()
+    target_starts: list[int] = []
+    target_escaped = threading.Event()
+    killed_process_groups: list[int] = []
+    wait_timeouts: list[float | None] = []
+    metadata = tmp_path.stat()
+    invocation = _ChildInvocation(
+        started_path=tmp_path / "init.started",
+        stdout_path=tmp_path / "init.stdout",
+        started_payload=b'{"started":true}',
+        request_dir_device=metadata.st_dev,
+        request_dir_inode=metadata.st_ino,
+        run_lock_descriptors=(),
+    )
+
+    class SlowMarkerLauncher:
+        pid = 515151
+        returncode = None
+
+        def __init__(self, argv) -> None:
+            acknowledgement_fd = os.dup(int(argv[4]))
+            decision_fd = os.dup(int(argv[6]))
+
+            def launch() -> None:
+                try:
+                    os.write(acknowledgement_fd, b"R")
+                    assert os.read(decision_fd, 1) == b"1"
+                    clock[0] = 12.0
+                    invocation.started_path.write_bytes(invocation.started_payload)
+                    target_starts.append(1)
+                    try:
+                        os.write(acknowledgement_fd, b"S")
+                    except BrokenPipeError:
+                        pass
+                finally:
+                    marker_committed.set()
+                    os.close(acknowledgement_fd)
+                    os.close(decision_fd)
+
+            threading.Thread(target=launch, daemon=True).start()
+
+        def wait(self, timeout=None):
+            assert marker_committed.wait(1)
+            wait_timeouts.append(timeout)
+            if timeout is not None and timeout < 1:
+                target_escaped.set()
+                raise subprocess.TimeoutExpired("slow-marker-launcher", timeout)
+            self.returncode = 0
+            return 0
+
+    monkeypatch.setattr(local_prepare_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        local_prepare_module.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: SlowMarkerLauncher(argv),
+    )
+    monkeypatch.setattr(
+        local_prepare_module.os,
+        "killpg",
+        lambda process_group, _signal: killed_process_groups.append(process_group),
+    )
+
+    handle = _default_child_runner(
+        (sys.executable, "-c", "raise SystemExit(0)"),
+        tmp_path,
+        1,
+        invocation,
+    )
+    assert marker_committed.wait(1)
+
+    assert handle.wait() is None
+    assert target_starts == [1]
+    assert target_escaped.is_set() is False
+    assert killed_process_groups == []
+    assert wait_timeouts == [11.0]
+
+
+def test_commit_without_started_ack_or_marker_cancels_entire_launcher_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader_batch.v2_local_prepare as local_prepare_module
+
+    committed = threading.Event()
+    killed_process_groups: list[int] = []
+    metadata = tmp_path.stat()
+    invocation = _ChildInvocation(
+        started_path=tmp_path / "init.started",
+        stdout_path=tmp_path / "init.stdout",
+        started_payload=b'{"started":true}',
+        request_dir_device=metadata.st_dev,
+        request_dir_inode=metadata.st_ino,
+        run_lock_descriptors=(),
+    )
+
+    class MissingMarkerLauncher:
+        pid = 525252
+        returncode = None
+
+        def __init__(self, argv) -> None:
+            acknowledgement_fd = os.dup(int(argv[4]))
+            decision_fd = os.dup(int(argv[6]))
+
+            def launch() -> None:
+                try:
+                    os.write(acknowledgement_fd, b"R")
+                    assert os.read(decision_fd, 1) == b"1"
+                finally:
+                    committed.set()
+                    os.close(acknowledgement_fd)
+                    os.close(decision_fd)
+
+            threading.Thread(target=launch, daemon=True).start()
+
+        def wait(self, timeout=None):
+            assert committed.wait(1)
+            self.returncode = 96
+            return 96
+
+    monkeypatch.setattr(
+        local_prepare_module.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: MissingMarkerLauncher(argv),
+    )
+    monkeypatch.setattr(local_prepare_module.os, "kill", lambda _pid, _signal: None)
+    monkeypatch.setattr(
+        local_prepare_module.os,
+        "killpg",
+        lambda process_group, _signal: killed_process_groups.append(process_group),
+    )
+
+    with pytest.raises(_ChildProtocolError) as exc_info:
+        _default_child_runner(
+            (sys.executable, "-c", "raise SystemExit(0)"),
+            tmp_path,
+            30,
+            invocation,
+        )
+
+    assert exc_info.value.code == "child_execution_failed"
+    assert committed.is_set()
+    assert killed_process_groups == [MissingMarkerLauncher.pid]
+    assert invocation.started_path.exists() is False
+
+
+def test_missing_started_ack_reads_marker_from_held_request_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader_batch.v2_local_prepare as local_prepare_module
+
+    request_dir = tmp_path / "request"
+    request_dir.mkdir()
+    detached_request_dir = tmp_path / "request.detached"
+    invocation = _ChildInvocation(
+        started_path=request_dir / "init.started",
+        stdout_path=request_dir / "init.stdout",
+        started_payload=b'{"started":true}',
+        request_dir_device=request_dir.stat().st_dev,
+        request_dir_inode=request_dir.stat().st_ino,
+        run_lock_descriptors=(),
+    )
+    committed_and_replaced = threading.Event()
+    killed_process_groups: list[int] = []
+
+    class ReplacedPathLauncher:
+        pid = 535353
+        returncode = None
+
+        def __init__(self, argv) -> None:
+            acknowledgement_fd = os.dup(int(argv[4]))
+            decision_fd = os.dup(int(argv[6]))
+
+            def launch() -> None:
+                try:
+                    os.write(acknowledgement_fd, b"R")
+                    assert os.read(decision_fd, 1) == b"1"
+                    invocation.started_path.write_bytes(invocation.started_payload)
+                    request_dir.rename(detached_request_dir)
+                    request_dir.mkdir()
+                finally:
+                    committed_and_replaced.set()
+                    os.close(acknowledgement_fd)
+                    os.close(decision_fd)
+
+            threading.Thread(target=launch, daemon=True).start()
+
+        def wait(self, timeout=None):
+            assert committed_and_replaced.wait(timeout or 1)
+            self.returncode = 98
+            return 98
+
+    monkeypatch.setattr(
+        local_prepare_module.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: ReplacedPathLauncher(argv),
+    )
+    monkeypatch.setattr(local_prepare_module.os, "kill", lambda _pid, _signal: None)
+    monkeypatch.setattr(
+        local_prepare_module.os,
+        "killpg",
+        lambda process_group, _signal: killed_process_groups.append(process_group),
+    )
+
+    handle = _default_child_runner(
+        (sys.executable, "-c", "raise SystemExit(0)"),
+        tmp_path,
+        30,
+        invocation,
+    )
+
+    assert handle.wait() is None
+    assert (detached_request_dir / "init.started").read_bytes() == invocation.started_payload
+    assert not (request_dir / "init.started").exists()
+    assert killed_process_groups == []
+
+
+def test_supervisor_crash_after_ready_breaks_commit_and_leaves_no_executor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader_batch.v2_local_prepare as local_prepare_module
+
+    fault_stage = "supervisor_after_ready_before_decision"
+    faulted_launcher = local_prepare_module._CHILD_LAUNCHER.replace(
+        "    gate_value = os.read(gate_read, 1)\n",
+        (
+            f'    if fault_stage == "{fault_stage}":\n'
+            "        signal.pause()\n"
+            "    gate_value = os.read(gate_read, 1)\n"
+        ),
+        1,
+    ).replace(
+        'os.write(ack_fd, b"R")\ndecision = os.read(decision_fd, 1)\n',
+        (
+            'os.write(ack_fd, b"R")\n'
+            f'if fault_stage == "{fault_stage}":\n'
+            "    os.close(decision_fd)\n"
+            "    os._exit(96)\n"
+            "decision = os.read(decision_fd, 1)\n"
+        ),
+        1,
+    )
+    assert faulted_launcher != local_prepare_module._CHILD_LAUNCHER
+    monkeypatch.setattr(local_prepare_module, "_CHILD_LAUNCHER", faulted_launcher)
+
+    lock_path = tmp_path / "run.lock"
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    metadata = tmp_path.stat()
+    invocation = _ChildInvocation(
+        started_path=tmp_path / "init.started",
+        stdout_path=tmp_path / "init.stdout",
+        started_payload=b'{"started":true}',
+        request_dir_device=metadata.st_dev,
+        request_dir_inode=metadata.st_ino,
+        run_lock_descriptors=(lock_fd,),
+        launcher_fault_stage=fault_stage,
+    )
+    target_path = tmp_path / "target-ran"
+    unexpected_handle = None
+    error = None
+    try:
+        try:
+            unexpected_handle = _default_child_runner(
+                (
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; Path(r'"
+                    + str(target_path)
+                    + "').write_text('ran', encoding='utf-8')",
+                ),
+                tmp_path,
+                30,
+                invocation,
+            )
+        except _ChildProtocolError as exc:
+            error = exc
+    finally:
+        os.close(lock_fd)
+        if unexpected_handle is not None:
+            try:
+                os.killpg(unexpected_handle.process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            unexpected_handle.process.wait()
+
+    assert error is not None
+    assert error.code == "child_execution_failed"
+    assert not target_path.exists()
+    assert not invocation.started_path.exists()
+
+    probe_fd = os.open(lock_path, os.O_RDWR)
+    deadline = time.monotonic() + 2
+    lock_released = False
+    try:
+        while time.monotonic() < deadline:
+            try:
+                fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                time.sleep(0.01)
+            else:
+                lock_released = True
+                break
+    finally:
+        os.close(probe_fd)
+    assert lock_released, "orphan executor retained the inherited run lock"
 
 
 def test_running_child_makes_release_read_only_and_prevents_second_attempt(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 from pathlib import Path
 from types import ModuleType
@@ -83,8 +84,24 @@ def test_validator_requires_full_v2_runtime_closure(tmp_path: Path) -> None:
         "src/paper_reader/candidate_integrity.py",
         "src/paper_reader/local_publish.py",
         "src/paper_reader/pdf_extract.py",
+        "src/paper_reader/raw_schema.py",
+        "src/paper_reader/zotero_authorization_reservations.py",
     }
     assert expected <= required
+
+    imported_modules: set[str] = set()
+    for source_path in (SKILL_ROOT / "src/paper_reader").glob("*.py"):
+        for node in ast.walk(ast.parse(source_path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("paper_reader."):
+                imported_modules.add(node.module.removeprefix("paper_reader.").split(".", 1)[0])
+            elif isinstance(node, ast.Import):
+                imported_modules.update(
+                    alias.name.removeprefix("paper_reader.").split(".", 1)[0]
+                    for alias in node.names
+                    if alias.name.startswith("paper_reader.")
+                )
+    imported_paths = {f"src/paper_reader/{module}.py" for module in imported_modules}
+    assert imported_paths <= required
 
     missing = "src/paper_reader/evidence_bundle.py"
     _build_bundle(tmp_path, validator, omit={missing})

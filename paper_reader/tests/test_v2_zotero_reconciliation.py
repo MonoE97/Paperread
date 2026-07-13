@@ -20,6 +20,7 @@ from paper_reader.contracts import (
 )
 from paper_reader.public_cli import app
 from paper_reader.storage import canonical_json_bytes
+from paper_reader.v2_loader import RunLoadError
 
 from test_v2_zotero_authorization import (
     NOW,
@@ -458,10 +459,13 @@ def test_reconcile_replay_and_unbound_main_recovery_reject_tampered_closed_sidec
         def get_children(self, _parent_key: str):
             raise AssertionError("tampered terminal reconciliation reached provider")
 
-    with pytest.raises(module.ZoteroReconciliationError) as exc_info:
+    expected_error = RunLoadError if case == "record_mismatch" else module.ZoteroReconciliationError
+    with pytest.raises(expected_error) as exc_info:
         _reconcile(authorization_path, ProviderMustNotRun())
 
-    assert exc_info.value.code == "reconciliation_tampered"
+    assert exc_info.value.code == (
+        "unsupported_run_schema" if case == "record_mismatch" else "reconciliation_tampered"
+    )
 
 
 @pytest.mark.parametrize(

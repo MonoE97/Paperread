@@ -257,6 +257,11 @@ def test_worker_prompt_is_read_only_and_renew_release_require_exact_live_identit
     )
     assert "paper_reader_batch.worker-result.v2" in prompt["instruction"]
     assert "local-output only" in prompt["instruction"]
+    assert {
+        "local_prepare_result_sha256",
+        "paper_reader_run",
+        "evidence",
+    }.isdisjoint(prompt)
     assert (run_dir / "state.json").read_bytes() == state_before_prompt
     assert sorted((run_dir / "events").iterdir()) == events_before_prompt
 

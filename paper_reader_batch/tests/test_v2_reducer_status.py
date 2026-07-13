@@ -5,6 +5,7 @@ from paper_reader_batch.v2_contracts import (
     ClaimAssignment,
     ClaimedData,
     EventCommandResultSnapshot,
+    FinishedData,
     LeaseMutationData,
     StateItem,
 )
@@ -204,6 +205,94 @@ def test_reducer_rejects_non_authoritative_initial_lease_times(
     with pytest.raises(BatchRuntimeError) as exc_info:
         apply_event(view.state, view.manifest, event)
     assert exc_info.value.code == "journal_corrupt"
+
+
+@pytest.mark.parametrize("local_prepare_status", ["failed", "blocked"])
+def test_pdf_worker_success_supersedes_failed_local_prepare_state(
+    tmp_path,
+    local_prepare_status: str,
+) -> None:
+    run_dir = _run(tmp_path, concurrency=1, pdf_count=1)
+    claimed = claim_worker(
+        run_dir,
+        worker_id="worker",
+        request_id="33333333-3333-4333-8333-333333333333",
+        now="2026-07-10T00:00:01Z",
+    ).result["assignments"][0]
+    view = load_run_view(run_dir)
+    lease = view.state.items[0].worker_lease
+    assert lease is not None
+    failed_local_item = StateItem.model_validate(
+        view.state.items[0].model_copy(
+            update={
+                "local_prepare_status": local_prepare_status,
+                "local_prepare_attempt_count": 1,
+                "local_prepare_lease": None,
+                "local_prepare_result_sha256": "b" * 64,
+                "local_prepare_last_actor_id": "preparer",
+                "local_prepare_last_claim_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "local_prepare_last_attempt_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "local_prepare_last_lease_token_sha256": "c" * 64,
+                "local_prepare_coordination_request_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                "local_prepare_coordination_fingerprint": "failed-coordination",
+                "local_prepare_coordination_device": 1,
+                "local_prepare_coordination_inode": 2,
+                "local_prepare_failure_code": "prepare_failed",
+                "local_prepare_failure_message": "deterministic local prepare failure",
+            }
+        ).model_dump(mode="json")
+    )
+    failed_local_state = type(view.state).model_validate(
+        view.state.model_copy(update={"items": [failed_local_item]}).model_dump(mode="json")
+    )
+    event = BatchEvent(
+        schema_version="paper_reader_batch.event.v2",
+        sequence=failed_local_state.next_sequence,
+        event_id="dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        occurred_at="2026-07-10T00:00:02Z",
+        request_id="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        command="worker.finish",
+        request_fingerprint="d" * 64,
+        manifest_sha256=view.manifest_sha256,
+        previous_event_sha256=failed_local_state.latest_event_sha256,
+        data=FinishedData(
+            kind="worker.finished",
+            item_id=claimed["item_id"],
+            actor_id=claimed["worker_id"],
+            claim_id=claimed["claim_id"],
+            attempt_id=claimed["attempt_id"],
+            attempt_number=claimed["attempt_number"],
+            lease_token_sha256=lease.lease_token_sha256,
+            status="succeeded",
+            result_sha256="e" * 64,
+            candidate_sha256="f" * 64,
+        ),
+        command_result=EventCommandResultSnapshot(
+            schema_version="paper_reader_batch.command-result.v2",
+            command="worker.finish",
+            request_id="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            semantic_result_sha256="1" * 64,
+        ),
+        event_sha256="2" * 64,
+    )
+
+    updated = apply_event(failed_local_state, view.manifest, event)
+
+    item = updated.items[0]
+    assert item.worker_status == "succeeded"
+    assert item.worker_result_sha256 == "e" * 64
+    assert item.worker_last_claim_id == claimed["claim_id"]
+    assert item.worker_last_attempt_id == claimed["attempt_id"]
+    assert item.local_prepare_status == "prepared"
+    assert item.local_prepare_lease is None
+    assert item.local_prepare_result_sha256 is None
+    assert item.local_prepare_failure_code is None
+    assert item.local_prepare_failure_message is None
+    assert item.local_prepare_coordination_request_id is None
+    assert item.local_prepare_coordination_fingerprint is None
+    assert item.local_prepare_coordination_device is None
+    assert item.local_prepare_coordination_inode is None
+    assert updated.batch_status == "succeeded"
 
 
 @pytest.mark.parametrize("lane", ["worker", "local_prepare"])

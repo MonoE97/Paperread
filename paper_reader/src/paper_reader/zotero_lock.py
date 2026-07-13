@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from paper_reader.run_lock import ExpectedRunArtifact, _verify_expected_run_artifacts
+from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.storage import (
     OwnedDirectoryAnchor,
     UnsafeStoragePathError,
@@ -202,6 +203,7 @@ def locked_zotero_parent(
                     manifest_bytes = read_anchored_bytes(
                         run_anchor,
                         run_anchor.path / "run.json",
+                        max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
                     )
                 except (OSError, ValueError) as exc:
                     raise ZoteroLockError(

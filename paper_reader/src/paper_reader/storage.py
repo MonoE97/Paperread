@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
+from paper_reader.resource_policy import V2_RESOURCE_POLICY
+
 
 @dataclass(frozen=True, slots=True)
 class ResolvedSourceFingerprint:
@@ -43,6 +45,17 @@ class AtomicNoReplaceUnsupportedError(NotImplementedError):
 
 class UnsafeStoragePathError(ValueError):
     code = "run_directory_changed"
+
+
+class UnexpectedStorageSizeError(UnsafeStoragePathError):
+    pass
+
+
+class TreeSnapshotLimitError(UnsafeStoragePathError):
+    def __init__(self, limit_name: str, maximum: int, message: str) -> None:
+        super().__init__(message)
+        self.limit_name = limit_name
+        self.maximum = maximum
 
 
 class DirectoryAnchorLike(Protocol):
@@ -405,6 +418,9 @@ def _validate_anchored_parent(
 def _read_anchored_regular_file(
     anchor: DirectoryAnchorLike,
     path: Path | str,
+    *,
+    expected_size: int | None = None,
+    max_bytes: int | None = None,
 ) -> bytes:
     parent_fd, name = _open_anchored_parent(anchor, path, create=False)
     descriptor: int | None = None
@@ -423,8 +439,37 @@ def _read_anchored_regular_file(
             raise UnsafeStoragePathError(
                 f"anchored file must be one non-symlink, non-hardlinked regular file: {path}"
             )
+        if expected_size is not None and before.st_size != expected_size:
+            raise UnexpectedStorageSizeError(
+                f"anchored file size differs from its expected size: {path}"
+            )
+        if max_bytes is not None and before.st_size > max_bytes:
+            raise UnsafeStoragePathError(
+                f"anchored file exceeds its read limit of {max_bytes} bytes: {path}"
+            )
         chunks: list[bytes] = []
-        while chunk := os.read(descriptor, 1024 * 1024):
+        total_bytes = 0
+        while True:
+            remaining_limits = [
+                limit - total_bytes
+                for limit in (expected_size, max_bytes)
+                if limit is not None
+            ]
+            request_size = 1024 * 1024
+            if remaining_limits:
+                request_size = min(request_size, min(remaining_limits) + 1)
+            chunk = os.read(descriptor, request_size)
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if max_bytes is not None and total_bytes > max_bytes:
+                raise UnsafeStoragePathError(
+                    f"anchored file exceeded its read limit of {max_bytes} bytes: {path}"
+                )
+            if expected_size is not None and total_bytes > expected_size:
+                raise UnexpectedStorageSizeError(
+                    f"anchored file size grew beyond its expected size: {path}"
+                )
             chunks.append(chunk)
         after = os.fstat(descriptor)
         named_after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
@@ -451,6 +496,10 @@ def _read_anchored_regular_file(
         )
         if before_identity != after_identity or after_identity != named_identity:
             raise UnsafeStoragePathError(f"anchored file changed while read: {path}")
+        if expected_size is not None and total_bytes != expected_size:
+            raise UnexpectedStorageSizeError(
+                f"anchored file size differs from its expected size: {path}"
+            )
         _validate_anchored_parent(anchor, path, parent_fd)
         validate_directory_anchor(anchor)
         return b"".join(chunks)
@@ -460,9 +509,25 @@ def _read_anchored_regular_file(
         os.close(parent_fd)
 
 
-def read_anchored_bytes(anchor: DirectoryAnchorLike, path: Path | str) -> bytes:
+def read_anchored_bytes(
+    anchor: DirectoryAnchorLike,
+    path: Path | str,
+    *,
+    expected_size: int | None = None,
+    max_bytes: int | None = None,
+) -> bytes:
+    for name, value in (("expected_size", expected_size), ("max_bytes", max_bytes)):
+        if value is not None and (type(value) is not int or value < 0):
+            raise ValueError(f"{name} must be a non-negative integer")
+    if expected_size is not None and max_bytes is not None and expected_size > max_bytes:
+        raise ValueError("expected_size must not exceed max_bytes")
     validate_directory_anchor(anchor)
-    return _read_anchored_regular_file(anchor, path)
+    return _read_anchored_regular_file(
+        anchor,
+        path,
+        expected_size=expected_size,
+        max_bytes=max_bytes,
+    )
 
 
 def anchored_entry_exists(anchor: DirectoryAnchorLike, path: Path | str) -> bool:
@@ -826,13 +891,84 @@ def _fsync_tree_at(directory_fd: int, path: Path) -> None:
     os.fsync(directory_fd)
 
 
+@dataclass(frozen=True, slots=True)
+class _TreeSnapshotLimits:
+    max_file_bytes: int | None
+    max_total_bytes: int | None
+    max_members: int | None
+    max_depth: int | None
+
+
+@dataclass(slots=True)
+class _TreeSnapshotState:
+    total_bytes: int = 0
+    members: int = 0
+
+
+def _tree_snapshot_limits(
+    *,
+    max_file_bytes: int | None,
+    max_total_bytes: int | None,
+    max_members: int | None,
+    max_depth: int | None,
+) -> _TreeSnapshotLimits:
+    values = {
+        "max_file_bytes": max_file_bytes,
+        "max_total_bytes": max_total_bytes,
+        "max_members": max_members,
+        "max_depth": max_depth,
+    }
+    for name, value in values.items():
+        if value is not None and (type(value) is not int or value < 0):
+            raise ValueError(f"{name} must be a non-negative integer")
+    return _TreeSnapshotLimits(**values)
+
+
+def _snapshot_directory_names(
+    directory_fd: int,
+    *,
+    prefix: PurePosixPath,
+    limits: _TreeSnapshotLimits,
+    state: _TreeSnapshotState,
+) -> tuple[str, ...]:
+    names: list[str] = []
+    with os.scandir(directory_fd) as entries:
+        for entry in entries:
+            relative = prefix / entry.name
+            depth = len(relative.parts)
+            if limits.max_depth is not None and depth > limits.max_depth:
+                raise TreeSnapshotLimitError(
+                    "max_depth",
+                    limits.max_depth,
+                    f"immutable tree exceeds its depth limit of {limits.max_depth}: "
+                    f"{relative.as_posix()}"
+                )
+            state.members += 1
+            if limits.max_members is not None and state.members > limits.max_members:
+                raise TreeSnapshotLimitError(
+                    "max_members",
+                    limits.max_members,
+                    f"immutable tree exceeds its member limit of {limits.max_members}"
+                )
+            names.append(entry.name)
+    return tuple(sorted(names))
+
+
 def _snapshot_tree_fd(
     directory_fd: int,
     *,
     prefix: PurePosixPath = PurePosixPath(),
+    limits: _TreeSnapshotLimits,
+    state: _TreeSnapshotState,
 ) -> ImmutableTreeSnapshot:
     entries: list[ImmutableTreeEntry] = []
-    for name in sorted(os.listdir(directory_fd)):
+    names = _snapshot_directory_names(
+        directory_fd,
+        prefix=prefix,
+        limits=limits,
+        state=state,
+    )
+    for name in names:
         relative = prefix / name
         metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         if stat.S_ISDIR(metadata.st_mode):
@@ -852,7 +988,12 @@ def _snapshot_tree_fd(
                     )
                 )
                 entries.extend(
-                    _snapshot_tree_fd(child_fd, prefix=relative).entries
+                    _snapshot_tree_fd(
+                        child_fd,
+                        prefix=relative,
+                        limits=limits,
+                        state=state,
+                    ).entries
                 )
                 named_after = os.stat(
                     name,
@@ -873,11 +1014,71 @@ def _snapshot_tree_fd(
                     raise UnsafeStoragePathError(
                         f"immutable tree file changed: {relative.as_posix()}"
                     )
+                if (
+                    limits.max_file_bytes is not None
+                    and before.st_size > limits.max_file_bytes
+                ):
+                    raise TreeSnapshotLimitError(
+                        "max_file_bytes",
+                        limits.max_file_bytes,
+                        "immutable tree file exceeds its file limit of "
+                        f"{limits.max_file_bytes} bytes: {relative.as_posix()}"
+                    )
+                if (
+                    limits.max_total_bytes is not None
+                    and state.total_bytes + before.st_size > limits.max_total_bytes
+                ):
+                    raise TreeSnapshotLimitError(
+                        "max_total_bytes",
+                        limits.max_total_bytes,
+                        "immutable tree exceeds its total byte limit of "
+                        f"{limits.max_total_bytes}: {relative.as_posix()}"
+                    )
                 digest = hashlib.sha256()
                 size = 0
-                while chunk := os.read(child_fd, 1024 * 1024):
+                while True:
+                    remaining_limits = [
+                        limit - current
+                        for limit, current in (
+                            (limits.max_file_bytes, size),
+                            (limits.max_total_bytes, state.total_bytes),
+                        )
+                        if limit is not None
+                    ]
+                    request_size = 1024 * 1024
+                    if remaining_limits:
+                        request_size = min(
+                            request_size,
+                            min(remaining_limits) + 1,
+                        )
+                    chunk = os.read(child_fd, request_size)
+                    if not chunk:
+                        break
                     digest.update(chunk)
                     size += len(chunk)
+                    state.total_bytes += len(chunk)
+                    if (
+                        limits.max_file_bytes is not None
+                        and size > limits.max_file_bytes
+                    ):
+                        raise TreeSnapshotLimitError(
+                            "max_file_bytes",
+                            limits.max_file_bytes,
+                            "immutable tree file exceeded its file limit of "
+                            f"{limits.max_file_bytes} bytes while read: "
+                            f"{relative.as_posix()}"
+                        )
+                    if (
+                        limits.max_total_bytes is not None
+                        and state.total_bytes > limits.max_total_bytes
+                    ):
+                        raise TreeSnapshotLimitError(
+                            "max_total_bytes",
+                            limits.max_total_bytes,
+                            "immutable tree exceeded its total byte limit of "
+                            f"{limits.max_total_bytes} while read: "
+                            f"{relative.as_posix()}"
+                        )
                 after = os.fstat(child_fd)
                 named_after = os.stat(
                     name,
@@ -931,7 +1132,18 @@ def _snapshot_tree_fd(
 def snapshot_anchored_tree(
     anchor: DirectoryAnchorLike,
     path: Path | str | None = None,
+    *,
+    max_file_bytes: int | None = None,
+    max_total_bytes: int | None = None,
+    max_members: int | None = None,
+    max_depth: int | None = None,
 ) -> ImmutableTreeSnapshot:
+    limits = _tree_snapshot_limits(
+        max_file_bytes=max_file_bytes,
+        max_total_bytes=max_total_bytes,
+        max_members=max_members,
+        max_depth=max_depth,
+    )
     validate_directory_anchor(anchor)
     if path is None or Path(os.path.abspath(path)) == Path(os.path.abspath(anchor.path)):
         descriptor = os.dup(anchor.descriptor)
@@ -941,7 +1153,11 @@ def snapshot_anchored_tree(
         parts = _anchor_relative_parts(anchor, target_path)
         descriptor = _open_relative_directory(anchor, parts, create=False)
     try:
-        snapshot = _snapshot_tree_fd(descriptor)
+        snapshot = _snapshot_tree_fd(
+            descriptor,
+            limits=limits,
+            state=_TreeSnapshotState(),
+        )
         if path is not None:
             parent_fd, name = _open_anchored_parent(anchor, target_path, create=False)
             try:
@@ -959,8 +1175,25 @@ def snapshot_anchored_tree(
         os.close(descriptor)
 
 
-def snapshot_directory_fd(directory_fd: int) -> ImmutableTreeSnapshot:
-    return _snapshot_tree_fd(directory_fd)
+def snapshot_directory_fd(
+    directory_fd: int,
+    *,
+    max_file_bytes: int | None = None,
+    max_total_bytes: int | None = None,
+    max_members: int | None = None,
+    max_depth: int | None = None,
+) -> ImmutableTreeSnapshot:
+    limits = _tree_snapshot_limits(
+        max_file_bytes=max_file_bytes,
+        max_total_bytes=max_total_bytes,
+        max_members=max_members,
+        max_depth=max_depth,
+    )
+    return _snapshot_tree_fd(
+        directory_fd,
+        limits=limits,
+        state=_TreeSnapshotState(),
+    )
 
 
 def tree_snapshot_from_hashes(
@@ -1088,7 +1321,12 @@ def _atomic_write_bytes_anchored(
             raise UnsafeStoragePathError(
                 f"atomic write renamed an unbound temporary file: {destination}"
             )
-        readback = _read_anchored_regular_file(anchor, destination)
+        readback = _read_anchored_regular_file(
+            anchor,
+            destination,
+            expected_size=len(content),
+            max_bytes=len(content),
+        )
         final_destination = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         if not _same_entry(temporary_metadata, final_destination):
             raise UnsafeStoragePathError(
@@ -1188,7 +1426,12 @@ def _publish_bytes_no_replace_anchored(
             raise UnsafeStoragePathError(
                 f"atomic no-replace publication renamed an unbound temporary file: {destination}"
             )
-        readback = _read_anchored_regular_file(anchor, destination)
+        readback = _read_anchored_regular_file(
+            anchor,
+            destination,
+            expected_size=len(content),
+            max_bytes=len(content),
+        )
         final_destination = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         if not _same_entry(temporary_metadata, final_destination):
             raise UnsafeStoragePathError(
@@ -1279,7 +1522,13 @@ def _atomic_publish_tree_anchored(
         if source_metadata.st_dev != os.fstat(destination_parent_fd).st_dev:
             raise OSError(errno.EXDEV, "tree publication requires the same filesystem")
         _fsync_tree_at(source_fd, staging)
-        observed_source_snapshot = _snapshot_tree_fd(source_fd)
+        observed_source_snapshot = snapshot_directory_fd(
+            source_fd,
+            max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+            max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+            max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+        )
         sealed_snapshot = expected_tree_snapshot or observed_source_snapshot
         if observed_source_snapshot != sealed_snapshot:
             raise UnsafeStoragePathError(
@@ -1316,7 +1565,13 @@ def _atomic_publish_tree_anchored(
             raise UnsafeStoragePathError(
                 f"published tree does not match staging identity: {destination}"
             )
-        published_snapshot = _snapshot_tree_fd(published_fd)
+        published_snapshot = snapshot_directory_fd(
+            published_fd,
+            max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+            max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+            max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+        )
         if published_snapshot != sealed_snapshot:
             raise UnsafeStoragePathError(
                 f"published tree closed-set changed during publication: {destination}"
@@ -1487,7 +1742,9 @@ __all__ = [
     "OwnedDirectoryAnchor",
     "PublishConflictError",
     "ResolvedSourceFingerprint",
+    "TreeSnapshotLimitError",
     "UnsafeStoragePathError",
+    "UnexpectedStorageSizeError",
     "anchored_entry_exists",
     "assert_no_source_output_alias",
     "atomic_publish_tree",

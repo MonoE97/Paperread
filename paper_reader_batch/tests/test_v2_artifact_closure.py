@@ -5,11 +5,14 @@ from html import escape
 import hashlib
 import json
 from pathlib import Path
+import shutil
 
 from markdown_it import MarkdownIt
 import pytest
 from pydantic import ValidationError
 
+import paper_reader_batch.v2_artifacts as artifact_module
+import paper_reader_batch.v2_worker as worker_module
 from paper_reader_batch.v2_artifacts import (
     ForeignArtifactRef,
     ForeignCandidate,
@@ -19,12 +22,15 @@ from paper_reader_batch.v2_artifacts import (
     ForeignRun,
     ForeignSummary,
     _markdown_literal_note_title,
+    paper_reader_root_identity,
     _require_normalized_absolute_path,
     validate_worker_result_artifacts,
 )
 from paper_reader_batch.v2_contracts import (
     ArtifactRef,
     BatchManifest,
+    FileIdentity,
+    LocalPrepareResult,
     PdfManifestItem,
     PdfSource,
     SourceSummary,
@@ -33,7 +39,11 @@ from paper_reader_batch.v2_contracts import (
     ZoteroTitleSource,
 )
 from paper_reader_batch.v2_errors import BatchRuntimeError
+from paper_reader_batch.v2_journal import load_run_view
 from paper_reader_batch.v2_json import canonical_json_bytes, canonical_sha256, sha256_bytes
+from paper_reader_batch.v2_local_prepare import claim_local_prepare, finish_local_prepare
+from paper_reader_batch.v2_run import initialize_run, recover_run
+from paper_reader_batch.v2_worker import claim_worker, finish_worker, worker_prompt
 
 
 NOW = "2026-07-10T00:00:00Z"
@@ -147,6 +157,15 @@ class BuiltWorkerFixture:
         )
 
 
+@dataclass
+class PreparedWorkerFixture:
+    batch_run: Path
+    built_worker: BuiltWorkerFixture
+    local_result: LocalPrepareResult
+    local_result_sha256: str
+    worker_assignment: dict[str, object]
+
+
 def _rewrite_candidate_notes(
     built: BuiltWorkerFixture,
     *,
@@ -204,8 +223,8 @@ def _make_evidence(
     *,
     run_id: str,
     source_sha256: str,
+    evidence_id: str = "evidence_test",
 ) -> tuple[Path, dict[str, object], dict[str, object]]:
-    evidence_id = "evidence_test"
     evidence_dir = run_dir / "evidence" / evidence_id
     files: list[dict[str, object]] = []
     specs = {
@@ -683,6 +702,146 @@ def _local_fixture(
     )
 
 
+def _fake_paper_reader_root(tmp_path: Path) -> Path:
+    root = tmp_path / "paper-reader-root"
+    (root / "src" / "paper_reader").mkdir(parents=True)
+    (root / "references" / "schemas").mkdir(parents=True)
+    (root / "SKILL.md").write_text("# paper_reader V2\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[project]\nname="paper_reader"\nversion="2.0.0"\n[project.scripts]\n'
+        'paper_reader="paper_reader.public_cli:app"\n',
+        encoding="utf-8",
+    )
+    (root / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    (root / "src" / "paper_reader" / "public_cli.py").write_text(
+        "app = object()\n",
+        encoding="utf-8",
+    )
+    for name in [
+        "paper_reader.run.v2.schema.json",
+        "paper_reader.command-result.v2.schema.json",
+        "paper_reader.review-package.v2.schema.json",
+        "paper_reader.candidate.v2.schema.json",
+    ]:
+        (root / "references" / "schemas" / name).write_text("{}\n", encoding="utf-8")
+    return root
+
+
+def _prepared_then_claimed_worker_fixture(tmp_path: Path) -> PreparedWorkerFixture:
+    built_worker = _local_fixture(tmp_path)
+    source = json.loads(built_worker.source_path.read_text(encoding="utf-8"))
+    prepared_run_dir = tmp_path / "paper_analysis_v2"
+    prepared_source_path = prepared_run_dir / "source" / "source.json"
+    source_raw = _json(prepared_source_path, source)
+    source_ref = _foreign_ref(
+        prepared_run_dir,
+        prepared_source_path,
+        "source_snapshot",
+        "application/json",
+    )
+    run_id = "run_prepared_attempt"
+    evidence_path, _evidence, evidence_ref = _make_evidence(
+        prepared_run_dir,
+        run_id=run_id,
+        source_sha256=built_worker.manifest.items[0].source.sha256,
+    )
+    prepared_run = {
+        "schema_version": "paper_reader.run.v2",
+        "run_id": run_id,
+        "created_at": NOW,
+        "source": source,
+        "target": {
+            "target_type": "local",
+            "resolved_path": str(tmp_path / "paper_note_v2.md"),
+            "parent_device": tmp_path.stat().st_dev,
+            "parent_inode": tmp_path.stat().st_ino,
+        },
+        "status": "prepared",
+        "artifacts": [source_ref, evidence_ref],
+        "gate": _gate("passed", ()),
+        "live_preflight": None,
+    }
+    prepared_run_path = prepared_run_dir / "run.json"
+    _json(prepared_run_path, prepared_run)
+    assert sha256_bytes(source_raw) == source_ref["sha256"]
+
+    manifest_path = tmp_path / "batch-manifest.json"
+    _json(manifest_path, built_worker.manifest.model_dump(mode="json"))
+    batch_skill_root = tmp_path / "batch-skill-root"
+    batch_skill_root.mkdir()
+    batch_run = tmp_path / "batch-run"
+    initialize_run(
+        manifest_path,
+        request_id="44444444-4444-4444-8444-444444444444",
+        skill_root=batch_skill_root,
+        output=batch_run,
+        initialized_at=NOW,
+    )
+    local_assignment = claim_local_prepare(
+        batch_run,
+        worker_id="preparer",
+        request_id="55555555-5555-4555-8555-555555555555",
+        now="2026-07-10T00:00:01Z",
+    ).result["assignments"][0]
+    view = load_run_view(batch_run)
+    paper_reader_root = _fake_paper_reader_root(tmp_path)
+    local_result = LocalPrepareResult(
+        schema_version="paper_reader_batch.local-prepare-result.v2",
+        manifest_sha256=view.manifest_sha256,
+        item_id=local_assignment["item_id"],
+        worker_id=local_assignment["worker_id"],
+        claim_id=local_assignment["claim_id"],
+        attempt_id=local_assignment["attempt_id"],
+        attempt_number=local_assignment["attempt_number"],
+        lease_token_sha256=sha256_bytes(local_assignment["lease_token"].encode()),
+        status="prepared",
+        source=view.manifest.items[0].source,
+        paper_reader_root=paper_reader_root_identity(paper_reader_root),
+        paper_reader_run_directory={
+            "device": prepared_run_dir.stat().st_dev,
+            "inode": prepared_run_dir.stat().st_ino,
+        },
+        paper_reader_run=_outer_ref(
+            prepared_run_path,
+            "paper_reader.run.v2",
+            run_id,
+        ),
+        evidence=_outer_ref(
+            evidence_path,
+            "paper_reader.evidence.v2-internal",
+            "evidence_test",
+        ),
+    )
+    local_result_path = tmp_path / "local-prepare-result.json"
+    local_result_raw = canonical_json_bytes(local_result)
+    local_result_path.write_bytes(local_result_raw)
+    local_finish = finish_local_prepare(
+        batch_run,
+        str(local_assignment["item_id"]),
+        worker_id=str(local_assignment["worker_id"]),
+        claim_id=str(local_assignment["claim_id"]),
+        lease_token=str(local_assignment["lease_token"]),
+        attempt_id=str(local_assignment["attempt_id"]),
+        result_path=local_result_path,
+        expected_root=paper_reader_root,
+        request_id="66666666-6666-4666-8666-666666666666",
+        now="2026-07-10T00:00:02Z",
+    )
+    worker_assignment = claim_worker(
+        batch_run,
+        worker_id="reader",
+        request_id="77777777-7777-4777-8777-777777777777",
+        now="2026-07-10T00:00:03Z",
+    ).result["assignments"][0]
+    return PreparedWorkerFixture(
+        batch_run=batch_run,
+        built_worker=built_worker,
+        local_result=local_result,
+        local_result_sha256=str(local_finish.result["result_sha256"]),
+        worker_assignment=worker_assignment,
+    )
+
+
 def _zotero_fixture(
     tmp_path: Path,
     *,
@@ -899,6 +1058,483 @@ def _zotero_fixture(
         source_path=normalized_path,
         evidence_path=evidence_path,
     )
+
+
+def test_worker_prompt_returns_exact_journal_bound_prepared_attempt(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepared_then_claimed_worker_fixture(tmp_path)
+    assignment = prepared.worker_assignment
+
+    prompt = worker_prompt(
+        prepared.batch_run,
+        str(assignment["item_id"]),
+        worker_id=str(assignment["worker_id"]),
+        claim_id=str(assignment["claim_id"]),
+        lease_token=str(assignment["lease_token"]),
+        attempt_id=str(assignment["attempt_id"]),
+        now="2026-07-10T00:00:04Z",
+    )
+
+    assert prompt["local_prepare_result_sha256"] == prepared.local_result_sha256
+    assert prompt["paper_reader_run"] == prepared.local_result.paper_reader_run.model_dump(
+        mode="json"
+    )
+    assert prompt["evidence"] == prepared.local_result.evidence.model_dump(mode="json")
+
+
+def test_worker_prompt_rejects_same_path_prepared_run_directory_replacement(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepared_then_claimed_worker_fixture(tmp_path)
+    assignment = prepared.worker_assignment
+    assert prepared.local_result.paper_reader_run is not None
+    prepared_run_dir = Path(prepared.local_result.paper_reader_run.path).parent
+    detached = tmp_path / "detached-prepared-run"
+    prepared_run_dir.rename(detached)
+    shutil.copytree(detached, prepared_run_dir)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        worker_prompt(
+            prepared.batch_run,
+            str(assignment["item_id"]),
+            worker_id=str(assignment["worker_id"]),
+            claim_id=str(assignment["claim_id"]),
+            lease_token=str(assignment["lease_token"]),
+            attempt_id=str(assignment["attempt_id"]),
+            now="2026-07-10T00:00:04Z",
+        )
+
+    assert exc_info.value.code == "local_prepare_binding_mismatch"
+
+
+@pytest.mark.parametrize(
+    "schema_version",
+    [
+        None,
+        "paper_reader_batch.local-prepare-result.v1",
+        "paper_reader_batch.local-prepare-result.v3",
+    ],
+)
+def test_worker_finish_rejects_unsupported_prepared_result_schema_before_transaction_lock(
+    schema_version: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = _prepared_then_claimed_worker_fixture(tmp_path)
+    assignment = prepared.worker_assignment
+    prepared_path = (
+        prepared.batch_run
+        / "results"
+        / "local-prepare"
+        / f"{prepared.local_result_sha256}.json"
+    )
+    payload = json.loads(prepared_path.read_bytes())
+    if schema_version is None:
+        payload.pop("schema_version")
+    else:
+        payload["schema_version"] = schema_version
+    prepared_path.write_bytes(canonical_json_bytes(payload))
+
+    worker_result = prepared.built_worker.result.model_copy(
+        update={
+            "manifest_sha256": prepared.local_result.manifest_sha256,
+            "worker_id": assignment["worker_id"],
+            "claim_id": assignment["claim_id"],
+            "attempt_id": assignment["attempt_id"],
+            "attempt_number": assignment["attempt_number"],
+            "lease_token_sha256": sha256_bytes(str(assignment["lease_token"]).encode()),
+        }
+    )
+    worker_result_path = tmp_path / "worker-result-for-schema-preflight.json"
+    worker_result_path.write_bytes(canonical_json_bytes(worker_result))
+
+    def forbidden_transaction(*_args, **_kwargs):
+        raise AssertionError("unsupported prepared result reached append_transaction")
+
+    monkeypatch.setattr(worker_module, "append_transaction", forbidden_transaction)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        finish_worker(
+            prepared.batch_run,
+            str(assignment["item_id"]),
+            worker_id=str(assignment["worker_id"]),
+            claim_id=str(assignment["claim_id"]),
+            lease_token=str(assignment["lease_token"]),
+            attempt_id=str(assignment["attempt_id"]),
+            result_path=worker_result_path,
+            request_id="89898989-8989-4989-8989-898989898989",
+            now="2026-07-10T00:00:04Z",
+        )
+
+    assert exc_info.value.code == "unsupported_run_schema"
+
+
+def test_worker_finish_rejects_success_from_run_other_than_prepared_attempt(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepared_then_claimed_worker_fixture(tmp_path)
+    assignment = prepared.worker_assignment
+    worker_result = prepared.built_worker.result.model_copy(
+        update={
+            "manifest_sha256": load_run_view(prepared.batch_run).manifest_sha256,
+            "worker_id": assignment["worker_id"],
+            "claim_id": assignment["claim_id"],
+            "attempt_id": assignment["attempt_id"],
+            "attempt_number": assignment["attempt_number"],
+            "lease_token_sha256": sha256_bytes(str(assignment["lease_token"]).encode()),
+        }
+    )
+    worker_result_path = tmp_path / "worker-result-from-run-b.json"
+    worker_result_path.write_bytes(canonical_json_bytes(worker_result))
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        finish_worker(
+            prepared.batch_run,
+            str(assignment["item_id"]),
+            worker_id=str(assignment["worker_id"]),
+            claim_id=str(assignment["claim_id"]),
+            lease_token=str(assignment["lease_token"]),
+            attempt_id=str(assignment["attempt_id"]),
+            result_path=worker_result_path,
+            request_id="88888888-8888-4888-8888-888888888888",
+            now="2026-07-10T00:00:04Z",
+        )
+
+    assert exc_info.value.code == "local_prepare_binding_mismatch"
+    assert load_run_view(prepared.batch_run).state.items[0].worker_status == "claimed"
+
+
+def test_run_recover_replays_worker_success_against_exact_prepared_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = _prepared_then_claimed_worker_fixture(tmp_path)
+    assignment = prepared.worker_assignment
+    worker_result = prepared.built_worker.result.model_copy(
+        update={
+            "manifest_sha256": load_run_view(prepared.batch_run).manifest_sha256,
+            "worker_id": assignment["worker_id"],
+            "claim_id": assignment["claim_id"],
+            "attempt_id": assignment["attempt_id"],
+            "attempt_number": assignment["attempt_number"],
+            "lease_token_sha256": sha256_bytes(str(assignment["lease_token"]).encode()),
+        }
+    )
+    worker_result_path = tmp_path / "worker-result-from-run-b-for-replay.json"
+    worker_result_path.write_bytes(canonical_json_bytes(worker_result))
+
+    # Simulate a worker.finished event written by the pre-fix runtime, whose
+    # finish-time validator did not retain the prepared-attempt continuation.
+    with monkeypatch.context() as finish_context:
+        finish_context.setattr(
+            worker_module,
+            "validate_worker_result_artifacts",
+            lambda *_args, **_kwargs: None,
+        )
+        finish_worker(
+            prepared.batch_run,
+            str(assignment["item_id"]),
+            worker_id=str(assignment["worker_id"]),
+            claim_id=str(assignment["claim_id"]),
+            lease_token=str(assignment["lease_token"]),
+            attempt_id=str(assignment["attempt_id"]),
+            result_path=worker_result_path,
+            request_id="89898989-8989-4989-8989-898989898989",
+            now="2026-07-10T00:00:04Z",
+        )
+
+    before = {
+        path.relative_to(prepared.batch_run).as_posix(): path.read_bytes()
+        for path in prepared.batch_run.rglob("*")
+        if path.is_file()
+    }
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        recover_run(
+            prepared.batch_run,
+            request_id="90909090-9090-4090-8090-909090909090",
+            now="2026-07-10T00:00:05Z",
+        )
+
+    assert exc_info.value.code == "local_prepare_binding_mismatch"
+    assert {
+        path.relative_to(prepared.batch_run).as_posix(): path.read_bytes()
+        for path in prepared.batch_run.rglob("*")
+        if path.is_file()
+    } == before
+
+
+def test_worker_success_rejects_same_path_same_run_id_directory_replacement(
+    tmp_path: Path,
+) -> None:
+    built = _local_fixture(tmp_path)
+    assert built.result.paper_reader_run is not None
+    run_payload = json.loads(built.run_path.read_text(encoding="utf-8"))
+    evidence_ref = next(
+        ref for ref in run_payload["artifacts"] if ref["role"] == "evidence_manifest"
+    )
+    evidence_path = built.run_dir / evidence_ref["path"]
+    evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    run_metadata = built.run_dir.stat()
+    prepared = LocalPrepareResult(
+        schema_version="paper_reader_batch.local-prepare-result.v2",
+        manifest_sha256=built.result.manifest_sha256,
+        item_id=built.result.item_id,
+        worker_id="preparer",
+        claim_id="99999999-9999-4999-8999-999999999999",
+        attempt_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        attempt_number=1,
+        lease_token_sha256="b" * 64,
+        status="prepared",
+        source=built.result.source,
+        paper_reader_root=paper_reader_root_identity(_fake_paper_reader_root(tmp_path)),
+        paper_reader_run_directory=FileIdentity(
+            device=run_metadata.st_dev,
+            inode=run_metadata.st_ino,
+        ),
+        paper_reader_run=built.result.paper_reader_run,
+        evidence=_outer_ref(
+            evidence_path,
+            "paper_reader.evidence.v2-internal",
+            str(evidence_payload["evidence_id"]),
+        ),
+    )
+    legacy_payload = prepared.model_dump(mode="json")
+    legacy_payload.pop("paper_reader_run_directory")
+    legacy_prepared = LocalPrepareResult.model_validate(legacy_payload)
+    with pytest.raises(BatchRuntimeError) as legacy_mutation_error:
+        validate_worker_result_artifacts(
+            built.manifest,
+            built.result,
+            prepared_local_result=legacy_prepared,
+        )
+    assert legacy_mutation_error.value.code == "local_prepare_binding_mismatch"
+    assert validate_worker_result_artifacts(
+        built.manifest,
+        built.result,
+        allow_mutable_run=True,
+        prepared_local_result=legacy_prepared,
+        allow_legacy_prepared_run_identity=True,
+    ) is None
+    assert validate_worker_result_artifacts(
+        built.manifest,
+        built.result,
+        prepared_local_result=prepared,
+    ) is None
+
+    detached = tmp_path / "detached-final-run"
+    built.run_dir.rename(detached)
+    shutil.copytree(detached, built.run_dir)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(
+            built.manifest,
+            built.result,
+            prepared_local_result=prepared,
+        )
+
+    assert exc_info.value.code == "local_prepare_binding_mismatch"
+
+
+def test_worker_validation_never_reads_replacement_run_closure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built = _local_fixture(tmp_path)
+    assert built.result.paper_reader_run is not None
+    run_payload = json.loads(built.run_path.read_text(encoding="utf-8"))
+    evidence_ref = next(
+        ref for ref in run_payload["artifacts"] if ref["role"] == "evidence_manifest"
+    )
+    evidence_path = built.run_dir / evidence_ref["path"]
+    evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    run_metadata = built.run_dir.stat()
+    prepared = LocalPrepareResult(
+        schema_version="paper_reader_batch.local-prepare-result.v2",
+        manifest_sha256=built.result.manifest_sha256,
+        item_id=built.result.item_id,
+        worker_id="preparer",
+        claim_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        attempt_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        attempt_number=1,
+        lease_token_sha256="d" * 64,
+        status="prepared",
+        source=built.result.source,
+        paper_reader_root=paper_reader_root_identity(_fake_paper_reader_root(tmp_path)),
+        paper_reader_run_directory=FileIdentity(
+            device=run_metadata.st_dev,
+            inode=run_metadata.st_ino,
+        ),
+        paper_reader_run=built.result.paper_reader_run,
+        evidence=_outer_ref(
+            evidence_path,
+            "paper_reader.evidence.v2-internal",
+            str(evidence_payload["evidence_id"]),
+        ),
+    )
+    valid_replacement = tmp_path / "valid-replacement"
+    shutil.copytree(built.run_dir, valid_replacement)
+    missing_note = built.candidate_path.parent / "note.md"
+    missing_note.rename(missing_note.with_name("note.md.missing"))
+    detached_original = tmp_path / "detached-original"
+    detached_replacement = tmp_path / "detached-replacement"
+    original_artifact_read = artifact_module._read_artifact_bytes
+    original_stat = artifact_module.os.stat
+    swapped = False
+
+    def swap_after_run_read(path: Path, *, code: str) -> bytes:
+        nonlocal swapped
+        raw = original_artifact_read(path, code=code)
+        if Path(path) == built.run_path and not swapped:
+            built.run_dir.rename(detached_original)
+            valid_replacement.rename(built.run_dir)
+            swapped = True
+        return raw
+
+    def restore_after_source_stat(path, *args, **kwargs):
+        nonlocal swapped
+        result = original_stat(path, *args, **kwargs)
+        if Path(path) == Path(built.result.source.path) and swapped:
+            built.run_dir.rename(detached_replacement)
+            detached_original.rename(built.run_dir)
+            swapped = False
+        return result
+
+    monkeypatch.setattr(artifact_module, "_read_artifact_bytes", swap_after_run_read)
+    monkeypatch.setattr(artifact_module.os, "stat", restore_after_source_stat)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(
+            built.manifest,
+            built.result,
+            prepared_local_result=prepared,
+        )
+    assert exc_info.value.code == "artifact_closed_world_mismatch"
+
+
+def test_worker_finish_rejects_same_run_candidate_using_other_than_prepared_evidence(
+    tmp_path: Path,
+) -> None:
+    built = _local_fixture(tmp_path)
+    final_run = json.loads(built.run_path.read_text(encoding="utf-8"))
+    run_id = str(final_run["run_id"])
+    manifest_item = built.manifest.items[0]
+    prepared_evidence_path, _prepared_evidence, prepared_evidence_ref = _make_evidence(
+        built.run_dir,
+        run_id=run_id,
+        source_sha256=manifest_item.source.sha256,
+        evidence_id="evidence_prepared_attempt",
+    )
+    source_ref = next(
+        ref for ref in final_run["artifacts"] if ref["role"] == "source_snapshot"
+    )
+    prepared_run = {
+        **final_run,
+        "status": "prepared",
+        "artifacts": [source_ref, prepared_evidence_ref],
+    }
+    _json(built.run_path, prepared_run)
+
+    manifest_path = tmp_path / "batch-manifest.json"
+    _json(manifest_path, built.manifest.model_dump(mode="json"))
+    batch_skill_root = tmp_path / "batch-skill-root"
+    batch_skill_root.mkdir()
+    batch_run = tmp_path / "batch-run"
+    initialize_run(
+        manifest_path,
+        request_id="91919191-9191-4191-8191-919191919191",
+        skill_root=batch_skill_root,
+        output=batch_run,
+        initialized_at=NOW,
+    )
+    local_assignment = claim_local_prepare(
+        batch_run,
+        worker_id="preparer",
+        request_id="92929292-9292-4292-8292-929292929292",
+        now="2026-07-10T00:00:01Z",
+    ).result["assignments"][0]
+    view = load_run_view(batch_run)
+    paper_reader_root = _fake_paper_reader_root(tmp_path)
+    local_result = LocalPrepareResult(
+        schema_version="paper_reader_batch.local-prepare-result.v2",
+        manifest_sha256=view.manifest_sha256,
+        item_id=local_assignment["item_id"],
+        worker_id=local_assignment["worker_id"],
+        claim_id=local_assignment["claim_id"],
+        attempt_id=local_assignment["attempt_id"],
+        attempt_number=local_assignment["attempt_number"],
+        lease_token_sha256=sha256_bytes(local_assignment["lease_token"].encode()),
+        status="prepared",
+        source=view.manifest.items[0].source,
+        paper_reader_root=paper_reader_root_identity(paper_reader_root),
+        paper_reader_run_directory={
+            "device": built.run_dir.stat().st_dev,
+            "inode": built.run_dir.stat().st_ino,
+        },
+        paper_reader_run=_outer_ref(built.run_path, "paper_reader.run.v2", run_id),
+        evidence=_outer_ref(
+            prepared_evidence_path,
+            "paper_reader.evidence.v2-internal",
+            "evidence_prepared_attempt",
+        ),
+    )
+    local_result_path = tmp_path / "local-prepare-result.json"
+    local_result_path.write_bytes(canonical_json_bytes(local_result))
+    finish_local_prepare(
+        batch_run,
+        str(local_assignment["item_id"]),
+        worker_id=str(local_assignment["worker_id"]),
+        claim_id=str(local_assignment["claim_id"]),
+        lease_token=str(local_assignment["lease_token"]),
+        attempt_id=str(local_assignment["attempt_id"]),
+        result_path=local_result_path,
+        expected_root=paper_reader_root,
+        request_id="93939393-9393-4393-8393-939393939393",
+        now="2026-07-10T00:00:02Z",
+    )
+
+    built.rewrite_final_run(
+        {
+            **final_run,
+            "artifacts": [*final_run["artifacts"], prepared_evidence_ref],
+        }
+    )
+    worker_assignment = claim_worker(
+        batch_run,
+        worker_id="reader",
+        request_id="94949494-9494-4494-8494-949494949494",
+        now="2026-07-10T00:00:03Z",
+    ).result["assignments"][0]
+    worker_result = built.result.model_copy(
+        update={
+            "manifest_sha256": load_run_view(batch_run).manifest_sha256,
+            "worker_id": worker_assignment["worker_id"],
+            "claim_id": worker_assignment["claim_id"],
+            "attempt_id": worker_assignment["attempt_id"],
+            "attempt_number": worker_assignment["attempt_number"],
+            "lease_token_sha256": sha256_bytes(
+                str(worker_assignment["lease_token"]).encode()
+            ),
+        }
+    )
+    worker_result_path = tmp_path / "worker-result-other-evidence.json"
+    worker_result_path.write_bytes(canonical_json_bytes(worker_result))
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        finish_worker(
+            batch_run,
+            str(worker_assignment["item_id"]),
+            worker_id=str(worker_assignment["worker_id"]),
+            claim_id=str(worker_assignment["claim_id"]),
+            lease_token=str(worker_assignment["lease_token"]),
+            attempt_id=str(worker_assignment["attempt_id"]),
+            result_path=worker_result_path,
+            request_id="95959595-9595-4595-8595-959595959595",
+            now="2026-07-10T00:00:04Z",
+        )
+
+    assert exc_info.value.code == "local_prepare_binding_mismatch"
+    assert load_run_view(batch_run).state.items[0].worker_status == "claimed"
 
 
 def test_accepts_real_local_and_zotero_success_artifact_shapes(tmp_path: Path) -> None:

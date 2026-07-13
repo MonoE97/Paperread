@@ -21,6 +21,7 @@ from paper_reader.contracts import (
 )
 from paper_reader.public_cli import app
 from paper_reader.storage import canonical_json_bytes
+from paper_reader.v2_loader import RunLoadError
 
 from test_v2_zotero_authorization import (
     _authorize,
@@ -535,10 +536,13 @@ def test_verify_replay_and_unbound_main_recovery_reject_tampered_closed_sidecar(
         def get_note(self, _note_key: str):
             raise AssertionError("tampered terminal verification reached provider")
 
-    with pytest.raises(module.ZoteroVerificationError) as exc_info:
+    expected_error = RunLoadError if case == "record_mismatch" else module.ZoteroVerificationError
+    with pytest.raises(expected_error) as exc_info:
         _verify(authorization_path, ProviderMustNotRun())
 
-    assert exc_info.value.code == "verification_tampered"
+    assert exc_info.value.code == (
+        "unsupported_run_schema" if case == "record_mismatch" else "verification_tampered"
+    )
 
 
 @pytest.mark.parametrize(

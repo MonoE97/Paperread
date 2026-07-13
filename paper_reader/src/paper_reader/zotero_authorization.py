@@ -4,7 +4,7 @@ import hashlib
 import os
 import stat
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -139,7 +139,11 @@ def _preflight_existing_authorization_schemas(
     for ref in (item for item in loaded.run.artifacts if item.role == "write_authorization"):
         path = run_dir / ref.path
         try:
-            raw = read_anchored_bytes(run_anchor, path)
+            raw = read_anchored_bytes(
+                run_anchor,
+                path,
+                max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            )
         except (OSError, ValueError) as exc:
             raise ZoteroAuthorizationError(
                 "authorization_tampered",
@@ -166,7 +170,11 @@ def _preflight_existing_authorization_schemas(
                 )
                 if stat.S_ISREG(metadata.st_mode) and name.endswith(".json"):
                     path = authorizations_dir / name
-                    raw = read_anchored_bytes(authorizations_anchor, path)
+                    raw = read_anchored_bytes(
+                        authorizations_anchor,
+                        path,
+                        max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                    )
                 elif stat.S_ISDIR(metadata.st_mode) and name.startswith("authorization_"):
                     sidecar = authorizations_dir / name
                     with open_anchored_directory(
@@ -174,7 +182,11 @@ def _preflight_existing_authorization_schemas(
                         sidecar,
                     ) as sidecar_anchor:
                         record_path = sidecar / "record.json"
-                        raw = read_anchored_bytes(sidecar_anchor, record_path)
+                        raw = read_anchored_bytes(
+                            sidecar_anchor,
+                            record_path,
+                            max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                        )
                 else:
                     raise ZoteroAuthorizationError(
                         "unsafe_artifact_path",
@@ -230,9 +242,20 @@ def _candidate_target_without_network(
                         "run_directory_changed",
                         "run directory changed during authorization preflight",
                     )
-                raw = read_anchored_bytes(run_anchor, candidate_path)
+                raw = read_anchored_bytes(
+                    run_anchor,
+                    candidate_path,
+                    max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                )
+                _load_candidate(
+                    candidate_path,
+                    loaded_run=replace(loaded, run_directory_anchor=run_anchor),
+                    require_local=False,
+                )
         except ZoteroAuthorizationError:
             raise
+        except LocalPublicationError as exc:
+            raise ZoteroAuthorizationError(exc.code, str(exc), data=exc.data) from exc
         except (OSError, RunLoadError, ValueError) as exc:
             raise ZoteroAuthorizationError(
                 "candidate_unreadable",
@@ -291,11 +314,22 @@ def _candidate_target_without_network(
                         "run_directory_changed",
                         "run directory changed during authorization preflight",
                     )
-                raw = read_anchored_bytes(run_anchor, candidate_path)
+                raw = read_anchored_bytes(
+                    run_anchor,
+                    candidate_path,
+                    max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                )
+                _load_candidate(
+                    candidate_path,
+                    loaded_run=replace(loaded, run_directory_anchor=run_anchor),
+                    require_local=False,
+                )
                 _preflight_existing_authorization_schemas(loaded, run_anchor)
                 validate_directory_anchor(root_anchor)
         except ZoteroAuthorizationError:
             raise
+        except LocalPublicationError as exc:
+            raise ZoteroAuthorizationError(exc.code, str(exc), data=exc.data) from exc
         except RunLoadError as exc:
             if exc.code == "unsupported_run_schema":
                 raise
@@ -566,7 +600,11 @@ def _recover_matching_orphan_authorization(
                 if stat.S_ISREG(metadata.st_mode) and name.endswith(".json"):
                     main_path = authorizations_dir / name
                     relative = main_path.relative_to(run_dir).as_posix()
-                    raw = read_anchored_bytes(authorizations_anchor, main_path)
+                    raw = read_anchored_bytes(
+                        authorizations_anchor,
+                        main_path,
+                        max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                    )
                     if relative not in bound_paths:
                         candidates.append((main_path, raw))
                     continue
@@ -579,7 +617,11 @@ def _recover_matching_orphan_authorization(
                         sidecar_dir,
                     ) as sidecar_anchor:
                         record_path = sidecar_dir / "record.json"
-                        raw = read_anchored_bytes(sidecar_anchor, record_path)
+                        raw = read_anchored_bytes(
+                            sidecar_anchor,
+                            record_path,
+                            max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                        )
                     candidates.append((authorizations_dir / f"{name}.json", raw))
                     continue
                 raise ZoteroAuthorizationError(
@@ -658,7 +700,12 @@ def _recover_matching_orphan_authorization(
     recovered = matches[0]
     if not anchored_entry_exists(run_anchor, recovered.authorization_path):
         recovery_record = recovered.authorization_path.with_suffix("") / "record.json"
-        recovery_bytes = read_anchored_bytes(run_anchor, recovery_record)
+        recovery_bytes = read_anchored_bytes(
+            run_anchor,
+            recovery_record,
+            expected_size=len(recovered.authorization_bytes),
+            max_bytes=len(recovered.authorization_bytes),
+        )
         artifact_paths = _authorization_artifact_paths(
             run_dir,
             recovered.authorization.authorization_id,

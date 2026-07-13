@@ -20,6 +20,7 @@ from paper_reader.contracts import (
     PaperReaderVerification,
 )
 from paper_reader.note_hash import note_html_sha256
+from paper_reader.raw_schema import require_raw_schema_version
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
@@ -39,7 +40,7 @@ from paper_reader.storage import (
     tree_snapshot_from_bytes,
     validate_directory_anchor,
 )
-from paper_reader.v2_loader import LoadedRun, RunLoadError
+from paper_reader.v2_loader import DirectoryAnchor, LoadedRun, RunLoadError
 from paper_reader.zotero_authorization_loader import (
     InspectedAuthorization,
     LoadedAuthorization,
@@ -106,13 +107,29 @@ def _read_closed_reconciliation_sidecar(
                     "reconciliation_tampered",
                     "reconciliation sidecar membership is not the exact closed set",
                 )
-            before_snapshot = snapshot_directory_fd(sidecar_anchor.descriptor)
+            before_snapshot = snapshot_directory_fd(
+                sidecar_anchor.descriptor,
+                max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+                max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+                max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+            )
             members = {
-                name: read_anchored_bytes(sidecar_anchor, sidecar / name)
+                name: read_anchored_bytes(
+                    sidecar_anchor,
+                    sidecar / name,
+                    max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                )
                 for name in expected_names
             }
             after_names = tuple(sorted(os.listdir(sidecar_anchor.descriptor)))
-            after_snapshot = snapshot_directory_fd(sidecar_anchor.descriptor)
+            after_snapshot = snapshot_directory_fd(
+                sidecar_anchor.descriptor,
+                max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+                max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+                max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+            )
             if after_names != before_names or after_snapshot != before_snapshot:
                 raise ZoteroReconciliationError(
                     "reconciliation_tampered",
@@ -188,6 +205,11 @@ def _validate_reconciliation_record(
     bound: LoadedAuthorization,
     loaded: LoadedRun,
 ) -> PaperReaderReconciliation:
+    require_raw_schema_version(
+        raw,
+        expected="paper_reader.reconciliation.v2",
+        artifact_path=path,
+    )
     try:
         reconciliation = PaperReaderReconciliation.model_validate_json(raw)
     except ValidationError as exc:
@@ -312,6 +334,7 @@ def _existing_reconciliation(
         raw = read_anchored_bytes(
             anchor,
             reconciliation_path if main_exists else recovery_record,
+            max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
         )
     except ZoteroReconciliationError:
         raise
@@ -350,7 +373,12 @@ def _existing_reconciliation(
             expected_roles={artifact.role for artifact in reconciliation.artifacts},
         )
         try:
-            recovered_main = read_anchored_bytes(anchor, reconciliation_path)
+            recovered_main = read_anchored_bytes(
+                anchor,
+                reconciliation_path,
+                expected_size=len(raw),
+                max_bytes=len(raw),
+            )
         except (OSError, ValueError) as exc:
             raise ZoteroReconciliationError(
                 "reconciliation_tampered",
@@ -797,6 +825,60 @@ def _preflight_reconciliation_authorization(
         raise ZoteroReconciliationError(exc.code, str(exc), data=exc.data) from exc
 
 
+def _preflight_existing_reconciliation_schema(
+    inspection: InspectedAuthorization,
+) -> None:
+    artifact_paths = _reconciliation_artifact_paths(
+        inspection.run_dir,
+        inspection.authorization.authorization_id,
+        allow_existing_sidecar=True,
+        allow_existing_main=True,
+    )
+    record_path = artifact_paths.sidecar / "record.json"
+    with DirectoryAnchor.open(
+        inspection.run_dir,
+        manifest_path=inspection.run_dir / "run.json",
+    ) as anchor:
+        if (anchor.device, anchor.inode) != (
+            inspection.run_directory_device,
+            inspection.run_directory_inode,
+        ):
+            raise ZoteroReconciliationError(
+                "run_directory_changed",
+                "reconciliation run changed during terminal schema preflight",
+            )
+        main_exists = anchored_entry_exists(anchor, artifact_paths.main)
+        record_exists = anchored_entry_exists(anchor, record_path)
+        if not main_exists and not record_exists:
+            return
+        existing_records = tuple(
+            path
+            for path, exists in (
+                (artifact_paths.main, main_exists),
+                (record_path, record_exists),
+            )
+            if exists
+        )
+        for selected_path in existing_records:
+            try:
+                raw = read_anchored_bytes(
+                    anchor,
+                    selected_path,
+                    max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                )
+            except (OSError, ValueError) as exc:
+                raise ZoteroReconciliationError(
+                    "reconciliation_tampered",
+                    "reconciliation terminal cannot be inspected before lock acquisition",
+                ) from exc
+            require_raw_schema_version(
+                raw,
+                expected="paper_reader.reconciliation.v2",
+                artifact_path=selected_path,
+            )
+        validate_directory_anchor(anchor)
+
+
 def _refresh_reconciliation_inspection(
     authorization_input: Path,
     previous: InspectedAuthorization,
@@ -833,6 +915,7 @@ def reconcile_zotero_authorization(
     provider: ZoteroReadProvider | None = None,
 ) -> ReconciledZoteroWrite:
     inspection = _preflight_reconciliation_authorization(authorization_input)
+    _preflight_existing_reconciliation_schema(inspection)
     resolved_provider = provider or LocalApiZoteroReadProvider()
     try:
         return _reconcile_zotero_authorization_from_inspection(

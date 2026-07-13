@@ -16,6 +16,7 @@ from paper_reader.contracts import (
     Sha256,
     StrictContractModel,
 )
+from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.storage import (
     DirectoryAnchorLike,
     anchored_entry_exists,
@@ -178,7 +179,13 @@ def _validated_records(
 
     records: list[_ValidatedReservationRecord] = []
     try:
-        before_snapshot = snapshot_directory_fd(parent_anchor.descriptor)
+        before_snapshot = snapshot_directory_fd(
+            parent_anchor.descriptor,
+            max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+            max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+            max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+        )
     except (OSError, ValueError) as exc:
         _tampered("authorization reservation ledger cannot be snapshotted", cause=exc)
     for name in names:
@@ -206,8 +213,16 @@ def _validated_records(
                     )
                 record_path = entry_path / RECORD_FILENAME
                 witness_path = entry_path / WITNESS_FILENAME
-                raw = read_anchored_bytes(entry_anchor, record_path)
-                witness_raw = read_anchored_bytes(entry_anchor, witness_path)
+                raw = read_anchored_bytes(
+                    entry_anchor,
+                    record_path,
+                    max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                )
+                witness_raw = read_anchored_bytes(
+                    entry_anchor,
+                    witness_path,
+                    max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                )
                 reservation = ZoteroAuthorizationReservation.model_validate_json(raw)
                 witness = ZoteroAuthorizationReservationWitness.model_validate_json(
                     witness_raw
@@ -258,7 +273,13 @@ def _validated_records(
     try:
         after_names = sorted(os.listdir(parent_anchor.descriptor))
         after_parent = os.fstat(parent_anchor.descriptor)
-        after_snapshot = snapshot_directory_fd(parent_anchor.descriptor)
+        after_snapshot = snapshot_directory_fd(
+            parent_anchor.descriptor,
+            max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+            max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+            max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+        )
         validate_directory_anchor(parent_anchor)
     except (OSError, ValueError) as exc:
         _tampered("authorization reservation ledger changed while scanned", cause=exc)

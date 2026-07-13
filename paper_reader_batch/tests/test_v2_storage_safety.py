@@ -7,12 +7,44 @@ import tempfile
 
 import pytest
 
+import paper_reader_batch.v2_json as json_module
 from paper_reader_batch.v2_errors import BatchRuntimeError
-from paper_reader_batch.v2_json import locked_file, publish_bytes_no_replace, read_bytes
+from paper_reader_batch.v2_json import (
+    locked_file,
+    open_directory_fd,
+    publish_bytes_no_replace,
+    read_bytes,
+)
 from paper_reader_batch.v2_manifest import create_pdf_paths_manifest
 
 
 REQUEST_1 = "11111111-1111-4111-8111-111111111111"
+
+
+def test_anchored_relative_read_stays_on_held_directory_during_path_replacement(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "paper_analysis"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_bytes(b"held run")
+    detached_held = tmp_path / "paper_analysis.held"
+    detached_replacement = tmp_path / "paper_analysis.replacement"
+
+    with open_directory_fd(run_dir, create=False) as (descriptor, _bound):
+        run_dir.rename(detached_held)
+        run_dir.mkdir()
+        (run_dir / "run.json").write_bytes(b"replacement run")
+
+        observed = json_module.read_relative_bytes(
+            descriptor,
+            "run.json",
+            code="child_artifact_mismatch",
+        )
+
+        run_dir.rename(detached_replacement)
+        detached_held.rename(run_dir)
+
+    assert observed == b"held run"
 
 
 def _crash_after_rename(target: str) -> None:

@@ -108,6 +108,171 @@ def test_prepare_builds_one_immutable_complete_pdf_evidence_bundle(tmp_path: Pat
     assert resource_checks["run_size_bytes"]["actual"] == final_run_size
 
 
+def test_prepare_extracts_from_the_pdf_identity_verified_before_path_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.evidence_bundle as evidence_bundle
+
+    source = tmp_path / "paper.pdf"
+    replacement = tmp_path / "replacement.pdf"
+    for path, text in (
+        (source, "ORIGINAL VERIFIED CONTENT"),
+        (replacement, "REPLACEMENT CONTENT"),
+    ):
+        document = fitz.open()
+        page = document.new_page()
+        page.insert_text((72, 72), text)
+        document.save(path)
+        document.close()
+    original_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    initialized = _invoke(["run", "init-local", str(source)])
+    run_dir = Path(_result_payload(initialized)["data"]["run_dir"])
+    original_page_count = evidence_bundle._page_count
+
+    def replace_source_after_page_count(path: Path) -> int:
+        page_count = original_page_count(path)
+        os.replace(replacement, source)
+        return page_count
+
+    monkeypatch.setattr(evidence_bundle, "_page_count", replace_source_after_page_count)
+
+    result = _invoke(["run", "prepare", str(run_dir), "--figure-limit", "0"])
+
+    assert result.exit_code == 0, result.stderr
+    evidence_dir = Path(_result_payload(result)["data"]["evidence_dir"])
+    extraction = json.loads((evidence_dir / "extract.json").read_text(encoding="utf-8"))
+    manifest = json.loads((evidence_dir / "evidence.json").read_text(encoding="utf-8"))
+    assert "ORIGINAL VERIFIED CONTENT" in extraction["text"]
+    assert "REPLACEMENT CONTENT" not in extraction["text"]
+    assert manifest["source_sha256"] == original_sha256
+
+
+@pytest.mark.skipif(os.name != "posix", reason="anonymous descriptor paths are POSIX-only")
+def test_prepare_uses_an_unlinked_verified_pdf_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.evidence_bundle as evidence_bundle
+
+    source = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, source)
+    initialized = _invoke(["run", "init-local", str(source)])
+    run_dir = Path(_result_payload(initialized)["data"]["run_dir"])
+    original_page_count = evidence_bundle._page_count
+    observed: dict[str, int] = {}
+
+    def inspect_snapshot(path: Path) -> int:
+        observed["nlink"] = os.stat(path).st_nlink
+        return original_page_count(path)
+
+    monkeypatch.setattr(evidence_bundle, "_page_count", inspect_snapshot)
+
+    result = _invoke(["run", "prepare", str(run_dir), "--figure-limit", "0"])
+
+    assert result.exit_code == 0, result.stderr
+    assert observed["nlink"] == 0
+
+
+def test_prepare_page_count_failure_reports_only_the_original_pdf_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.evidence_bundle as evidence_bundle
+
+    source = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, source)
+    initialized = _invoke(["run", "init-local", str(source)])
+    run_dir = Path(_result_payload(initialized)["data"]["run_dir"])
+    observed: dict[str, str] = {}
+
+    def fail_page_count(path: Path) -> int:
+        observed["internal_path"] = str(path)
+        raise evidence_bundle.EvidenceBundleError(
+            "invalid_local_pdf",
+            f"local PDF cannot be opened for preparation: {path}",
+            data={"source_pdf": str(path)},
+        )
+
+    monkeypatch.setattr(evidence_bundle, "_page_count", fail_page_count)
+
+    result = _invoke(["run", "prepare", str(run_dir), "--figure-limit", "0"])
+
+    assert result.exit_code == 1
+    payload = _result_payload(result)
+    assert payload["code"] == "invalid_local_pdf"
+    assert payload["data"]["source_pdf"] == str(source.resolve())
+    rendered = result.stdout + result.stderr
+    assert str(source.resolve()) in rendered
+    assert observed["internal_path"] not in rendered
+
+
+def test_prepare_text_extraction_failure_reports_only_the_original_pdf_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.evidence_bundle as evidence_bundle
+
+    source = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, source)
+    initialized = _invoke(["run", "init-local", str(source)])
+    run_dir = Path(_result_payload(initialized)["data"]["run_dir"])
+    observed: dict[str, str] = {}
+
+    def fail_extraction(_pdf_path: Path, **kwargs) -> dict:
+        internal_path = str(kwargs["_verified_pdf_path"])
+        observed["internal_path"] = internal_path
+        raise ValueError(f"text extraction failed: {internal_path}")
+
+    monkeypatch.setattr(evidence_bundle, "extract_pdf", fail_extraction)
+
+    result = _invoke(["run", "prepare", str(run_dir), "--figure-limit", "0"])
+
+    assert result.exit_code == 1
+    payload = _result_payload(result)
+    assert payload["code"] == "invalid_local_pdf"
+    assert payload["data"]["source_pdf"] == str(source.resolve())
+    rendered = result.stdout + result.stderr
+    assert str(source.resolve()) in rendered
+    assert observed["internal_path"] not in rendered
+
+
+def test_prepare_figure_degradation_persists_only_the_original_pdf_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, source)
+    initialized = _invoke(["run", "init-local", str(source)])
+    run_dir = Path(_result_payload(initialized)["data"]["run_dir"])
+    observed: dict[str, str] = {}
+
+    def fail_figure_extraction(_pdf_path: Path, output_dir: Path, **kwargs) -> dict:
+        assert output_dir.name == "figures"
+        internal_path = str(kwargs["_verified_pdf_path"])
+        observed["internal_path"] = internal_path
+        raise RuntimeError(f"figure read failed: {internal_path}")
+
+    monkeypatch.setattr(
+        "paper_reader.evidence_figures.extract_figures",
+        fail_figure_extraction,
+    )
+
+    result = _invoke(["run", "prepare", str(run_dir), "--figure-limit", "1"])
+
+    assert result.exit_code == 0, result.stderr
+    evidence_dir = Path(_result_payload(result)["data"]["evidence_dir"])
+    manifest = json.loads((evidence_dir / "evidence.json").read_text(encoding="utf-8"))
+    figure_check = next(
+        item for item in manifest["resource_checks"] if item["name"] == "figure_extraction"
+    )
+    assert figure_check["message"] == (
+        f"RuntimeError: figure read failed: {source.resolve()}"
+    )
+    persisted = json.dumps(manifest, ensure_ascii=False) + result.stdout + result.stderr
+    assert observed["internal_path"] not in persisted
+
+
 def test_prepare_succeeds_with_no_table_members_when_numeric_signals_have_no_section(
     tmp_path: Path,
 ) -> None:

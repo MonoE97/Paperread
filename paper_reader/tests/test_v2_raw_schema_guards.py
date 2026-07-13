@@ -37,6 +37,7 @@ from test_v2_zotero_authorization import (
     _filesystem_snapshot,
 )
 from test_v2_zotero_candidate import InMemoryZoteroProvider, _sealed_zotero_run
+from test_v2_zotero_verification import _note_snapshot
 
 
 UNSUPPORTED_SCHEMA_CASES = ("missing", "v1", "unknown", "valid_non_object")
@@ -144,6 +145,62 @@ def _replace_authorization_candidate_schema(
         authorization_bytes
     )
     return candidate_path
+
+
+def _replace_bound_artifact_schema(
+    run_dir: Path,
+    *,
+    role: str,
+    expected: str,
+    schema_case: str,
+) -> Path:
+    run_payload = json.loads((run_dir / "run.json").read_bytes())
+    artifact_ref = next(item for item in run_payload["artifacts"] if item["role"] == role)
+    artifact_path = run_dir / artifact_ref["path"]
+    _write_unsupported_schema_case(artifact_path, expected, schema_case)
+    artifact_bytes = artifact_path.read_bytes()
+    artifact_ref["sha256"] = hashlib.sha256(artifact_bytes).hexdigest()
+    artifact_ref["size_bytes"] = len(artifact_bytes)
+    (run_dir / "run.json").write_bytes(canonical_json_bytes(run_payload))
+    return artifact_path
+
+
+def _replace_candidate_review_package_schema(
+    candidate_path: Path,
+    *,
+    schema_case: str,
+) -> Path:
+    run_dir = candidate_path.parent.parent.parent
+    candidate_payload = json.loads(candidate_path.read_bytes())
+    package_ref = next(
+        item
+        for item in candidate_payload["artifacts"]
+        if item["role"] == "review_package_snapshot"
+    )
+    package_path = run_dir / package_ref["path"]
+    _write_unsupported_schema_case(
+        package_path,
+        "paper_reader.review-package.v2",
+        schema_case,
+    )
+    package_bytes = package_path.read_bytes()
+    package_ref["sha256"] = hashlib.sha256(package_bytes).hexdigest()
+    package_ref["size_bytes"] = len(package_bytes)
+    candidate_payload["sealed_review"] = package_ref
+    candidate_bytes = canonical_json_bytes(candidate_payload)
+    candidate_path.write_bytes(candidate_bytes)
+
+    run_payload = json.loads((run_dir / "run.json").read_bytes())
+    candidate_relative = candidate_path.relative_to(run_dir).as_posix()
+    candidate_ref = next(
+        item
+        for item in run_payload["artifacts"]
+        if item["role"] == "candidate" and item["path"] == candidate_relative
+    )
+    candidate_ref["sha256"] = hashlib.sha256(candidate_bytes).hexdigest()
+    candidate_ref["size_bytes"] = len(candidate_bytes)
+    (run_dir / "run.json").write_bytes(canonical_json_bytes(run_payload))
+    return package_path
 
 
 @pytest.mark.parametrize("artifact_name", ["summary.json", "review.json"])
@@ -519,6 +576,140 @@ def test_authorization_preflight_rejects_unsupported_run_before_parent_lock(
 
 
 @pytest.mark.parametrize("operation", ["verify", "reconcile"])
+@pytest.mark.parametrize("schema_case", UNSUPPORTED_SCHEMA_CASES)
+def test_terminal_artifact_rejects_unsupported_schema_before_lock_or_network(
+    operation: str,
+    schema_case: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_path, provider = _candidate(tmp_path)
+    authorized = _authorize(candidate_path, provider)
+    authorization_path = authorized.authorization_path
+    run_dir = authorization_path.parent.parent
+    if operation == "verify":
+        note = _note_snapshot(authorized.authorization)
+        provider.notes = {"NOTE1": note}
+        terminal = zotero_verification_module.verify_zotero_authorization(
+            authorization_path,
+            note_key="NOTE1",
+            provider=provider,
+        )
+        terminal_path = terminal.verification_path
+        terminal_dir = terminal.verification_dir
+        terminal_role = "zotero_verification"
+        expected_schema = "paper_reader.verification.v2"
+        module = zotero_verification_module
+    else:
+        provider.children = []
+        provider.notes = {}
+        terminal = zotero_reconciliation_module.reconcile_zotero_authorization(
+            authorization_path,
+            provider=provider,
+        )
+        terminal_path = terminal.reconciliation_path
+        terminal_dir = terminal.reconciliation_dir
+        terminal_role = "zotero_reconciliation"
+        expected_schema = "paper_reader.reconciliation.v2"
+        module = zotero_reconciliation_module
+
+    _write_unsupported_schema_case(terminal_path, expected_schema, schema_case)
+    terminal_bytes = terminal_path.read_bytes()
+    (terminal_dir / "record.json").write_bytes(terminal_bytes)
+    run_payload = json.loads((run_dir / "run.json").read_bytes())
+    terminal_ref = next(
+        item for item in run_payload["artifacts"] if item["role"] == terminal_role
+    )
+    terminal_ref["sha256"] = hashlib.sha256(terminal_bytes).hexdigest()
+    terminal_ref["size_bytes"] = len(terminal_bytes)
+    (run_dir / "run.json").write_bytes(canonical_json_bytes(run_payload))
+    before = _filesystem_snapshot(run_dir)
+
+    class ProviderMustNotRun:
+        def get_note(self, _note_key: str):
+            raise AssertionError("terminal schema guard must run before Zotero read")
+
+        def get_children(self, _parent_key: str):
+            raise AssertionError("terminal schema guard must run before Zotero read")
+
+    monkeypatch.setattr(module, "locked_zotero_parent", _forbidden_lock)
+    monkeypatch.setattr(module, "locked_v2_run", _forbidden_lock)
+
+    with pytest.raises(RunLoadError) as exc_info:
+        if operation == "verify":
+            module.verify_zotero_authorization(
+                authorization_path,
+                note_key="NOTE1",
+                provider=ProviderMustNotRun(),
+            )
+        else:
+            module.reconcile_zotero_authorization(
+                authorization_path,
+                provider=ProviderMustNotRun(),
+            )
+
+    assert exc_info.value.code == "unsupported_run_schema"
+    assert exc_info.value.manifest_path == terminal_path
+    assert _filesystem_snapshot(run_dir) == before
+
+
+@pytest.mark.parametrize("operation", ["verify", "reconcile"])
+def test_terminal_sidecar_record_rejects_v1_before_lock_when_main_is_valid_v2(
+    operation: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_path, provider = _candidate(tmp_path)
+    authorized = _authorize(candidate_path, provider)
+    authorization_path = authorized.authorization_path
+    run_dir = authorization_path.parent.parent
+    if operation == "verify":
+        provider.notes = {"NOTE1": _note_snapshot(authorized.authorization)}
+        terminal = zotero_verification_module.verify_zotero_authorization(
+            authorization_path,
+            note_key="NOTE1",
+            provider=provider,
+        )
+        terminal_path = terminal.verification_path
+        terminal_dir = terminal.verification_dir
+        module = zotero_verification_module
+    else:
+        provider.children = []
+        provider.notes = {}
+        terminal = zotero_reconciliation_module.reconcile_zotero_authorization(
+            authorization_path,
+            provider=provider,
+        )
+        terminal_path = terminal.reconciliation_path
+        terminal_dir = terminal.reconciliation_dir
+        module = zotero_reconciliation_module
+
+    record_path = terminal_dir / "record.json"
+    _write_unsupported_schema_case(record_path, "unused.v2", "v1")
+    before = _filesystem_snapshot(run_dir)
+    monkeypatch.setattr(module, "locked_zotero_parent", _forbidden_lock)
+    monkeypatch.setattr(module, "locked_v2_run", _forbidden_lock)
+
+    with pytest.raises(RunLoadError) as exc_info:
+        if operation == "verify":
+            module.verify_zotero_authorization(
+                authorization_path,
+                note_key="NOTE1",
+                provider=provider,
+            )
+        else:
+            module.reconcile_zotero_authorization(
+                authorization_path,
+                provider=provider,
+            )
+
+    assert exc_info.value.code == "unsupported_run_schema"
+    assert exc_info.value.manifest_path == record_path
+    assert terminal_path.read_bytes() != record_path.read_bytes()
+    assert _filesystem_snapshot(run_dir) == before
+
+
+@pytest.mark.parametrize("operation", ["verify", "reconcile"])
 @pytest.mark.parametrize(
     "tamper_case",
     ["record_mismatch", "extra_file", "nested_directory", "record_hardlink", "record_symlink"],
@@ -737,6 +928,112 @@ def test_review_seal_rejects_run_directory_replacement_after_preflight(
     assert getattr(exc_info.value, "code", None) == "run_directory_changed"
     assert not (run_dir / "reviews").exists()
     assert not (detached / "reviews").exists()
+
+
+@pytest.mark.parametrize(
+    "schema_case",
+    UNSUPPORTED_SCHEMA_CASES,
+)
+def test_candidate_build_preflights_review_package_schema_before_lock(
+    schema_case: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = _sealed_run(tmp_path)
+    package_path = _replace_bound_artifact_schema(
+        run_dir,
+        role="review_package",
+        expected="paper_reader.review-package.v2",
+        schema_case=schema_case,
+    )
+    before = _filesystem_snapshot(run_dir)
+    monkeypatch.setattr(candidate_builder_module, "locked_v2_run", _forbidden_lock)
+
+    with pytest.raises(RunLoadError) as exc_info:
+        candidate_builder_module.build_local_candidate(run_dir)
+
+    assert exc_info.value.code == "unsupported_run_schema"
+    assert exc_info.value.manifest_path == package_path
+    assert _filesystem_snapshot(run_dir) == before
+    assert not (run_dir / "candidates").exists()
+
+
+def test_candidate_build_rejects_v1_review_package_before_ref_integrity_or_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = _sealed_run(tmp_path)
+    run_payload = json.loads((run_dir / "run.json").read_bytes())
+    package_ref = next(
+        item for item in run_payload["artifacts"] if item["role"] == "review_package"
+    )
+    package_path = run_dir / package_ref["path"]
+    _write_unsupported_schema_case(
+        package_path,
+        "paper_reader.review-package.v2",
+        "v1",
+    )
+    before = _filesystem_snapshot(run_dir)
+    monkeypatch.setattr(candidate_builder_module, "locked_v2_run", _forbidden_lock)
+
+    with pytest.raises(RunLoadError) as exc_info:
+        candidate_builder_module.build_local_candidate(run_dir)
+
+    assert exc_info.value.code == "unsupported_run_schema"
+    assert exc_info.value.manifest_path == package_path
+    assert _filesystem_snapshot(run_dir) == before
+    assert not (run_dir / "candidates").exists()
+
+
+@pytest.mark.parametrize("operation", ["local_publish", "zotero_authorize"])
+@pytest.mark.parametrize("schema_case", UNSUPPORTED_SCHEMA_CASES)
+def test_candidate_review_package_snapshot_rejects_unsupported_schema_before_side_effect(
+    operation: str,
+    schema_case: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if operation == "local_publish":
+        run_dir, candidate_path = _built_candidate(tmp_path)
+        module = local_publish_module
+    else:
+        candidate_path, _provider = _candidate(tmp_path)
+        run_dir = candidate_path.parent.parent.parent
+        module = zotero_authorization_module
+    package_path = _replace_candidate_review_package_schema(
+        candidate_path,
+        schema_case=schema_case,
+    )
+    before = _filesystem_snapshot(run_dir)
+    monkeypatch.setattr(module, "locked_v2_run", _forbidden_lock)
+
+    if operation == "local_publish":
+        with pytest.raises(RunLoadError) as exc_info:
+            local_publish_module.publish_local_candidate(candidate_path)
+        assert not (tmp_path / "paper_note.md").exists()
+    else:
+        class ProviderMustNotRun:
+            def get_parent(self, _item_key: str):
+                raise AssertionError("candidate schema guard must run before Zotero read")
+
+            def get_children(self, _parent_key: str):
+                raise AssertionError("candidate schema guard must run before Zotero read")
+
+        monkeypatch.setattr(
+            zotero_authorization_module,
+            "locked_zotero_parent",
+            _forbidden_lock,
+        )
+        with pytest.raises(RunLoadError) as exc_info:
+            zotero_authorization_module.authorize_zotero_candidate(
+                candidate_path,
+                provider=ProviderMustNotRun(),
+            )
+        assert not (run_dir / "authorizations").exists()
+
+    assert exc_info.value.code == "unsupported_run_schema"
+    assert exc_info.value.manifest_path == package_path
+    assert _filesystem_snapshot(run_dir) == before
 
 
 @pytest.mark.parametrize(

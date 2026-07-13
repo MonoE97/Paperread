@@ -17,6 +17,7 @@ from paper_reader.storage import (
     snapshot_anchored_tree,
     validate_directory_anchor,
 )
+from paper_reader.resource_policy import V2_RESOURCE_POLICY
 
 from paper_reader.v2_loader import (
     DirectoryAnchor,
@@ -66,11 +67,22 @@ def _verify_expected_run_artifacts(
         artifact_path = anchor.path / relative
         if expected.kind == "file":
             actual_digest = hashlib.sha256(
-                read_anchored_bytes(anchor, artifact_path)
+                read_anchored_bytes(
+                    anchor,
+                    artifact_path,
+                    max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                )
             ).hexdigest()
         elif expected.kind == "tree":
             actual_digest = canonical_json_sha256(
-                snapshot_anchored_tree(anchor, artifact_path)
+                snapshot_anchored_tree(
+                    anchor,
+                    artifact_path,
+                    max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                    max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+                    max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+                    max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+                )
             )
         else:  # pragma: no cover - Literal plus frozen construction is defensive
             raise RunArtifactExpectationError("unknown expected run artifact kind")

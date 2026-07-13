@@ -5,6 +5,13 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class V2ResourcePolicy:
+    # extract.json intentionally carries several indexed views of the same
+    # extracted text (full text, pages, sections and table candidates). A
+    # smaller per-file cap conflicts with the 20M-character contract, so the
+    # bounded per-file ceiling matches the already enforced 512 MiB run cap.
+    structured_artifact_max_bytes: int = 512 * 1024 * 1024
+    artifact_tree_max_members: int = 4_096
+    artifact_tree_max_depth: int = 16
     local_pdf_max_bytes: int = 256 * 1024 * 1024
     pdf_max_pages: int = 500
     extracted_text_max_chars: int = 20_000_000

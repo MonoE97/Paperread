@@ -49,7 +49,9 @@ from paper_reader.storage import (
     new_uuid,
     rfc3339_utc,
     remove_anchored_tree,
+    read_anchored_bytes,
     sha256_file,
+    safe_relative_artifact_path,
     snapshot_anchored_tree,
     tree_snapshot_from_bytes,
     validate_directory_anchor,
@@ -296,6 +298,24 @@ def _preflight_sealed_review_from_anchor(
             "sealed_review_missing",
             "run does not bind a sealed review package",
         )
+    try:
+        package_relative = safe_relative_artifact_path(refs[-1].path)
+        package_path = run_dir / package_relative
+        package_bytes = read_anchored_bytes(
+            anchor,
+            package_path,
+            max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+        )
+    except (OSError, ValueError) as exc:
+        raise LocalPublicationError(
+            "sealed_artifact_tampered",
+            f"sealed review package cannot be inspected safely: {refs[-1].path}",
+        ) from exc
+    require_raw_schema_version(
+        package_bytes,
+        expected="paper_reader.review-package.v2",
+        artifact_path=package_path,
+    )
     package_path, package_bytes = verify_artifact_ref(
         run_dir,
         refs[-1],
@@ -366,7 +386,14 @@ def _preflight_bound_candidates(
         item for item in loaded.run.artifacts if item.role == "candidate"
     ):
         candidate_path = loaded.manifest_path.parent / artifact_ref.path
-        before_snapshot = snapshot_anchored_tree(anchor, candidate_path.parent)
+        before_snapshot = snapshot_anchored_tree(
+            anchor,
+            candidate_path.parent,
+            max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+            max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+            max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+        )
         (
             _loaded,
             verified_path,
@@ -378,7 +405,14 @@ def _preflight_bound_candidates(
             loaded_run=anchored,
             require_local=False,
         )
-        after_snapshot = snapshot_anchored_tree(anchor, verified_path.parent)
+        after_snapshot = snapshot_anchored_tree(
+            anchor,
+            verified_path.parent,
+            max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+            max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+            max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+        )
         if after_snapshot != before_snapshot:
             raise LocalPublicationError(
                 "sealed_artifact_tampered",

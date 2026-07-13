@@ -35,12 +35,14 @@ from paper_reader.run_lock import ExpectedRunArtifact, locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
     PublishConflictError,
+    TreeSnapshotLimitError,
     UnsafeStoragePathError,
     anchored_entry_exists,
     atomic_write_json,
     canonical_json_bytes,
     publish_bytes_no_replace,
     read_anchored_bytes,
+    safe_relative_artifact_path,
     snapshot_anchored_tree,
     tree_snapshot_from_hashes,
     validate_directory_anchor,
@@ -73,6 +75,52 @@ class LocalCandidatePublicationPreflight:
     candidate_path: Path
     candidate_bytes: bytes
     candidate_digest: str
+
+
+def _preflight_review_package_snapshot_schema(
+    run_dir: Path,
+    candidate_dir: Path,
+    candidate: PaperReaderCandidate,
+    *,
+    anchor: DirectoryAnchor,
+) -> tuple[ArtifactRef, Path, bytes]:
+    package_refs = tuple(
+        artifact
+        for artifact in candidate.artifacts
+        if artifact.role == "review_package_snapshot"
+    )
+    if len(package_refs) != 1 or candidate.sealed_review != package_refs[0]:
+        raise LocalPublicationError(
+            "candidate_tampered",
+            "candidate must bind exactly one sealed review package snapshot",
+        )
+    package_ref = package_refs[0]
+    try:
+        package_relative = safe_relative_artifact_path(package_ref.path)
+        package_path = run_dir / package_relative
+        if not package_path.is_relative_to(candidate_dir):
+            raise LocalPublicationError(
+                "candidate_tampered",
+                "candidate review package snapshot escapes its immutable tree",
+            )
+        package_bytes = read_anchored_bytes(
+            anchor,
+            package_path,
+            max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+        )
+    except LocalPublicationError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise LocalPublicationError(
+            "candidate_tampered",
+            "candidate review package snapshot cannot be inspected safely",
+        ) from exc
+    require_raw_schema_version(
+        package_bytes,
+        expected="paper_reader.review-package.v2",
+        artifact_path=package_path,
+    )
+    return package_ref, package_path, package_bytes
 
 
 def _load_candidate(
@@ -112,8 +160,30 @@ def _load_candidate(
         return loaded, *result[1:]
 
     try:
-        before_snapshot = snapshot_anchored_tree(anchor, candidate_dir)
-        raw = read_anchored_bytes(anchor, candidate_path)
+        before_snapshot = snapshot_anchored_tree(
+            anchor,
+            candidate_dir,
+            max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+            max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+            max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+        )
+        raw = read_anchored_bytes(
+            anchor,
+            candidate_path,
+            max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+        )
+    except TreeSnapshotLimitError as exc:
+        code = (
+            "run_size_limit_exceeded"
+            if exc.limit_name == "max_total_bytes"
+            else "candidate_tampered"
+        )
+        raise LocalPublicationError(
+            code,
+            str(exc),
+            data={"max_bytes": exc.maximum},
+        ) from exc
     except (OSError, ValueError) as exc:
         raise LocalPublicationError(
             "candidate_tampered",
@@ -130,6 +200,12 @@ def _load_candidate(
         raise LocalPublicationError("candidate_tampered", f"strict candidate validation failed: {exc}") from exc
     if canonical_json_bytes(candidate) != raw:
         raise LocalPublicationError("candidate_tampered", "candidate.json is not canonical JSON")
+    _preflight_review_package_snapshot_schema(
+        run_dir,
+        candidate_dir,
+        candidate,
+        anchor=anchor,
+    )
     digest = candidate_core_digest(candidate)
     relative = candidate_path.relative_to(run_dir).as_posix()
     refs = [item for item in loaded.run.artifacts if item.role == "candidate" and item.path == relative]
@@ -139,8 +215,8 @@ def _load_candidate(
         raise LocalPublicationError("candidate_tampered", "candidate core digest or size mismatch")
     if candidate.run_id != loaded.run.run_id:
         raise LocalPublicationError("candidate_tampered", "candidate run_id mismatch")
-    if candidate.source != loaded.run.source or candidate.target != loaded.run.target:
-        raise LocalPublicationError("candidate_tampered", "candidate source/target binding mismatch")
+    if candidate.source != loaded.run.source:
+        raise LocalPublicationError("candidate_tampered", "candidate source binding mismatch")
     if candidate.gate.status != "write_ready" or candidate.gate.blockers:
         raise LocalPublicationError("candidate_not_ready", "candidate gate is not write_ready")
     if require_local and (
@@ -197,6 +273,12 @@ def _load_candidate(
         raise LocalPublicationError("candidate_tampered", "candidate artifact membership is incomplete")
     if candidate.evidence_manifest not in candidate.artifacts or candidate.sealed_review not in candidate.artifacts:
         raise LocalPublicationError("candidate_tampered", "candidate gate refs are not artifact members")
+    review_package_path, review_package_bytes = verified["review_package_snapshot"][0]
+    require_raw_schema_version(
+        review_package_bytes,
+        expected="paper_reader.review-package.v2",
+        artifact_path=review_package_path,
+    )
     if isinstance(candidate.target, LocalPublicationTarget):
         _note_path, note_bytes = verified["note_markdown"][0]
         if (
@@ -222,8 +304,26 @@ def _load_candidate(
     else:  # pragma: no cover - strict target discriminator makes this unreachable
         raise LocalPublicationError("candidate_tampered", "candidate target type is invalid")
     try:
-        after_snapshot = snapshot_anchored_tree(anchor, candidate_dir)
+        after_snapshot = snapshot_anchored_tree(
+            anchor,
+            candidate_dir,
+            max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+            max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+            max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+        )
         expected_snapshot = tree_snapshot_from_hashes(expected_members)
+    except TreeSnapshotLimitError as exc:
+        code = (
+            "run_size_limit_exceeded"
+            if exc.limit_name == "max_total_bytes"
+            else "candidate_tampered"
+        )
+        raise LocalPublicationError(
+            code,
+            str(exc),
+            data={"max_bytes": exc.maximum},
+        ) from exc
     except (OSError, ValueError) as exc:
         raise LocalPublicationError(
             "candidate_tampered",
@@ -242,6 +342,49 @@ def _load_candidate(
     return loaded, candidate_path, candidate, digest, {
         role: tuple(items) for role, items in verified.items()
     }
+
+
+def _preflight_candidate_review_package_snapshot(
+    loaded: LoadedRun,
+    *,
+    anchor: DirectoryAnchor,
+    candidate_path: Path,
+    candidate_bytes: bytes,
+) -> PaperReaderCandidate:
+    try:
+        candidate = PaperReaderCandidate.model_validate_json(candidate_bytes)
+    except ValidationError as exc:
+        raise LocalPublicationError(
+            "candidate_tampered",
+            f"strict candidate validation failed: {exc}",
+        ) from exc
+    if canonical_json_bytes(candidate) != candidate_bytes:
+        raise LocalPublicationError(
+            "candidate_tampered",
+            "candidate.json is not canonical JSON",
+        )
+    package_ref, preflight_package_path, preflight_package_bytes = (
+        _preflight_review_package_snapshot_schema(
+            loaded.manifest_path.parent,
+            candidate_path.parent,
+            candidate,
+            anchor=anchor,
+        )
+    )
+    package_path, package_bytes = verify_artifact_ref(
+        loaded.manifest_path.parent,
+        package_ref,
+        anchor=anchor,
+    )
+    if (
+        package_path != preflight_package_path
+        or package_bytes != preflight_package_bytes
+    ):
+        raise LocalPublicationError(
+            "candidate_tampered",
+            "candidate review package snapshot changed during schema preflight",
+        )
+    return candidate
 
 
 def _bind_unique_artifact(
@@ -298,10 +441,17 @@ def _read_stable_regular_file(
     *,
     conflict_code: str,
     anchor: DirectoryAnchor | None = None,
+    expected_size: int | None = None,
+    max_bytes: int | None = None,
 ) -> bytes:
     if anchor is not None:
         try:
-            return read_anchored_bytes(anchor, path)
+            return read_anchored_bytes(
+                anchor,
+                path,
+                expected_size=expected_size,
+                max_bytes=max_bytes,
+            )
         except UnsafeStoragePathError as exc:
             try:
                 validate_directory_anchor(anchor)
@@ -380,6 +530,8 @@ def _verify_exact_target(
         target_path,
         conflict_code="publish_conflict",
         anchor=anchor,
+        expected_size=len(expected),
+        max_bytes=len(expected),
     )
     if (
         len(raw) != len(expected)
@@ -462,6 +614,8 @@ def _publish_or_verify_intent(
             intent_path,
             conflict_code="publication_identity_conflict",
             anchor=run_anchor,
+            expected_size=len(intent_bytes),
+            max_bytes=len(intent_bytes),
         )
         if actual != intent_bytes:
             raise LocalPublicationError(
@@ -483,6 +637,8 @@ def _publish_or_verify_intent(
             intent_path,
             conflict_code="publication_identity_conflict",
             anchor=run_anchor,
+            expected_size=len(intent_bytes),
+            max_bytes=len(intent_bytes),
         )
         if actual != intent_bytes:
             raise LocalPublicationError(
@@ -495,6 +651,8 @@ def _publish_or_verify_intent(
                 intent_path,
                 conflict_code="publication_identity_conflict",
                 anchor=run_anchor,
+                expected_size=len(intent_bytes),
+                max_bytes=len(intent_bytes),
             )
             if actual == intent_bytes:
                 return
@@ -510,6 +668,8 @@ def _publish_or_verify_intent(
         intent_path,
         conflict_code="publication_identity_conflict",
         anchor=run_anchor,
+        expected_size=len(intent_bytes),
+        max_bytes=len(intent_bytes),
     )
     if actual != intent_bytes:
         raise LocalPublicationError(
@@ -572,6 +732,8 @@ def _publish_or_verify_receipt(
             receipt_path,
             conflict_code="receipt_conflict",
             anchor=run_anchor,
+            expected_size=len(receipt_bytes),
+            max_bytes=len(receipt_bytes),
         )
         if actual != receipt_bytes:
             raise LocalPublicationError(
@@ -586,6 +748,8 @@ def _publish_or_verify_receipt(
                 receipt_path,
                 conflict_code="receipt_conflict",
                 anchor=run_anchor,
+                expected_size=len(receipt_bytes),
+                max_bytes=len(receipt_bytes),
             )
             if actual != receipt_bytes:
                 raise LocalPublicationError(
@@ -598,6 +762,8 @@ def _publish_or_verify_receipt(
                     receipt_path,
                     conflict_code="receipt_conflict",
                     anchor=run_anchor,
+                    expected_size=len(receipt_bytes),
+                    max_bytes=len(receipt_bytes),
                 )
                 if actual == receipt_bytes:
                     pass
@@ -656,7 +822,11 @@ def _preflight_local_candidate(
             manifest_path=manifest_path,
         )
         try:
-            raw = read_anchored_bytes(anchor, candidate_path)
+            raw = read_anchored_bytes(
+                anchor,
+                candidate_path,
+                max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            )
         except (OSError, ValueError) as exc:
             raise LocalPublicationError(
                 "candidate_tampered",
@@ -666,6 +836,12 @@ def _preflight_local_candidate(
             raw,
             expected="paper_reader.candidate.v2",
             artifact_path=candidate_path,
+        )
+        _preflight_candidate_review_package_snapshot(
+            loaded,
+            anchor=anchor,
+            candidate_path=candidate_path,
+            candidate_bytes=raw,
         )
         validate_directory_anchor(anchor)
     return LocalCandidatePublicationPreflight(

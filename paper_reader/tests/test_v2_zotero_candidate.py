@@ -324,6 +324,45 @@ def test_concurrent_zotero_candidate_builds_preserve_both_immutable_bindings(
     }
 
 
+def test_zotero_candidate_rebuild_preserves_prior_bindings_as_run_target_advances(
+    tmp_path: Path,
+) -> None:
+    run_dir = _sealed_zotero_run(tmp_path)
+    provider = InMemoryZoteroProvider()
+
+    first = _build(run_dir, provider)
+    first_path = first.candidate_dir / "candidate.json"
+    first_bytes = first_path.read_bytes()
+    provider.children = [_note("NOTE1", first.candidate.note_title)]
+
+    second = _build(run_dir, provider)
+    second_path = second.candidate_dir / "candidate.json"
+    second_bytes = second_path.read_bytes()
+    provider.children.append(_note("NOTE2", second.candidate.note_title))
+
+    third = _build(run_dir, provider)
+
+    assert len(
+        {
+            first.candidate.target.note_title,
+            second.candidate.target.note_title,
+            third.candidate.target.note_title,
+        }
+    ) == 3
+    assert first_path.read_bytes() == first_bytes
+    assert second_path.read_bytes() == second_bytes
+    run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    bound = [item for item in run["artifacts"] if item["role"] == "candidate"]
+    assert len(bound) == 3
+    assert {
+        (run_dir / item["path"], item["sha256"], item["size_bytes"])
+        for item in bound
+    } == {
+        (path, hashlib.sha256(path.read_bytes()).hexdigest(), len(path.read_bytes()))
+        for path in (first_path, second_path, third.candidate_dir / "candidate.json")
+    }
+
+
 def test_zotero_candidate_size_and_publication_faults_leave_no_bound_candidate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

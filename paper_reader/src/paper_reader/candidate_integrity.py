@@ -11,8 +11,10 @@ from paper_reader.contracts import (
     LocalSourceIdentity,
     PaperReaderCandidate,
 )
+from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.storage import (
     DirectoryAnchorLike,
+    UnexpectedStorageSizeError,
     canonical_json_sha256,
     fingerprint_resolved_source,
     read_anchored_bytes,
@@ -61,8 +63,15 @@ def verify_artifact_ref(
         relative = safe_relative_artifact_path(artifact.path)
         path = Path(os.path.abspath(run_dir)).joinpath(*PurePosixPath(relative).parts)
         if anchor is not None:
-            raw = read_anchored_bytes(anchor, path)
+            raw = read_anchored_bytes(
+                anchor,
+                path,
+                expected_size=artifact.size_bytes,
+                max_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+            )
         else:
+            if artifact.size_bytes > V2_RESOURCE_POLICY.run_max_bytes:
+                raise OSError("artifact declared size exceeds the run resource cap")
             before_path = os.lstat(path)
             if (
                 stat.S_ISLNK(before_path.st_mode)
@@ -70,11 +79,25 @@ def verify_artifact_ref(
                 or before_path.st_nlink != 1
             ):
                 raise OSError("artifact must be one single-link regular file")
+            if before_path.st_size != artifact.size_bytes:
+                raise UnexpectedStorageSizeError("artifact size differs from its expected size")
             descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             try:
                 before_fd = os.fstat(descriptor)
+                if before_fd.st_size != artifact.size_bytes:
+                    raise UnexpectedStorageSizeError("artifact size differs from its expected size")
                 chunks: list[bytes] = []
-                while chunk := os.read(descriptor, 1024 * 1024):
+                total_bytes = 0
+                while True:
+                    chunk = os.read(
+                        descriptor,
+                        min(1024 * 1024, artifact.size_bytes - total_bytes + 1),
+                    )
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > artifact.size_bytes:
+                        raise UnexpectedStorageSizeError("artifact grew beyond its expected size")
                     chunks.append(chunk)
                 after_fd = os.fstat(descriptor)
             finally:
@@ -92,7 +115,15 @@ def verify_artifact_ref(
             }
             if len(identities) != 1 or after_path.st_nlink != 1:
                 raise OSError("artifact changed while it was read")
+            if total_bytes != artifact.size_bytes:
+                raise UnexpectedStorageSizeError("artifact size differs from its expected size")
             raw = b"".join(chunks)
+    except UnexpectedStorageSizeError as exc:
+        raise LocalPublicationError(
+            "sealed_artifact_tampered",
+            f"sealed artifact hash or size mismatch: {artifact.path}",
+            data={"reason": "hash_mismatch"},
+        ) from exc
     except (OSError, ValueError) as exc:
         raise LocalPublicationError(
             "sealed_artifact_tampered",

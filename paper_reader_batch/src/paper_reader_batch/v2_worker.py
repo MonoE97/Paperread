@@ -5,21 +5,38 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import ValidationError
+from pydantic import ValidationError, model_validator
 
-from paper_reader_batch.v2_artifacts import validate_worker_result_artifacts
+from paper_reader_batch.v2_artifacts import (
+    validate_local_prepare_result_artifacts,
+    validate_worker_result_artifacts,
+)
 from paper_reader_batch.v2_contracts import (
+    LOCAL_PREPARE_RESULT_SCHEMA_VERSION,
     WORKER_RESULT_SCHEMA_VERSION,
+    ArtifactRef,
     ClaimedData,
     ClaimAssignment,
     FinishedData,
+    ItemId,
     LeaseMutationData,
+    LocalPrepareResult,
+    ManifestItem,
+    NonEmptyString,
     PdfManifestItem,
+    PositiveInt,
+    Rfc3339Utc,
     RetriedData,
+    Sha256,
+    SourceIdentity,
+    StateItem,
+    StrictModel,
+    UuidString,
     WorkerResult,
+    local_prepare_result_canonical_payload,
 )
 from paper_reader_batch.v2_errors import BatchRuntimeError
 from paper_reader_batch.v2_journal import (
@@ -43,6 +60,34 @@ from paper_reader_batch.v2_receipts import FaultHook, RequestOutcome
 
 DEFAULT_LEASE_SECONDS = 900
 MAX_LEASE_SECONDS = 3600
+
+
+class _WorkerPromptContract(StrictModel):
+    item_id: ItemId
+    worker_id: NonEmptyString
+    claim_id: UuidString
+    attempt_id: UuidString
+    attempt_number: PositiveInt
+    expires_at: Rfc3339Utc
+    source: SourceIdentity
+    expected_output: Literal["local_note", "zotero_note_candidate"]
+    instruction: NonEmptyString
+    local_prepare_result_sha256: Sha256 | None = None
+    paper_reader_run: ArtifactRef | None = None
+    evidence: ArtifactRef | None = None
+
+    @model_validator(mode="after")
+    def validate_prepared_attempt_binding(self) -> "_WorkerPromptContract":
+        prepared = (
+            self.local_prepare_result_sha256,
+            self.paper_reader_run,
+            self.evidence,
+        )
+        if any(value is not None for value in prepared) != all(
+            value is not None for value in prepared
+        ):
+            raise ValueError("prepared attempt prompt fields must be all present or all absent")
+        return self
 
 
 def _parse_utc(value: str) -> datetime:
@@ -231,6 +276,62 @@ def _active_worker_lease(
     return item, lease
 
 
+def _load_prepared_local_result(
+    view: RunView,
+    *,
+    item: StateItem,
+    manifest_item: ManifestItem,
+) -> LocalPrepareResult | None:
+    if not isinstance(manifest_item, PdfManifestItem) or item.local_prepare_status != "prepared":
+        return None
+    digest = item.local_prepare_result_sha256
+    if digest is None:
+        raise BatchRuntimeError(
+            "journal_corrupt",
+            "prepared local state lacks its content-addressed result digest",
+        )
+    result_path = view.run_dir / "results" / "local-prepare" / f"{digest}.json"
+    raw, payload = read_json_bytes(result_path, code="journal_corrupt")
+    if not isinstance(payload, dict) or payload.get("schema_version") != LOCAL_PREPARE_RESULT_SCHEMA_VERSION:
+        raise BatchRuntimeError(
+            "unsupported_run_schema",
+            f"prepared local result must use {LOCAL_PREPARE_RESULT_SCHEMA_VERSION}",
+        )
+    if sha256_bytes(raw) != digest:
+        raise BatchRuntimeError(
+            "journal_corrupt",
+            "prepared local result bytes differ from the state-bound digest",
+        )
+    try:
+        result = LocalPrepareResult.model_validate(payload)
+    except ValidationError as exc:
+        raise BatchRuntimeError(
+            "journal_corrupt",
+            "prepared local result fails strict validation",
+        ) from exc
+    if raw != canonical_json_bytes(local_prepare_result_canonical_payload(result)):
+        raise BatchRuntimeError(
+            "journal_corrupt",
+            "prepared local result is not canonical JSON",
+        )
+    if (
+        result.manifest_sha256 != view.manifest_sha256
+        or result.item_id != item.item_id
+        or result.worker_id != item.local_prepare_last_actor_id
+        or result.claim_id != item.local_prepare_last_claim_id
+        or result.attempt_id != item.local_prepare_last_attempt_id
+        or result.attempt_number != item.local_prepare_attempt_count
+        or result.lease_token_sha256 != item.local_prepare_last_lease_token_sha256
+        or result.status != "prepared"
+        or result.source != manifest_item.source
+    ):
+        raise BatchRuntimeError(
+            "journal_corrupt",
+            "prepared local result identity differs from journal-reduced state",
+        )
+    return result
+
+
 def worker_prompt(
     run_dir: Path,
     item_id: str,
@@ -255,6 +356,17 @@ def worker_prompt(
     manifest_item = next(entry for entry in view.manifest.items if entry.item_id == item_id)
     if isinstance(manifest_item, PdfManifestItem):
         validate_pdf_source(manifest_item.source)
+    prepared = _load_prepared_local_result(
+        view,
+        item=item,
+        manifest_item=manifest_item,
+    )
+    if prepared is not None:
+        validate_local_prepare_result_artifacts(
+            view.manifest,
+            prepared,
+            expected_root=Path(prepared.paper_reader_root.path),
+        )
     instruction = (
         f"Use $paper_reader for batch item {item_id}. "
         f"Bind worker_id={worker_id}, claim_id={claim_id}, attempt_id={attempt_id}, "
@@ -263,17 +375,28 @@ def worker_prompt(
     )
     if manifest_item.input_type == "pdf_path":
         instruction += " This PDF is local-output only; never search or write Zotero."
-    return {
-        "item_id": item_id,
-        "worker_id": worker_id,
-        "claim_id": claim_id,
-        "attempt_id": attempt_id,
-        "attempt_number": lease.attempt_number,
-        "expires_at": lease.expires_at,
-        "source": manifest_item.source.model_dump(mode="json"),
-        "expected_output": item.expected_output,
-        "instruction": instruction,
-    }
+    if prepared is not None:
+        instruction += (
+            " Continue the exact prepared paper_reader run and evidence returned by this prompt; "
+            "do not initialize another run or substitute evidence."
+        )
+    prompt = _WorkerPromptContract(
+        item_id=item_id,
+        worker_id=worker_id,
+        claim_id=claim_id,
+        attempt_id=attempt_id,
+        attempt_number=lease.attempt_number,
+        expires_at=lease.expires_at,
+        source=manifest_item.source,
+        expected_output=item.expected_output,
+        instruction=instruction,
+        local_prepare_result_sha256=(
+            item.local_prepare_result_sha256 if prepared is not None else None
+        ),
+        paper_reader_run=prepared.paper_reader_run if prepared is not None else None,
+        evidence=prepared.evidence if prepared is not None else None,
+    )
+    return prompt.model_dump(mode="json", exclude_none=True)
 
 
 def renew_worker(
@@ -527,7 +650,18 @@ def finish_worker(
             or result.lease_token_sha256 != token_hash
         ):
             raise BatchRuntimeError("result_identity_mismatch", "worker result does not bind the active lease")
-        resolved_key = validate_worker_result_artifacts(view.manifest, result)
+        prepared = _load_prepared_local_result(
+            view,
+            item=item,
+            manifest_item=next(
+                entry for entry in view.manifest.items if entry.item_id == item_id
+            ),
+        )
+        resolved_key = validate_worker_result_artifacts(
+            view.manifest,
+            result,
+            prepared_local_result=prepared,
+        )
         if resolved_key is not None:
             for other_manifest in view.manifest.items:
                 if other_manifest.item_id == item_id:

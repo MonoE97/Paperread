@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.storage import (
     AtomicNoReplaceUnsupportedError,
     DirectoryAnchorLike,
@@ -89,7 +90,13 @@ class AnchoredArtifactPublication:
         try:
             _fsync_tree_fd(source_fd, source_path)
             source_metadata = os.fstat(source_fd)
-            source_snapshot = snapshot_directory_fd(source_fd)
+            source_snapshot = snapshot_directory_fd(
+                source_fd,
+                max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+                max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+                max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+            )
             sealed_snapshot = self.expected_sidecar_snapshot or source_snapshot
             if source_snapshot != sealed_snapshot:
                 raise _unsafe(
@@ -137,7 +144,13 @@ class AnchoredArtifactPublication:
                     self.paths.sidecar,
                     "published sidecar does not match the anchored staging directory",
                 )
-            destination_snapshot = snapshot_directory_fd(destination_fd)
+            destination_snapshot = snapshot_directory_fd(
+                destination_fd,
+                max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+                max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+                max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+            )
             if destination_snapshot != sealed_snapshot:
                 raise _unsafe(
                     self.paths.sidecar,

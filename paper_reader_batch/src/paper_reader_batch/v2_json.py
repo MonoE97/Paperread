@@ -7,7 +7,7 @@ import errno
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import secrets
 import stat
@@ -240,6 +240,96 @@ def _read_regular_single_link(
         if (path_after.st_dev, path_after.st_ino) != (after.st_dev, after.st_ino):
             raise BatchRuntimeError("storage_path_changed", f"file path changed during read: {name}")
         return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def read_relative_bytes(
+    directory_fd: int,
+    relative_path: str,
+    *,
+    code: str = "artifact_unreadable",
+) -> bytes:
+    """Read one regular file relative to a held directory descriptor."""
+
+    relative = PurePosixPath(relative_path)
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or relative_path != relative.as_posix()
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise BatchRuntimeError(
+            "unsafe_path",
+            f"unsafe relative artifact path: {relative_path}",
+        )
+    descriptor = os.dup(directory_fd)
+    try:
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise BatchRuntimeError(
+                "unsafe_storage",
+                "relative artifact anchor must be a directory",
+            )
+        for component in relative.parts[:-1]:
+            child = _open_child_directory(descriptor, component, create=False)
+            os.close(descriptor)
+            descriptor = child
+        return _read_regular_single_link(
+            descriptor,
+            relative.parts[-1],
+            code=code,
+        )
+    finally:
+        os.close(descriptor)
+
+
+def walk_relative_regular_files(
+    directory_fd: int,
+    relative_root: str,
+) -> set[str]:
+    root = PurePosixPath(relative_root)
+    if (
+        root.is_absolute()
+        or relative_root != root.as_posix()
+        or any(part in {"", ".."} for part in root.parts)
+    ):
+        raise BatchRuntimeError("unsafe_path", f"unsafe relative directory path: {relative_root}")
+    descriptor = os.dup(directory_fd)
+    try:
+        for component in (() if relative_root in {"", "."} else root.parts):
+            child = _open_child_directory(descriptor, component, create=False)
+            os.close(descriptor)
+            descriptor = child
+        found: set[str] = set()
+
+        def walk(current_fd: int, prefix: PurePosixPath) -> None:
+            before_names = tuple(sorted(os.listdir(current_fd)))
+            for name in before_names:
+                metadata = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
+                relative = prefix / name
+                if stat.S_ISLNK(metadata.st_mode):
+                    raise BatchRuntimeError("unsafe_storage", f"bundle contains symlink: {relative}")
+                if stat.S_ISDIR(metadata.st_mode):
+                    child_fd = _open_child_directory(current_fd, name, create=False)
+                    try:
+                        opened = os.fstat(child_fd)
+                        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                            raise BatchRuntimeError("storage_path_changed", f"bundle directory changed: {relative}")
+                        walk(child_fd, relative)
+                        current = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
+                        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                            raise BatchRuntimeError("storage_path_changed", f"bundle directory changed: {relative}")
+                    finally:
+                        os.close(child_fd)
+                elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                    found.add(relative.as_posix())
+                else:
+                    raise BatchRuntimeError("unsafe_storage", f"bundle entry is unsafe: {relative}")
+            if tuple(sorted(os.listdir(current_fd))) != before_names:
+                raise BatchRuntimeError("storage_path_changed", "bundle membership changed during walk")
+
+        walk(descriptor, PurePosixPath())
+        return found
     finally:
         os.close(descriptor)
 

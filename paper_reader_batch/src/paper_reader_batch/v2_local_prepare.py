@@ -27,12 +27,14 @@ from paper_reader_batch.v2_contracts import (
     ClaimedData,
     ClaimAssignment,
     FinishedData,
+    FileIdentity,
     LeaseMutationData,
     LocalPrepareCoordinationReservedData,
     LocalPrepareResult,
     PdfManifestItem,
     PdfSource,
     SkillRootIdentity,
+    local_prepare_result_canonical_payload,
 )
 from paper_reader_batch.v2_errors import BatchRuntimeError
 from paper_reader_batch.v2_journal import (
@@ -54,6 +56,7 @@ from paper_reader_batch.v2_json import (
     open_directory_fd,
     publish_bytes_no_replace,
     read_bytes,
+    read_relative_bytes,
     read_locked_bytes,
     read_json_bytes,
     replace_bytes_atomic,
@@ -72,7 +75,13 @@ CHILD_STARTED_SCHEMA_VERSION = "paper_reader_batch.local-prepare-child-started.v
 DEFAULT_CHILD_TIMEOUT_SECONDS = 600
 INIT_CHILD_TIMEOUT_SECONDS = 60
 COMMIT_BUFFER_SECONDS = 60
-MAX_CHILD_TIMEOUT_SECONDS = 3600
+CLAIM_TO_RUN_COORDINATION_MARGIN_SECONDS = 60
+MAX_CHILD_TIMEOUT_SECONDS = (
+    MAX_LEASE_SECONDS
+    - INIT_CHILD_TIMEOUT_SECONDS
+    - COMMIT_BUFFER_SECONDS
+    - CLAIM_TO_RUN_COORDINATION_MARGIN_SECONDS
+)
 
 
 class _InternalModel(BaseModel):
@@ -391,15 +400,18 @@ import subprocess
 import sys
 
 ack_fd = int(sys.argv[1])
-run_lock_fds = [int(value) for value in sys.argv[2].split(",")]
-request_dir_device = int(sys.argv[3])
-request_dir_inode = int(sys.argv[4])
-started_path = sys.argv[5]
-stdout_path = sys.argv[6]
-started_payload = bytes.fromhex(sys.argv[7])
-timeout_seconds = int(sys.argv[8])
-fault_stage = sys.argv[9]
-target_argv = sys.argv[10:]
+if sys.argv[2] != "commit-v1":
+    raise SystemExit(119)
+decision_fd = int(sys.argv[3])
+run_lock_fds = [int(value) for value in sys.argv[4].split(",") if value]
+request_dir_device = int(sys.argv[5])
+request_dir_inode = int(sys.argv[6])
+started_path = sys.argv[7]
+stdout_path = sys.argv[8]
+started_payload = bytes.fromhex(sys.argv[9])
+timeout_seconds = int(sys.argv[10])
+fault_stage = sys.argv[11]
+target_argv = sys.argv[12:]
 
 parent_path = os.path.dirname(started_path)
 if parent_path != os.path.dirname(stdout_path) or not target_argv:
@@ -420,10 +432,15 @@ def open_empty(name):
 stdout_fd = open_empty(os.path.basename(stdout_path))
 fcntl.flock(stdout_fd, fcntl.LOCK_EX)
 gate_read, gate_write = os.pipe()
+ownership_read, ownership_write = os.pipe()
 executor_pid = os.fork()
 if executor_pid == 0:
+    os.close(ownership_read)
     os.close(gate_write)
     os.close(ack_fd)
+    os.close(decision_fd)
+    os.write(ownership_write, b"1")
+    os.close(ownership_write)
     gate_value = os.read(gate_read, 1)
     os.close(gate_read)
     try:
@@ -483,6 +500,35 @@ if executor_pid == 0:
             pass
     raise SystemExit(returncode if 0 <= returncode <= 255 else 1)
 
+os.close(ownership_write)
+ownership = os.read(ownership_read, 1)
+os.close(ownership_read)
+if ownership != b"1":
+    os.close(ack_fd)
+    os.close(decision_fd)
+    os.close(gate_read)
+    os.close(gate_write)
+    for run_lock_fd in run_lock_fds:
+        os.close(run_lock_fd)
+    os.close(directory_fd)
+    os.close(stdout_fd)
+    os.waitpid(executor_pid, 0)
+    raise SystemExit(117)
+
+os.write(ack_fd, b"R")
+decision = os.read(decision_fd, 1)
+os.close(decision_fd)
+if decision != b"1":
+    os.close(ack_fd)
+    os.close(gate_read)
+    os.close(gate_write)
+    for run_lock_fd in run_lock_fds:
+        os.close(run_lock_fd)
+    os.close(directory_fd)
+    os.close(stdout_fd)
+    os.waitpid(executor_pid, 0)
+    raise SystemExit(118)
+
 if fault_stage == "supervisor_before_marker":
     os._exit(97)
 writing_name = os.path.basename(started_path) + ".writing"
@@ -518,7 +564,10 @@ if fault_stage == "supervisor_after_marker":
 os.close(gate_read)
 os.write(gate_write, b"1")
 os.close(gate_write)
-os.write(ack_fd, b"1")
+try:
+    os.write(ack_fd, b"S")
+except BrokenPipeError:
+    pass
 os.close(ack_fd)
 for run_lock_fd in run_lock_fds:
     os.close(run_lock_fd)
@@ -538,9 +587,65 @@ def _default_child_runner(
     timeout_seconds: int,
     invocation: _ChildInvocation,
 ) -> _RunningChild:
+    request_dir = normalized_absolute_path(invocation.started_path.parent)
+    if normalized_absolute_path(invocation.stdout_path.parent) != request_dir:
+        raise _ChildProtocolError(
+            "coordination_corrupt",
+            "child start marker and stdout must share one request directory",
+        )
+    with open_directory_fd(request_dir, create=False) as (descriptor, bound_request_dir):
+        metadata = os.fstat(descriptor)
+        if (
+            bound_request_dir != request_dir
+            or (metadata.st_dev, metadata.st_ino)
+            != (invocation.request_dir_device, invocation.request_dir_inode)
+        ):
+            raise _ChildProtocolError(
+                "coordination_corrupt",
+                "paper_reader child request directory differs from the bound attempt",
+            )
+        held_request_descriptor = os.dup(descriptor)
+    try:
+        return _default_child_runner_anchored(
+            argv,
+            cwd,
+            timeout_seconds,
+            invocation,
+            held_request_descriptor,
+        )
+    finally:
+        os.close(held_request_descriptor)
+
+
+def _read_held_started_marker(
+    request_dir_descriptor: int,
+    invocation: _ChildInvocation,
+) -> bytes | None:
+    try:
+        return read_relative_bytes(
+            request_dir_descriptor,
+            invocation.started_path.name,
+            code="coordination_marker_missing",
+        )
+    except BatchRuntimeError as exc:
+        if exc.code == "coordination_marker_missing":
+            return None
+        raise _ChildProtocolError(
+            "coordination_uncertain",
+            "paper_reader child start marker cannot be classified through its held request directory",
+        ) from exc
+
+
+def _default_child_runner_anchored(
+    argv: tuple[str, ...],
+    cwd: Path,
+    timeout_seconds: int,
+    invocation: _ChildInvocation,
+    request_dir_descriptor: int,
+) -> _RunningChild:
     read_ack, write_ack = os.pipe()
+    read_decision, write_decision = os.pipe()
     process: subprocess.Popen[bytes] | None = None
-    started_at = time.monotonic()
     try:
         process = subprocess.Popen(
             [
@@ -549,6 +654,8 @@ def _default_child_runner(
                 "-c",
                 _CHILD_LAUNCHER,
                 str(write_ack),
+                "commit-v1",
+                str(read_decision),
                 ",".join(str(descriptor) for descriptor in invocation.run_lock_descriptors),
                 str(invocation.request_dir_device),
                 str(invocation.request_dir_inode),
@@ -565,48 +672,99 @@ def _default_child_runner(
             stderr=subprocess.DEVNULL,
             shell=False,
             close_fds=True,
-            pass_fds=(write_ack, *invocation.run_lock_descriptors),
+            pass_fds=(write_ack, read_decision, *invocation.run_lock_descriptors),
             start_new_session=True,
         )
     except OSError as exc:
         raise _ChildProtocolError("child_execution_failed", "paper_reader child command could not start") from exc
     finally:
         os.close(write_ack)
-    try:
-        ready, _writable, _errors = select.select(
-            [read_ack],
-            [],
-            [],
-            min(10.0, float(timeout_seconds)),
-        )
-        acknowledgement = os.read(read_ack, 1) if ready else b""
-    finally:
-        os.close(read_ack)
-    if acknowledgement != b"1":
-        assert process is not None
-        marker_raw = (
-            read_bytes(invocation.started_path, code="coordination_corrupt")
-            if entry_exists_allow_missing_parent(invocation.started_path)
-            else None
-        )
-        if marker_raw == invocation.started_payload:
-            return _RunningChild(
-                process=process,
-                deadline=started_at + timeout_seconds + 10,
-                returncode_reliable=False,
+        os.close(read_decision)
+    ready, _writable, _errors = select.select(
+        [read_ack],
+        [],
+        [],
+        min(10.0, float(timeout_seconds)),
+    )
+    acknowledgement = os.read(read_ack, 1) if ready else b""
+    assert process is not None
+    if acknowledgement == b"R":
+        try:
+            os.write(write_decision, b"1")
+        except BrokenPipeError:
+            acknowledgement = b""
+        finally:
+            os.close(write_decision)
+        if acknowledgement == b"R":
+            started_ready, _writable, _errors = select.select(
+                [read_ack],
+                [],
+                [],
+                float(COMMIT_BUFFER_SECONDS),
             )
-        if process.poll() is None:
+            started_acknowledgement = os.read(read_ack, 1) if started_ready else b""
+            os.close(read_ack)
+            if started_acknowledgement == b"S":
+                return _RunningChild(
+                    process=process,
+                    deadline=time.monotonic() + timeout_seconds + 10,
+                    # The process is the supervisor, not the target. After the
+                    # durable-start ACK a supervisor crash must not override
+                    # the exact CLI envelope produced by its owned executor.
+                    returncode_reliable=False,
+                )
+
+            try:
+                os.kill(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            marker_raw = _read_held_started_marker(request_dir_descriptor, invocation)
+            if marker_raw == invocation.started_payload:
+                return _RunningChild(
+                    process=process,
+                    deadline=time.monotonic() + timeout_seconds + 10,
+                    returncode_reliable=False,
+                )
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            raise _ChildProtocolError(
+                "child_execution_failed",
+                "paper_reader child launcher did not durably publish its start marker",
+            )
+        os.close(read_ack)
+    else:
+        os.close(read_ack)
+        try:
+            os.write(write_decision, b"0")
+        except BrokenPipeError:
+            pass
+        finally:
+            os.close(write_decision)
+
+    if acknowledgement != b"R":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         process.wait()
+        marker_raw = _read_held_started_marker(request_dir_descriptor, invocation)
+        if marker_raw == invocation.started_payload:
+            return _RunningChild(
+                process=process,
+                deadline=time.monotonic() + timeout_seconds + 10,
+                returncode_reliable=False,
+            )
         raise _ChildProtocolError(
             "child_execution_failed",
             "paper_reader child launcher did not durably start the command",
         )
-    assert process is not None
-    return _RunningChild(process=process, deadline=started_at + timeout_seconds + 10)
+    raise _ChildProtocolError(
+        "child_execution_failed",
+        "paper_reader child launcher did not accept the launch decision",
+    )
 
 
 def _read_stdout_stage(path: Path) -> bytes | None:
@@ -886,6 +1044,27 @@ def _read_canonical_object(path: Path, *, code: str) -> tuple[bytes, dict[str, A
     return raw, payload
 
 
+def _canonical_object_from_bytes(
+    raw: bytes,
+    *,
+    artifact_path: Path,
+    code: str,
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _ChildProtocolError(
+            code,
+            f"child artifact must be valid UTF-8 JSON: {artifact_path}",
+        ) from exc
+    if not isinstance(payload, dict) or raw != canonical_json_bytes(payload):
+        raise _ChildProtocolError(
+            code,
+            f"child artifact must be one canonical JSON object: {artifact_path}",
+        )
+    return payload
+
+
 def _validate_initialized_child(
     envelope: _ChildCommandResult,
     source: PdfSource,
@@ -973,7 +1152,7 @@ def _validate_prepared_child(
     run_dir: Path,
     run_id: str,
     source: PdfSource,
-) -> tuple[ArtifactRef, ArtifactRef, Path, str, str]:
+) -> tuple[ArtifactRef, ArtifactRef, FileIdentity, Path, str, str]:
     if envelope.code != "prepared":
         raise _ChildProtocolError("incomplete_evidence", "local prepare requires complete PDF evidence")
     data = _require_exact_data(
@@ -998,26 +1177,59 @@ def _validate_prepared_child(
         raise _ChildProtocolError("incomplete_evidence", "prepare returned incomplete or invalid evidence status")
     if evidence_dir != run_dir / "evidence" / evidence_id:
         raise _ChildProtocolError("child_artifact_mismatch", "evidence directory is outside the exact run")
-    run_raw, run = _read_canonical_object(run_dir / "run.json", code="child_artifact_mismatch")
-    evidence_path = evidence_dir / "evidence.json"
-    evidence_raw, evidence = _read_canonical_object(evidence_path, code="child_artifact_mismatch")
-    if sha256_bytes(evidence_raw) != evidence_digest:
-        raise _ChildProtocolError("child_artifact_mismatch", "evidence digest differs from evidence.json")
-    if (
-        run.get("schema_version") != "paper_reader.run.v2"
-        or run.get("run_id") != run_id
-        or run.get("status") != "prepared"
-        or evidence.get("format") != "paper_reader.evidence.v2-internal"
-        or evidence.get("evidence_id") != evidence_id
-        or evidence.get("run_id") != run_id
-        or evidence.get("source_sha256") != source.sha256
-        or evidence.get("complete") is not True
-        or evidence.get("degraded") != data["degraded"]
-    ):
-        raise _ChildProtocolError(
-            "child_artifact_mismatch",
-            "prepared run/evidence identities differ from the accepted init/source",
+    with open_directory_fd(run_dir, create=False) as (run_descriptor, bound_run_dir):
+        if bound_run_dir != run_dir:
+            raise _ChildProtocolError(
+                "child_artifact_mismatch",
+                "prepared run directory is not the exact normalized initialized path",
+            )
+        run_metadata = os.fstat(run_descriptor)
+        run_directory_identity = FileIdentity(
+            device=run_metadata.st_dev,
+            inode=run_metadata.st_ino,
         )
+        run_raw = read_relative_bytes(
+            run_descriptor,
+            "run.json",
+            code="child_artifact_mismatch",
+        )
+        run = _canonical_object_from_bytes(
+            run_raw,
+            artifact_path=run_dir / "run.json",
+            code="child_artifact_mismatch",
+        )
+        evidence_path = evidence_dir / "evidence.json"
+        evidence_relative = f"evidence/{evidence_id}/evidence.json"
+        evidence_raw = read_relative_bytes(
+            run_descriptor,
+            evidence_relative,
+            code="child_artifact_mismatch",
+        )
+        evidence = _canonical_object_from_bytes(
+            evidence_raw,
+            artifact_path=evidence_path,
+            code="child_artifact_mismatch",
+        )
+        if sha256_bytes(evidence_raw) != evidence_digest:
+            raise _ChildProtocolError(
+                "child_artifact_mismatch",
+                "evidence digest differs from evidence.json",
+            )
+        if (
+            run.get("schema_version") != "paper_reader.run.v2"
+            or run.get("run_id") != run_id
+            or run.get("status") != "prepared"
+            or evidence.get("format") != "paper_reader.evidence.v2-internal"
+            or evidence.get("evidence_id") != evidence_id
+            or evidence.get("run_id") != run_id
+            or evidence.get("source_sha256") != source.sha256
+            or evidence.get("complete") is not True
+            or evidence.get("degraded") != data["degraded"]
+        ):
+            raise _ChildProtocolError(
+                "child_artifact_mismatch",
+                "prepared run/evidence identities differ from the accepted init/source",
+            )
     run_ref = ArtifactRef(
         path=str(run_dir / "run.json"),
         size_bytes=len(run_raw),
@@ -1032,7 +1244,14 @@ def _validate_prepared_child(
         schema_version="paper_reader.evidence.v2-internal",
         artifact_id=evidence_id,
     )
-    return run_ref, evidence_ref, evidence_dir, evidence_id, evidence_digest
+    return (
+        run_ref,
+        evidence_ref,
+        run_directory_identity,
+        evidence_dir,
+        evidence_id,
+        evidence_digest,
+    )
 
 
 def _validate_bound_execution_inputs(
@@ -1532,7 +1751,7 @@ def _load_result(path: Path) -> tuple[Path, bytes, LocalPrepareResult, str]:
         result = LocalPrepareResult.model_validate(payload)
     except ValidationError as exc:
         raise BatchRuntimeError("invalid_result", "local prepare result failed strict validation") from exc
-    if raw != canonical_json_bytes(result):
+    if raw != canonical_json_bytes(local_prepare_result_canonical_payload(result)):
         raise BatchRuntimeError("invalid_result", "local prepare result must use canonical JSON")
     return result_path, raw, result, sha256_bytes(raw)
 
@@ -2288,7 +2507,14 @@ def run_local_prepare(
                             message=envelope.message or f"run prepare failed with {envelope.code}",
                         )
                     else:
-                        run_ref, evidence_ref, evidence_dir, evidence_id, evidence_digest = _validate_prepared_child(
+                        (
+                            run_ref,
+                            evidence_ref,
+                            run_directory_identity,
+                            evidence_dir,
+                            evidence_id,
+                            evidence_digest,
+                        ) = _validate_prepared_child(
                             envelope,
                             run_dir=Path(record.paper_reader_run_dir),
                             run_id=record.paper_reader_run_id,
@@ -2306,6 +2532,7 @@ def run_local_prepare(
                             status="prepared",
                             source=manifest_item.source,
                             paper_reader_root=root_identity,
+                            paper_reader_run_directory=run_directory_identity,
                             paper_reader_run=run_ref,
                             evidence=evidence_ref,
                         )
@@ -2359,7 +2586,7 @@ def run_local_prepare(
                 result,
                 expected_root=root,
             )
-            result_raw = canonical_json_bytes(result)
+            result_raw = canonical_json_bytes(local_prepare_result_canonical_payload(result))
             result_sha256 = sha256_bytes(result_raw)
             result_path = preflight.run_dir / "results" / "local-prepare" / f"{result_sha256}.json"
             publish_bytes_no_replace(result_path, result_raw, allow_existing_exact=True)

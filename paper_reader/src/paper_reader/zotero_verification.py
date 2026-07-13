@@ -19,6 +19,7 @@ from paper_reader.contracts import (
     PaperReaderVerification,
 )
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
+from paper_reader.raw_schema import require_raw_schema_version
 from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
@@ -37,7 +38,7 @@ from paper_reader.storage import (
     tree_snapshot_from_bytes,
     validate_directory_anchor,
 )
-from paper_reader.v2_loader import LoadedRun, RunLoadError
+from paper_reader.v2_loader import DirectoryAnchor, LoadedRun, RunLoadError
 from paper_reader.zotero_authorization_loader import (
     InspectedAuthorization,
     LoadedAuthorization,
@@ -160,13 +161,29 @@ def _read_closed_verification_sidecar(
                     "verification_tampered",
                     "verification sidecar membership is not the exact closed set",
                 )
-            before_snapshot = snapshot_directory_fd(sidecar_anchor.descriptor)
+            before_snapshot = snapshot_directory_fd(
+                sidecar_anchor.descriptor,
+                max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+                max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+                max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+            )
             members = {
-                name: read_anchored_bytes(sidecar_anchor, sidecar / name)
+                name: read_anchored_bytes(
+                    sidecar_anchor,
+                    sidecar / name,
+                    max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                )
                 for name in _VERIFICATION_SIDECAR_NAMES
             }
             after_names = tuple(sorted(os.listdir(sidecar_anchor.descriptor)))
-            after_snapshot = snapshot_directory_fd(sidecar_anchor.descriptor)
+            after_snapshot = snapshot_directory_fd(
+                sidecar_anchor.descriptor,
+                max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+                max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+                max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+            )
             if after_names != before_names or after_snapshot != before_snapshot:
                 raise ZoteroVerificationError(
                     "verification_tampered",
@@ -193,6 +210,11 @@ def _validate_verification_record(
     note_key: str,
     loaded: LoadedRun,
 ) -> PaperReaderVerification:
+    require_raw_schema_version(
+        raw,
+        expected="paper_reader.verification.v2",
+        artifact_path=path,
+    )
     try:
         verification = PaperReaderVerification.model_validate_json(raw)
     except ValidationError as exc:
@@ -307,6 +329,7 @@ def _existing_verification(
         raw = read_anchored_bytes(
             anchor,
             verification_path if main_exists else recovery_record,
+            max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
         )
     except ZoteroVerificationError:
         raise
@@ -342,7 +365,12 @@ def _existing_verification(
             ) from exc
         recovered_members = _read_closed_verification_sidecar(loaded, verification_path)
         try:
-            recovered_main = read_anchored_bytes(anchor, verification_path)
+            recovered_main = read_anchored_bytes(
+                anchor,
+                verification_path,
+                expected_size=len(raw),
+                max_bytes=len(raw),
+            )
         except (OSError, ValueError) as exc:
             raise ZoteroVerificationError(
                 "verification_tampered",
@@ -631,6 +659,63 @@ def _preflight_verification_authorization(
         raise ZoteroVerificationError(exc.code, str(exc), data=exc.data) from exc
 
 
+def _preflight_existing_verification_schema(
+    inspection: InspectedAuthorization,
+    *,
+    note_key: str,
+) -> None:
+    artifact_paths = _verification_artifact_paths(
+        inspection.run_dir,
+        inspection.authorization.authorization_id,
+        note_key,
+        allow_existing_sidecar=True,
+        allow_existing_main=True,
+    )
+    record_path = artifact_paths.sidecar / "record.json"
+    with DirectoryAnchor.open(
+        inspection.run_dir,
+        manifest_path=inspection.run_dir / "run.json",
+    ) as anchor:
+        if (anchor.device, anchor.inode) != (
+            inspection.run_directory_device,
+            inspection.run_directory_inode,
+        ):
+            raise ZoteroVerificationError(
+                "run_directory_changed",
+                "verification run changed during terminal schema preflight",
+            )
+        main_exists = anchored_entry_exists(anchor, artifact_paths.main)
+        record_exists = anchored_entry_exists(anchor, record_path)
+        if not main_exists and not record_exists:
+            return
+        existing_records = tuple(
+            path
+            for path, exists in (
+                (artifact_paths.main, main_exists),
+                (record_path, record_exists),
+            )
+            if exists
+        )
+        for selected_path in existing_records:
+            try:
+                raw = read_anchored_bytes(
+                    anchor,
+                    selected_path,
+                    max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                )
+            except (OSError, ValueError) as exc:
+                raise ZoteroVerificationError(
+                    "verification_tampered",
+                    "verification terminal cannot be inspected before lock acquisition",
+                ) from exc
+            require_raw_schema_version(
+                raw,
+                expected="paper_reader.verification.v2",
+                artifact_path=selected_path,
+            )
+        validate_directory_anchor(anchor)
+
+
 def _refresh_verification_inspection(
     authorization_input: Path,
     previous: InspectedAuthorization,
@@ -670,6 +755,7 @@ def verify_zotero_authorization(
     if not _PORTABLE_IDENTIFIER_RE.fullmatch(note_key):
         raise ZoteroVerificationError("invalid_note_key", "note_key is not a valid identifier")
     inspection = _preflight_verification_authorization(authorization_input)
+    _preflight_existing_verification_schema(inspection, note_key=note_key)
     resolved_provider = provider or LocalApiZoteroReadProvider()
     try:
         return _verify_zotero_authorization_from_inspection(

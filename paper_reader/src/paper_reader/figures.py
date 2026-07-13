@@ -216,12 +216,18 @@ def extract_figures(
     enable_ocr_fallback: bool = False,
     allow_network_source: bool = True,
     max_candidates: int | None = None,
+    _verified_pdf_path: Path | None = None,
 ) -> dict[str, Any]:
-    resolved = Path(pdf_path).expanduser()
+    reported_path = Path(pdf_path).expanduser()
+    resolved = (
+        Path(_verified_pdf_path).expanduser()
+        if _verified_pdf_path is not None
+        else reported_path
+    )
     if not resolved.exists():
-        raise FileNotFoundError(f"PDF not found: {resolved}")
+        raise FileNotFoundError(f"PDF not found: {reported_path}")
     if not resolved.is_file():
-        raise ValueError(f"PDF path is not a file: {resolved}")
+        raise ValueError(f"PDF path is not a file: {reported_path}")
 
     output_root = Path(output_dir).expanduser()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -230,7 +236,7 @@ def extract_figures(
     source_attempts: list[dict[str, Any]] = []
     resolved_arxiv_id = arxiv_id or arxiv_source.resolve_arxiv_id(
         item_details or {},
-        pdf_path=resolved,
+        pdf_path=reported_path,
     )
 
     pdf_candidate_count = 0
@@ -303,7 +309,7 @@ def extract_figures(
 
     return {
         "arxiv_id": resolved_arxiv_id,
-        "pdf_path": str(resolved),
+        "pdf_path": str(reported_path),
         "candidate_count": candidate_selection.candidate_count,
         "selected_figures": selected,
         "source_attempts": source_attempts,

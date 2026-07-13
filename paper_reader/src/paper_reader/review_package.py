@@ -103,7 +103,11 @@ def _load_summary(
     anchor: DirectoryAnchor,
 ) -> tuple[PaperReaderSummary | None, bytes | None]:
     try:
-        raw = read_anchored_bytes(anchor, path)
+        raw = read_anchored_bytes(
+            anchor,
+            path,
+            max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+        )
         require_raw_schema_version(
             raw,
             expected="paper_reader.summary.v2",
@@ -132,7 +136,11 @@ def _load_review(
     anchor: DirectoryAnchor,
 ) -> tuple[PaperReaderReview | None, bytes | None]:
     try:
-        raw = read_anchored_bytes(anchor, path)
+        raw = read_anchored_bytes(
+            anchor,
+            path,
+            max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+        )
         require_raw_schema_version(
             raw,
             expected="paper_reader.review.v2",
@@ -173,7 +181,11 @@ def _preflight_review_schema_versions(run_path: Path) -> LoadedRun:
         ):
             path = run_dir / name
             try:
-                raw = read_anchored_bytes(anchor, path)
+                raw = read_anchored_bytes(
+                    anchor,
+                    path,
+                    max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                )
             except FileNotFoundError:
                 # Missing inputs retain the normal review blocker path.
                 continue
@@ -330,6 +342,15 @@ def _validate_review_run_loaded(loaded: LoadedRun) -> ReviewValidation:
             blockers.append(
                 _blocker("review_needs_improvement", "review still requires improvement", "review.json")
             )
+        for index, issue in enumerate(review.review_issues):
+            if issue.severity == "blocker":
+                blockers.append(
+                    _blocker(
+                        "review_issue_blocker",
+                        f"review_issues[{index}] is marked as a blocker: {issue.issue}",
+                        "review.json",
+                    )
+                )
         if summary is not None and summary.review_status != review.review_status:
             blockers.append(
                 _blocker(

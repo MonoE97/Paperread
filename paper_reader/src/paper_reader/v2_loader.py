@@ -11,7 +11,11 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from paper_reader.contracts import PaperReaderRun
+from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.storage import canonical_json_sha256
+
+
+MAX_RUN_MANIFEST_BYTES = V2_RESOURCE_POLICY.structured_artifact_max_bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,8 +185,34 @@ def _load_v2_run_from_anchor(
                 f"run manifest must be a single-link regular file: {manifest_path}",
                 manifest_path=manifest_path,
             )
+        if manifest_stat.st_size > MAX_RUN_MANIFEST_BYTES:
+            raise RunLoadError(
+                "run_manifest_too_large",
+                (
+                    f"run manifest exceeds {MAX_RUN_MANIFEST_BYTES} bytes: "
+                    f"{manifest_path}"
+                ),
+                manifest_path=manifest_path,
+            )
         chunks: list[bytes] = []
-        while chunk := os.read(descriptor, 1024 * 1024):
+        total_bytes = 0
+        while True:
+            chunk = os.read(
+                descriptor,
+                min(1024 * 1024, MAX_RUN_MANIFEST_BYTES - total_bytes + 1),
+            )
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if total_bytes > MAX_RUN_MANIFEST_BYTES:
+                raise RunLoadError(
+                    "run_manifest_too_large",
+                    (
+                        f"run manifest exceeded {MAX_RUN_MANIFEST_BYTES} bytes "
+                        f"while it was read: {manifest_path}"
+                    ),
+                    manifest_path=manifest_path,
+                )
             chunks.append(chunk)
         manifest_after = os.fstat(descriptor)
         named_after = os.stat(

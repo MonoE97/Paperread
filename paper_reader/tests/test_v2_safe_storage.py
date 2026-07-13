@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import json
 import fcntl
+import hashlib
 from pathlib import Path
 
 import pytest
 
 import paper_reader.run_lock as run_lock_module
+import paper_reader.review_package as review_package_module
 import paper_reader.storage as storage_module
 import paper_reader.v2_loader as loader_module
+import paper_reader.candidate_integrity as candidate_integrity_module
+from paper_reader.candidate_integrity import verify_artifact_ref
+from paper_reader.contracts import ArtifactRef
 from paper_reader.run_lock import locked_v2_run
 from paper_reader.storage import (
     UnsafeStoragePathError,
@@ -16,7 +21,9 @@ from paper_reader.storage import (
     atomic_write_bytes,
     create_anchored_directory,
     publish_bytes_no_replace,
+    read_anchored_bytes,
     snapshot_anchored_tree,
+    snapshot_directory_fd,
     tree_snapshot_from_bytes,
 )
 from paper_reader.v2_loader import DirectoryAnchor, RunLoadError, load_v2_run
@@ -54,6 +61,359 @@ def _write_valid_run(run_dir: Path) -> Path:
     manifest = run_dir / "run.json"
     manifest.write_text(json.dumps(_valid_run_payload()), encoding="utf-8")
     return manifest
+
+
+def test_anchored_read_rejects_declared_size_mismatch_before_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    artifact = run_dir / "artifact.json"
+    artifact.write_bytes(b"oversized")
+
+    def forbidden_read(*_args, **_kwargs):
+        raise AssertionError("size mismatch reached os.read")
+
+    with DirectoryAnchor.open(
+        run_dir,
+        manifest_path=run_dir / "run.json",
+    ) as anchor:
+        monkeypatch.setattr(storage_module.os, "read", forbidden_read)
+        with pytest.raises(UnsafeStoragePathError, match="size"):
+            read_anchored_bytes(
+                anchor,
+                artifact,
+                expected_size=4,
+                max_bytes=4,
+            )
+
+
+def test_anchored_read_enforces_limit_during_chunk_iteration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    artifact = run_dir / "artifact.json"
+    artifact.write_bytes(b"1234")
+    calls = 0
+
+    def growing_read(_descriptor: int, requested: int) -> bytes:
+        nonlocal calls
+        calls += 1
+        assert requested <= 5
+        return b"12345"
+
+    with DirectoryAnchor.open(
+        run_dir,
+        manifest_path=run_dir / "run.json",
+    ) as anchor:
+        monkeypatch.setattr(storage_module.os, "read", growing_read)
+        with pytest.raises(UnsafeStoragePathError, match="limit"):
+            read_anchored_bytes(anchor, artifact, max_bytes=4)
+
+    assert calls == 1
+
+
+def test_tree_snapshot_rejects_upfront_oversized_file_before_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "oversized.json").write_bytes(b"12345")
+
+    def forbidden_read(*_args, **_kwargs):
+        raise AssertionError("oversized snapshot member reached os.read")
+
+    with DirectoryAnchor.open(
+        run_dir,
+        manifest_path=run_dir / "run.json",
+    ) as anchor:
+        monkeypatch.setattr(storage_module.os, "read", forbidden_read)
+        with pytest.raises(UnsafeStoragePathError, match="file limit"):
+            snapshot_anchored_tree(
+                anchor,
+                max_file_bytes=4,
+                max_total_bytes=16,
+                max_members=8,
+                max_depth=2,
+            )
+
+
+def test_tree_snapshot_rejects_upfront_total_size_before_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "artifact.json").write_bytes(b"123456")
+
+    def forbidden_read(*_args, **_kwargs):
+        raise AssertionError("oversized snapshot tree reached os.read")
+
+    with DirectoryAnchor.open(
+        run_dir,
+        manifest_path=run_dir / "run.json",
+    ) as anchor:
+        monkeypatch.setattr(storage_module.os, "read", forbidden_read)
+        with pytest.raises(UnsafeStoragePathError, match="total byte limit"):
+            snapshot_anchored_tree(
+                anchor,
+                max_file_bytes=8,
+                max_total_bytes=5,
+                max_members=8,
+                max_depth=2,
+            )
+
+
+def test_tree_snapshot_enforces_limits_during_chunk_iteration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "artifact.json").write_bytes(b"1234")
+    calls = 0
+
+    def growing_read(_descriptor: int, requested: int) -> bytes:
+        nonlocal calls
+        calls += 1
+        assert requested <= 5
+        return b"12345"
+
+    with DirectoryAnchor.open(
+        run_dir,
+        manifest_path=run_dir / "run.json",
+    ) as anchor:
+        monkeypatch.setattr(storage_module.os, "read", growing_read)
+        with pytest.raises(UnsafeStoragePathError, match="file limit"):
+            snapshot_anchored_tree(
+                anchor,
+                max_file_bytes=4,
+                max_total_bytes=16,
+                max_members=8,
+                max_depth=2,
+            )
+
+    assert calls == 1
+
+
+def test_tree_snapshot_rejects_member_limit_before_reading_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "first.json").write_bytes(b"1")
+    (run_dir / "second.json").write_bytes(b"2")
+
+    def forbidden_read(*_args, **_kwargs):
+        raise AssertionError("snapshot member limit reached os.read")
+
+    descriptor = storage_module.os.open(
+        run_dir,
+        storage_module._DIRECTORY_OPEN_FLAGS,
+    )
+    try:
+        monkeypatch.setattr(storage_module.os, "read", forbidden_read)
+        with pytest.raises(UnsafeStoragePathError, match="member limit"):
+            snapshot_directory_fd(
+                descriptor,
+                max_file_bytes=4,
+                max_total_bytes=16,
+                max_members=1,
+                max_depth=2,
+            )
+    finally:
+        storage_module.os.close(descriptor)
+
+
+def test_tree_snapshot_rejects_depth_limit_before_reading_deep_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    nested = run_dir / "nested"
+    nested.mkdir(parents=True)
+    (nested / "artifact.json").write_bytes(b"1")
+
+    def forbidden_read(*_args, **_kwargs):
+        raise AssertionError("snapshot depth limit reached os.read")
+
+    with DirectoryAnchor.open(
+        run_dir,
+        manifest_path=run_dir / "run.json",
+    ) as anchor:
+        monkeypatch.setattr(storage_module.os, "read", forbidden_read)
+        with pytest.raises(UnsafeStoragePathError, match="depth limit"):
+            snapshot_anchored_tree(
+                anchor,
+                max_file_bytes=4,
+                max_total_bytes=16,
+                max_members=8,
+                max_depth=1,
+            )
+
+
+def test_artifact_ref_uses_exact_size_before_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    artifact_path = run_dir / "artifact.json"
+    artifact_path.write_bytes(b"oversized")
+    artifact = ArtifactRef(
+        role="summary_snapshot",
+        path="artifact.json",
+        sha256="a" * 64,
+        size_bytes=4,
+        media_type="application/json",
+    )
+
+    def forbidden_read(*_args, **_kwargs):
+        raise AssertionError("ArtifactRef size mismatch reached os.read")
+
+    with DirectoryAnchor.open(
+        run_dir,
+        manifest_path=run_dir / "run.json",
+    ) as anchor:
+        monkeypatch.setattr(storage_module.os, "read", forbidden_read)
+        with pytest.raises(ValueError) as exc_info:
+            verify_artifact_ref(run_dir, artifact, anchor=anchor)
+
+    assert getattr(exc_info.value, "code", None) == "sealed_artifact_tampered"
+
+
+def test_artifact_ref_rejects_declared_size_above_resource_cap_before_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    from paper_reader.resource_policy import V2_RESOURCE_POLICY
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    artifact_path = run_dir / "artifact.json"
+    artifact_path.write_bytes(b"12345678")
+    artifact = ArtifactRef(
+        role="summary_snapshot",
+        path="artifact.json",
+        sha256=hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+        size_bytes=8,
+        media_type="application/json",
+    )
+    monkeypatch.setattr(
+        candidate_integrity_module,
+        "V2_RESOURCE_POLICY",
+        replace(V2_RESOURCE_POLICY, run_max_bytes=4),
+        raising=False,
+    )
+
+    def forbidden_read(*_args, **_kwargs):
+        raise AssertionError("oversized ArtifactRef declaration reached os.read")
+
+    with DirectoryAnchor.open(
+        run_dir,
+        manifest_path=run_dir / "run.json",
+    ) as anchor:
+        monkeypatch.setattr(storage_module.os, "read", forbidden_read)
+        with pytest.raises(ValueError) as exc_info:
+            candidate_integrity_module.verify_artifact_ref(
+                run_dir,
+                artifact,
+                anchor=anchor,
+            )
+
+    assert getattr(exc_info.value, "code", None) == "sealed_artifact_tampered"
+
+
+def test_review_schema_preflight_passes_explicit_resource_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from paper_reader.resource_policy import V2_RESOURCE_POLICY
+
+    run_dir = tmp_path / "run"
+    _write_valid_run(run_dir)
+    summary_path = run_dir / "summary.json"
+    summary_path.write_bytes(b"{}")
+    original_read = review_package_module.read_anchored_bytes
+    observed = False
+
+    def bounded_read(anchor, path, **kwargs):
+        nonlocal observed
+        if Path(path) == summary_path:
+            observed = True
+            assert (
+                kwargs["max_bytes"]
+                == V2_RESOURCE_POLICY.structured_artifact_max_bytes
+            )
+        return original_read(anchor, path, **kwargs)
+
+    monkeypatch.setattr(
+        review_package_module,
+        "read_anchored_bytes",
+        bounded_read,
+    )
+
+    with pytest.raises(RunLoadError) as exc_info:
+        review_package_module._preflight_review_schema_versions(run_dir)
+
+    assert exc_info.value.code == "unsupported_run_schema"
+    assert observed is True
+
+
+def test_run_manifest_rejects_preexisting_oversize_before_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    manifest = _write_valid_run(run_dir)
+    monkeypatch.setattr(loader_module, "MAX_RUN_MANIFEST_BYTES", 16, raising=False)
+
+    def forbidden_read(*_args, **_kwargs):
+        raise AssertionError("oversized run manifest reached os.read")
+
+    monkeypatch.setattr(loader_module.os, "read", forbidden_read)
+
+    with pytest.raises(RunLoadError) as exc_info:
+        load_v2_run(run_dir)
+
+    assert exc_info.value.code == "run_manifest_too_large"
+    assert exc_info.value.manifest_path == manifest
+
+
+def test_run_manifest_enforces_limit_during_chunk_iteration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    manifest = _write_valid_run(run_dir)
+    monkeypatch.setattr(
+        loader_module,
+        "MAX_RUN_MANIFEST_BYTES",
+        manifest.stat().st_size,
+        raising=False,
+    )
+    calls = 0
+
+    def growing_read(_descriptor: int, requested: int) -> bytes:
+        nonlocal calls
+        calls += 1
+        assert requested <= manifest.stat().st_size + 1
+        return b"x" * (manifest.stat().st_size + 1)
+
+    monkeypatch.setattr(loader_module.os, "read", growing_read)
+
+    with pytest.raises(RunLoadError) as exc_info:
+        load_v2_run(run_dir)
+
+    assert exc_info.value.code == "run_manifest_too_large"
+    assert calls == 1
 
 
 def test_load_v2_run_rejects_symlinked_manifest_without_following_it(
@@ -408,9 +768,9 @@ def test_anchored_atomic_write_detects_name_swap_after_readback(
     original_read = storage_module._read_anchored_regular_file
     injected = False
 
-    def read_then_swap(anchor, path):
+    def read_then_swap(anchor, path, **kwargs):
         nonlocal injected
-        raw = original_read(anchor, path)
+        raw = original_read(anchor, path, **kwargs)
         if Path(path) == manifest and raw == b"expected" and not injected:
             injected = True
             manifest.rename(detached)
@@ -442,9 +802,9 @@ def test_anchored_no_replace_detects_name_swap_after_readback(
     original_read = storage_module._read_anchored_regular_file
     injected = False
 
-    def read_then_swap(anchor, path):
+    def read_then_swap(anchor, path, **kwargs):
         nonlocal injected
-        raw = original_read(anchor, path)
+        raw = original_read(anchor, path, **kwargs)
         if Path(path) == target and not injected:
             injected = True
             target.rename(detached)

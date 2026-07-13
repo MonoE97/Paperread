@@ -834,6 +834,7 @@ class LocalPrepareResult(StrictModel):
     status: Literal["prepared", "failed", "blocked"]
     source: PdfSource
     paper_reader_root: SkillRootIdentity
+    paper_reader_run_directory: FileIdentity | None = None
     paper_reader_run: ArtifactRef | None = None
     evidence: ArtifactRef | None = None
     error: ResultError | None = None
@@ -841,14 +842,44 @@ class LocalPrepareResult(StrictModel):
     @model_validator(mode="after")
     def validate_outcome(self) -> "LocalPrepareResult":
         if self.status == "prepared":
-            if self.error is not None or self.paper_reader_run is None or self.evidence is None:
+            if (
+                self.error is not None
+                or self.paper_reader_run is None
+                or self.evidence is None
+            ):
                 raise ValueError("prepared result requires run and evidence")
         else:
             if self.error is None:
                 raise ValueError("failed or blocked local prepare result requires error")
-            if self.paper_reader_run is not None or self.evidence is not None:
-                raise ValueError("failed or blocked local prepare result forbids success artifacts")
+            if (
+                self.paper_reader_run_directory is not None
+                or self.paper_reader_run is not None
+                or self.evidence is not None
+            ):
+                raise ValueError(
+                    "failed or blocked local prepare result forbids success artifacts"
+                )
         return self
+
+
+def local_prepare_result_canonical_payload(
+    result: LocalPrepareResult,
+) -> dict[str, JsonValue]:
+    """Preserve canonical bytes for V2 results created before stable-dir binding.
+
+    New prepared results always set ``paper_reader_run_directory``. Historical
+    V2 results omitted the field entirely; keeping that absence during
+    canonical validation lets read-only replay remain possible without
+    allowing new mutations to skip the stable identity gate.
+    """
+
+    payload = result.model_dump(mode="json")
+    if (
+        result.paper_reader_run_directory is None
+        and "paper_reader_run_directory" not in result.model_fields_set
+    ):
+        payload.pop("paper_reader_run_directory", None)
+    return payload
 
 
 class WriteResult(StrictModel):

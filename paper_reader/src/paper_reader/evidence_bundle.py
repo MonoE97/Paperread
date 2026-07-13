@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -40,7 +45,6 @@ from paper_reader.storage import (
     atomic_write_json,
     canonical_json_bytes,
     create_anchored_directory,
-    fingerprint_resolved_source,
     new_random_id,
     new_uuid,
     remove_anchored_tree,
@@ -84,46 +88,152 @@ def _run_root(loaded: LoadedRun) -> Path:
     return loaded.manifest_path.parent
 
 
-def _verify_pdf_identity(
+def _pdf_identity(loaded: LoadedRun) -> LocalSourceIdentity:
+    source = loaded.run.source
+    if isinstance(source, LocalSourceIdentity):
+        return source
+    if isinstance(source, ZoteroSourceIdentity):
+        return source.attachment
+    raise EvidenceBundleError("invalid_source_identity", "unknown V2 source identity")
+
+
+def _anonymous_pdf_path(
+    snapshot_handle,
+    *,
+    run_id: str,
+    source_path: str,
+) -> Path:
+    descriptor = snapshot_handle.fileno()
+    opened = os.fstat(descriptor)
+    if os.name == "posix":
+        if opened.st_nlink != 0:
+            raise EvidenceBundleError(
+                "secure_pdf_snapshot_unavailable",
+                f"anonymous PDF snapshot could not be created for: {source_path}",
+                data={"run_id": run_id, "source_pdf": source_path},
+            )
+        for descriptor_root in (Path("/dev/fd"), Path("/proc/self/fd")):
+            candidate = descriptor_root / str(descriptor)
+            try:
+                candidate_stat = os.stat(candidate)
+            except OSError:
+                continue
+            if (
+                candidate_stat.st_ino == opened.st_ino
+                and candidate_stat.st_size == opened.st_size
+                and candidate_stat.st_nlink == opened.st_nlink
+            ):
+                return candidate
+    elif isinstance(snapshot_handle.name, str):  # pragma: no cover - POSIX runtime
+        return Path(snapshot_handle.name)
+    raise EvidenceBundleError(
+        "secure_pdf_snapshot_unavailable",
+        f"delete-on-close PDF snapshot path is unavailable for: {source_path}",
+        data={"run_id": run_id, "source_pdf": source_path},
+    )
+
+
+@contextmanager
+def _verified_pdf_snapshot(
     source: LocalSourceIdentity,
     *,
     run_id: str,
-) -> LocalSourceIdentity:
+) -> Iterator[Path]:
+    source_path = Path(source.resolved_path)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        actual = fingerprint_resolved_source(Path(source.resolved_path))
+        descriptor = os.open(source_path, flags)
     except (OSError, RuntimeError, ValueError) as exc:
         raise EvidenceBundleError(
             "source_changed",
             f"local PDF source cannot be revalidated: {source.resolved_path}: {exc}",
             data={"run_id": run_id, "source_pdf": source.resolved_path},
         ) from exc
-    expected_identity = (
-        source.resolved_path,
-        source.sha256,
-        source.size_bytes,
-        source.device,
-        source.inode,
-    )
-    actual_identity = (
-        actual.resolved_path,
-        actual.sha256,
-        actual.size_bytes,
-        actual.device,
-        actual.inode,
-    )
-    if actual_identity != expected_identity:
-        raise EvidenceBundleError(
-            "source_changed",
-            f"local PDF source no longer matches the initialized fingerprint: {source.resolved_path}",
-            data={"run_id": run_id, "source_pdf": source.resolved_path},
-        )
-    return source
+    with os.fdopen(descriptor, "rb") as source_handle:
+        before = os.fstat(source_handle.fileno())
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or (before.st_dev, before.st_ino, before.st_size)
+            != (source.device, source.inode, source.size_bytes)
+        ):
+            raise EvidenceBundleError(
+                "source_changed",
+                f"local PDF source no longer matches the initialized identity: {source.resolved_path}",
+                data={"run_id": run_id, "source_pdf": source.resolved_path},
+            )
+        if before.st_size > V2_RESOURCE_POLICY.local_pdf_max_bytes:
+            raise EvidenceBundleError(
+                "source_too_large",
+                f"local PDF source exceeds {V2_RESOURCE_POLICY.local_pdf_max_bytes} bytes",
+                data={
+                    "run_id": run_id,
+                    "source_pdf": source.resolved_path,
+                    "size_bytes": before.st_size,
+                    "max_size_bytes": V2_RESOURCE_POLICY.local_pdf_max_bytes,
+                },
+            )
+
+        with tempfile.TemporaryFile(mode="w+b") as snapshot_handle:
+            digest = hashlib.sha256()
+            copied = 0
+            while chunk := source_handle.read(1024 * 1024):
+                copied += len(chunk)
+                if copied > source.size_bytes:
+                    raise EvidenceBundleError(
+                        "source_changed",
+                        f"local PDF source grew while it was snapshotted: {source.resolved_path}",
+                        data={"run_id": run_id, "source_pdf": source.resolved_path},
+                    )
+                digest.update(chunk)
+                snapshot_handle.write(chunk)
+            snapshot_handle.flush()
+            os.fsync(snapshot_handle.fileno())
+
+            after = os.fstat(source_handle.fileno())
+            before_identity = (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            )
+            after_identity = (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            )
+            if before_identity != after_identity:
+                raise EvidenceBundleError(
+                    "source_changed",
+                    f"local PDF source changed while it was snapshotted: {source.resolved_path}",
+                    data={"run_id": run_id, "source_pdf": source.resolved_path},
+                )
+            if copied != source.size_bytes or digest.hexdigest() != source.sha256:
+                raise EvidenceBundleError(
+                    "source_changed",
+                    f"local PDF source no longer matches the initialized fingerprint: {source.resolved_path}",
+                    data={"run_id": run_id, "source_pdf": source.resolved_path},
+                )
+            snapshot_handle.seek(0)
+            snapshot_path = _anonymous_pdf_path(
+                snapshot_handle,
+                run_id=run_id,
+                source_path=source.resolved_path,
+            )
+            yield snapshot_path
 
 
-def _verify_source(loaded: LoadedRun) -> _PreparedSource:
+def _verify_source(loaded: LoadedRun, *, pdf: LocalSourceIdentity) -> _PreparedSource:
     source = loaded.run.source
     if isinstance(source, LocalSourceIdentity):
-        pdf = _verify_pdf_identity(source, run_id=loaded.run.run_id)
+        if source != pdf:  # pragma: no cover - internal caller invariant
+            raise EvidenceBundleError("invalid_source_identity", "local PDF identity mismatch")
         metadata = build_pdf_metadata(Path(pdf.resolved_path))
         return _PreparedSource(
             pdf=pdf,
@@ -133,7 +243,8 @@ def _verify_source(loaded: LoadedRun) -> _PreparedSource:
         )
     if not isinstance(source, ZoteroSourceIdentity):  # pragma: no cover - strict discriminator
         raise EvidenceBundleError("invalid_source_identity", "unknown V2 source identity")
-    pdf = _verify_pdf_identity(source.attachment, run_id=loaded.run.run_id)
+    if source.attachment != pdf:  # pragma: no cover - internal caller invariant
+        raise EvidenceBundleError("invalid_source_identity", "Zotero PDF identity mismatch")
     run_dir = _run_root(loaded)
     try:
         _snapshot_path, snapshot_bytes = verify_artifact_ref(
@@ -219,6 +330,49 @@ def _secondary_sources(metadata: dict) -> dict:
     }
 
 
+def _display_pdf_path(
+    value: str,
+    *,
+    verified_path: Path,
+    source_path: Path,
+) -> str:
+    display = str(source_path)
+    aliases = {str(verified_path)}
+    if verified_path.name.isdigit():
+        aliases.update(
+            {
+                f"/dev/fd/{verified_path.name}",
+                f"/proc/self/fd/{verified_path.name}",
+            }
+        )
+    rendered = value
+    for alias in sorted(aliases, key=len, reverse=True):
+        rendered = rendered.replace(alias, display)
+    return rendered
+
+
+def _display_evidence_error(
+    exc: EvidenceBundleError,
+    *,
+    verified_path: Path,
+    source_path: Path,
+) -> EvidenceBundleError:
+    data = {
+        key: (
+            _display_pdf_path(value, verified_path=verified_path, source_path=source_path)
+            if isinstance(value, str)
+            else value
+        )
+        for key, value in exc.data.items()
+    }
+    data["source_pdf"] = str(source_path)
+    return EvidenceBundleError(
+        exc.code,
+        _display_pdf_path(str(exc), verified_path=verified_path, source_path=source_path),
+        data=data,
+    )
+
+
 def _page_count(source_path: Path) -> int:
     try:
         with fitz.open(source_path) as document:
@@ -265,8 +419,27 @@ def _prepare_local_evidence_locked(
     preview_pages: int | None,
     figure_limit: int | None,
 ) -> PreparedEvidence:
+    source = _pdf_identity(loaded)
+    with _verified_pdf_snapshot(source, run_id=loaded.run.run_id) as verified_pdf_path:
+        prepared_source = _verify_source(loaded, pdf=source)
+        return _prepare_verified_evidence_locked(
+            loaded,
+            prepared_source=prepared_source,
+            verified_pdf_path=verified_pdf_path,
+            preview_pages=preview_pages,
+            figure_limit=figure_limit,
+        )
+
+
+def _prepare_verified_evidence_locked(
+    loaded: LoadedRun,
+    *,
+    prepared_source: _PreparedSource,
+    verified_pdf_path: Path,
+    preview_pages: int | None,
+    figure_limit: int | None,
+) -> PreparedEvidence:
     run_dir = _run_root(loaded)
-    prepared_source = _verify_source(loaded)
     source = prepared_source.pdf
     resolved_figure_limit = (
         V2_RESOURCE_POLICY.figure_default_limit if figure_limit is None else figure_limit
@@ -279,7 +452,14 @@ def _prepare_local_evidence_locked(
         )
 
     source_path = Path(source.resolved_path)
-    page_count = _page_count(source_path)
+    try:
+        page_count = _page_count(verified_pdf_path)
+    except EvidenceBundleError as exc:
+        raise _display_evidence_error(
+            exc,
+            verified_path=verified_pdf_path,
+            source_path=source_path,
+        ) from exc
     if page_count > V2_RESOURCE_POLICY.pdf_max_pages:
         raise EvidenceBundleError(
             "pdf_page_limit_exceeded",
@@ -292,6 +472,7 @@ def _prepare_local_evidence_locked(
             source_path,
             max_pages=preview_pages,
             max_chars=V2_RESOURCE_POLICY.extracted_text_max_chars,
+            _verified_pdf_path=verified_pdf_path,
         )
     except ExtractedTextLimitError as exc:
         raise EvidenceBundleError(
@@ -300,6 +481,20 @@ def _prepare_local_evidence_locked(
             data={
                 "extracted_chars": exc.actual_chars,
                 "max_chars": exc.max_chars,
+            },
+        ) from exc
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise EvidenceBundleError(
+            "invalid_local_pdf",
+            "local PDF text extraction failed: "
+            + _display_pdf_path(
+                str(exc),
+                verified_path=verified_pdf_path,
+                source_path=source_path,
+            ),
+            data={
+                "run_id": loaded.run.run_id,
+                "source_pdf": str(source_path),
             },
         ) from exc
     extracted_chars = len(str(extraction.get("text", "")))
@@ -356,6 +551,7 @@ def _prepare_local_evidence_locked(
         try:
             prepared_figures = prepare_figure_artifacts(
                 source_path=source_path,
+                verified_source_path=verified_pdf_path,
                 staging=staging,
                 staging_anchor=staging_anchor,
                 future_dir=future_dir,

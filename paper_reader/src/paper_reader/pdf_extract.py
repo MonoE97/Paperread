@@ -218,18 +218,24 @@ def extract_pdf(
     max_pages: int | None = None,
     *,
     max_chars: int | None = None,
+    _verified_pdf_path: Path | None = None,
 ) -> dict[str, Any]:
     """Extract text and lightweight metadata from a PDF."""
     resolved = Path(pdf_path).expanduser()
-    if not resolved.exists():
+    read_path = (
+        Path(_verified_pdf_path).expanduser()
+        if _verified_pdf_path is not None
+        else resolved
+    )
+    if not read_path.exists():
         raise FileNotFoundError(f"PDF not found: {resolved}")
-    if not resolved.is_file():
+    if not read_path.is_file():
         raise ValueError(f"PDF path is not a file: {resolved}")
     if max_chars is not None and max_chars < 0:
         raise ValueError("max_chars must be non-negative")
 
     warnings: list[str] = []
-    doc = fitz.open(resolved)
+    doc = fitz.open(read_path)
     try:
         page_count = doc.page_count
         limit = page_count if max_pages is None else min(max_pages, page_count)

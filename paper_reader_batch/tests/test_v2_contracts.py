@@ -13,6 +13,7 @@ from paper_reader_batch.v2_contracts import (
     BatchState,
     CommandResult,
     EventCommandResultSnapshot,
+    LocalPrepareResult,
     PdfSource,
     RecoveredUncertainWrite,
     ReconciliationResult,
@@ -22,6 +23,7 @@ from paper_reader_batch.v2_contracts import (
     StateItem,
     WriteResult,
     export_contract_schemas,
+    local_prepare_result_canonical_payload,
     schema_filename,
 )
 
@@ -141,6 +143,61 @@ def test_checked_in_contract_schemas_match_export() -> None:
     for schema_version, schema in exported.items():
         path = SCHEMA_ROOT / schema_filename(schema_version)
         assert json.loads(path.read_text(encoding="utf-8")) == schema
+
+
+def test_prepared_local_result_preserves_legacy_v2_bytes_and_accepts_new_identity() -> None:
+    payload = {
+        "schema_version": "paper_reader_batch.local-prepare-result.v2",
+        "manifest_sha256": "a" * 64,
+        "item_id": "001",
+        "worker_id": "preparer",
+        "claim_id": "11111111-1111-4111-8111-111111111111",
+        "attempt_id": "22222222-2222-4222-8222-222222222222",
+        "attempt_number": 1,
+        "lease_token_sha256": "b" * 64,
+        "status": "prepared",
+        "source": {
+            "source_type": "pdf_path",
+            "path": "/tmp/paper.pdf",
+            "size_bytes": 1,
+            "sha256": "c" * 64,
+            "file_identity": {"device": 1, "inode": 2},
+        },
+        "paper_reader_root": {
+            "path": "/tmp/paper-reader",
+            "skill_md_sha256": "d" * 64,
+            "pyproject_sha256": "e" * 64,
+            "uv_lock_sha256": "f" * 64,
+            "runtime_sha256": "0" * 64,
+            "schemas_sha256": "1" * 64,
+        },
+        "paper_reader_run": {
+            "path": "/tmp/paper_analysis/run.json",
+            "size_bytes": 1,
+            "sha256": "2" * 64,
+            "schema_version": "paper_reader.run.v2",
+            "artifact_id": "run_test",
+        },
+        "evidence": {
+            "path": "/tmp/paper_analysis/evidence/evidence_test/evidence.json",
+            "size_bytes": 1,
+            "sha256": "3" * 64,
+            "schema_version": "paper_reader.evidence.v2-internal",
+            "artifact_id": "evidence_test",
+        },
+        "error": None,
+    }
+
+    legacy = LocalPrepareResult.model_validate(payload)
+    assert legacy.paper_reader_run_directory is None
+    assert local_prepare_result_canonical_payload(legacy) == payload
+
+    payload["paper_reader_run_directory"] = {"device": 4, "inode": 5}
+    parsed = LocalPrepareResult.model_validate(payload)
+    assert parsed.paper_reader_run_directory.model_dump(mode="json") == {
+        "device": 4,
+        "inode": 5,
+    }
 
 
 def test_recover_receipt_schema_binds_the_complete_uncertain_write_identity() -> None:

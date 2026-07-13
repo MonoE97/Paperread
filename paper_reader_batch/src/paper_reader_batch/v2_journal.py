@@ -23,6 +23,7 @@ from paper_reader_batch.v2_contracts import (
     FinishedData,
     LocalPrepareResult,
     WorkerResult,
+    local_prepare_result_canonical_payload,
     WriteClaimedData,
     WriteReconciledData,
     WriteRetriedData,
@@ -346,6 +347,7 @@ def _validate_finished_payload(
     raw: bytes,
     *,
     full_external: bool,
+    prior_view: RunView | None = None,
 ) -> None:
     from paper_reader_batch.v2_artifacts import (
         validate_local_prepare_result_artifacts,
@@ -356,8 +358,6 @@ def _validate_finished_payload(
     if not isinstance(data, FinishedData):
         return
     lane = "worker" if data.kind == "worker.finished" else "local-prepare"
-    if sha256_bytes(raw) != data.result_sha256:
-        raise BatchRuntimeError("journal_corrupt", "finish result digest does not match event")
     try:
         payload = json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
@@ -370,11 +370,18 @@ def _validate_finished_payload(
     )
     if not isinstance(payload, dict) or payload.get("schema_version") != expected_version:
         raise BatchRuntimeError("unsupported_run_schema", "finish result has unsupported schema")
+    if sha256_bytes(raw) != data.result_sha256:
+        raise BatchRuntimeError("journal_corrupt", "finish result digest does not match event")
     try:
         result = model_type.model_validate(payload)
     except ValidationError as exc:
         raise BatchRuntimeError("journal_corrupt", "finish result fails strict validation") from exc
-    if raw != canonical_json_bytes(result):
+    canonical_result = (
+        local_prepare_result_canonical_payload(result)
+        if isinstance(result, LocalPrepareResult)
+        else result
+    )
+    if raw != canonical_json_bytes(canonical_result):
         raise BatchRuntimeError("journal_corrupt", "finish result is not canonical JSON")
     manifest_item = next((item for item in manifest.items if item.item_id == data.item_id), None)
     if manifest_item is None:
@@ -393,10 +400,30 @@ def _validate_finished_payload(
     ):
         raise BatchRuntimeError("journal_corrupt", "finish result identity does not match event/manifest")
     if lane == "worker":
+        prepared_local_result = None
+        if prior_view is not None:
+            from paper_reader_batch.v2_worker import _load_prepared_local_result
+
+            prior_item = next(
+                (item for item in prior_view.state.items if item.item_id == data.item_id),
+                None,
+            )
+            if prior_item is None:
+                raise BatchRuntimeError(
+                    "journal_corrupt",
+                    "worker finish has no event-prior reducer item",
+                )
+            prepared_local_result = _load_prepared_local_result(
+                prior_view,
+                item=prior_item,
+                manifest_item=manifest_item,
+            )
         resolved_key = validate_worker_result_artifacts(
             manifest,
             result,
             allow_mutable_run=not full_external,
+            prepared_local_result=prepared_local_result,
+            allow_legacy_prepared_run_identity=True,
         )
         candidate_sha = result.candidate.sha256 if result.candidate is not None else None
         if candidate_sha != data.candidate_sha256 or resolved_key != data.resolved_zotero_item_key:
@@ -406,6 +433,7 @@ def _validate_finished_payload(
             manifest,
             result,
             allow_mutable_run=not full_external,
+            allow_legacy_prepared_run_identity=True,
         )
 
 
@@ -415,6 +443,7 @@ def _validate_finished_event_result(
     event: BatchEvent,
     *,
     full_external: bool = False,
+    prior_view: RunView | None = None,
 ) -> None:
     data = event.data
     if not isinstance(data, FinishedData):
@@ -422,7 +451,13 @@ def _validate_finished_event_result(
     lane = "worker" if data.kind == "worker.finished" else "local-prepare"
     result_path = run_dir / "results" / lane / f"{data.result_sha256}.json"
     raw = read_bytes(result_path, code="journal_corrupt")
-    _validate_finished_payload(manifest, event, raw, full_external=full_external)
+    _validate_finished_payload(
+        manifest,
+        event,
+        raw,
+        full_external=full_external,
+        prior_view=prior_view,
+    )
 
 
 def _validation_view(
@@ -514,7 +549,6 @@ def _replay_with_result_validation(
     state = initial_state(manifest, events[0])
     prefix = [events[0]]
     for event in events[1:]:
-        _validate_finished_event_result(run_dir, manifest, event)
         prior = _validation_view(
             run_dir=run_dir,
             run_dir_identity=run_dir_identity,
@@ -523,6 +557,12 @@ def _replay_with_result_validation(
             manifest_sha256=manifest_sha256,
             events=prefix,
             state=state,
+        )
+        _validate_finished_event_result(
+            run_dir,
+            manifest,
+            event,
+            prior_view=prior,
         )
         _validate_write_event_result(prior, event, committed=True)
         state = apply_event(state, manifest, event)
@@ -598,7 +638,6 @@ def _load_bound_run_view(
         events,
     )
     if pending_event is not None:
-        _validate_finished_event_result(root, manifest, pending_event.event, full_external=True)
         prior = _validation_view(
             run_dir=root,
             run_dir_identity=run_dir_identity,
@@ -607,6 +646,13 @@ def _load_bound_run_view(
             manifest_sha256=manifest_sha256,
             events=events,
             state=state,
+        )
+        _validate_finished_event_result(
+            root,
+            manifest,
+            pending_event.event,
+            full_external=True,
+            prior_view=prior,
         )
         _validate_write_event_result(prior, pending_event.event, committed=True)
         apply_event(state, manifest, pending_event.event)

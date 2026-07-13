@@ -230,6 +230,17 @@
       ],
       "default": null
     },
+    "paper_reader_run_directory": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FileIdentity"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "schema_version": {
       "const": "paper_reader_batch.local-prepare-result.v2",
       "title": "Schema Version",

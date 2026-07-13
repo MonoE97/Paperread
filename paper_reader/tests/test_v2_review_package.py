@@ -14,6 +14,7 @@ from paper_reader.contracts import (
     PaperReaderReview,
     PaperReaderReviewPackage,
     PaperReaderSummary,
+    ReviewIssue,
 )
 from paper_reader.public_cli import app
 from paper_reader.storage import canonical_json_bytes, canonical_json_sha256, rfc3339_utc
@@ -228,6 +229,28 @@ def test_review_validate_blocks_preview_hash_drift_failed_review_and_english_fal
     english_result = _invoke(["review", "validate", str(run_dir)])
     assert english_result.exit_code == 1
     assert "rendered_note_english_prose" in _blocker_codes(english_result)
+
+
+def test_review_validate_blocks_blocker_severity_review_issue(tmp_path: Path) -> None:
+    run_dir, evidence_digest = _prepared_run(tmp_path)
+    _summary, review = _write_summary_and_review(run_dir, evidence_digest)
+    review = review.model_copy(
+        update={
+            "review_issues": (
+                ReviewIssue(
+                    severity="blocker",
+                    issue="关键结论缺少可核对的正文证据。",
+                    suggested_fix="补充对应正文页证据后重新复核。",
+                ),
+            )
+        }
+    )
+    (run_dir / "review.json").write_bytes(canonical_json_bytes(review))
+
+    result = _invoke(["review", "validate", str(run_dir)])
+
+    assert result.exit_code == 1
+    assert "review_issue_blocker" in _blocker_codes(result)
 
 
 def test_review_validate_rehashes_every_bound_evidence_file(tmp_path: Path) -> None:

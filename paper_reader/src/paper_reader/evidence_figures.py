@@ -45,6 +45,28 @@ class FigureResourceLimitError(ValueError):
         self.check = check
 
 
+def _display_pdf_path(
+    value: str,
+    *,
+    source_path: Path,
+    verified_source_path: Path | None,
+) -> str:
+    if verified_source_path is None:
+        return value
+    aliases = {str(verified_source_path)}
+    if verified_source_path.name.isdigit():
+        aliases.update(
+            {
+                f"/dev/fd/{verified_source_path.name}",
+                f"/proc/self/fd/{verified_source_path.name}",
+            }
+        )
+    rendered = value
+    for alias in sorted(aliases, key=len, reverse=True):
+        rendered = rendered.replace(alias, str(source_path))
+    return rendered
+
+
 def _preallocation_resource_check(exc: Exception) -> EvidenceResourceCheck | None:
     if isinstance(exc, FigureCandidateLimitError):
         return EvidenceResourceCheck(
@@ -166,6 +188,7 @@ def _resource_checks(
 def prepare_figure_artifacts(
     *,
     source_path: Path,
+    verified_source_path: Path | None = None,
     staging: Path,
     staging_anchor: DirectoryAnchorLike,
     future_dir: Path,
@@ -202,6 +225,7 @@ def prepare_figure_artifacts(
                 item_details=None,
                 allow_network_source=allow_network_source,
                 max_candidates=V2_RESOURCE_POLICY.figure_max_candidates,
+                _verified_pdf_path=verified_source_path,
             )
             selected = figures_payload.get("selected_figures", [])
             if not isinstance(selected, list):
@@ -303,8 +327,13 @@ def prepare_figure_artifacts(
         remove_anchored_tree(staging_anchor, staging / "figures")
         remove_anchored_file(staging_anchor, staging / "figures.json")
         remove_anchored_file(staging_anchor, staging / "figure_context.md")
+        display_message = _display_pdf_path(
+            str(exc),
+            source_path=source_path,
+            verified_source_path=verified_source_path,
+        )
         if not complete:
-            raise IncompleteFigureEvidenceError(str(exc)) from exc
+            raise IncompleteFigureEvidenceError(display_message) from exc
         if isinstance(exc, FigureResourceLimitError):
             resource_checks = (exc.check,)
         else:
@@ -319,7 +348,7 @@ def prepare_figure_artifacts(
                 status="degraded",
                 actual=0,
                 limit=figure_limit,
-                message=f"{type(exc).__name__}: {exc}",
+                message=f"{type(exc).__name__}: {display_message}",
             ),
             resource_checks=resource_checks,
         )

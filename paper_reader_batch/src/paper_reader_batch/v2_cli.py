@@ -30,6 +30,7 @@ from paper_reader_batch.v2_worker import (
     worker_prompt,
 )
 from paper_reader_batch.v2_local_prepare import (
+    MAX_CHILD_TIMEOUT_SECONDS,
     claim_local_prepare,
     finish_local_prepare,
     release_local_prepare,
@@ -671,7 +672,12 @@ def local_prepare_run_command(
     attempt_id: str = typer.Option(..., "--attempt-id"),
     paper_reader_root: Path = typer.Option(..., "--paper-reader-root"),
     request_id: str = typer.Option(..., "--request-id"),
-    timeout_seconds: int = typer.Option(600, "--timeout-seconds", min=1, max=3600),
+    timeout_seconds: int = typer.Option(
+        600,
+        "--timeout-seconds",
+        min=1,
+        max=MAX_CHILD_TIMEOUT_SECONDS,
+    ),
 ) -> None:
     _run_mutation(
         "local-prepare.run",

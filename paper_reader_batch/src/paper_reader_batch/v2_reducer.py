@@ -375,6 +375,19 @@ def _apply_finished(state: BatchState, manifest: BatchManifest, event: BatchEven
         if status == "succeeded":
             if isinstance(manifest_item, PdfManifestItem):
                 update["local_prepare_status"] = "prepared"
+                if item.local_prepare_status in {"failed", "blocked"}:
+                    update.update(
+                        {
+                            "local_prepare_lease": None,
+                            "local_prepare_result_sha256": None,
+                            "local_prepare_coordination_request_id": None,
+                            "local_prepare_coordination_fingerprint": None,
+                            "local_prepare_coordination_device": None,
+                            "local_prepare_coordination_inode": None,
+                            "local_prepare_failure_code": None,
+                            "local_prepare_failure_message": None,
+                        }
+                    )
             else:
                 update["write_status"] = "queued" if manifest.write_policy == "zotero_write" else "prepared_only"
         items[index] = item.model_copy(update=update)

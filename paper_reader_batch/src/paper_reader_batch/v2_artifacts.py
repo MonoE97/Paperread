@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 import hashlib
 from html import unescape
@@ -10,7 +12,7 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import tomllib
-from typing import Annotated, Literal, TypeAlias
+from typing import Annotated, Iterator, Literal, TypeAlias
 
 from markdown_it import MarkdownIt
 from pydantic import (
@@ -26,6 +28,7 @@ from pydantic import (
 from paper_reader_batch.v2_contracts import (
     ArtifactRef,
     BatchManifest,
+    FileIdentity,
     LocalPrepareResult,
     PdfManifestItem,
     PdfSource,
@@ -42,13 +45,21 @@ from paper_reader_batch.v2_json import (
     normalized_absolute_path,
     open_directory_fd,
     read_bytes,
+    read_relative_bytes,
     sha256_bytes,
+    walk_relative_regular_files,
 )
 from paper_reader_batch.v2_manifest import _pdf_source
 
 
 class ForeignStrictModel(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+
+_RUN_ARTIFACT_ANCHOR: ContextVar[tuple[Path, int] | None] = ContextVar(
+    "paper_reader_batch_run_artifact_anchor",
+    default=None,
+)
 
 
 def _validate_foreign_rfc3339_utc(value: str) -> str:
@@ -986,6 +997,42 @@ def _invalid(code: str, message: str, exc: Exception | None = None) -> BatchRunt
     return error
 
 
+@contextmanager
+def _bound_paper_reader_run_directory(
+    run_ref: ArtifactRef,
+    expected_identity: FileIdentity,
+) -> Iterator[Path]:
+    run_path = _require_normalized_absolute_path(
+        run_ref.path,
+        code="local_prepare_binding_mismatch",
+        label="prepared paper_reader run",
+    )
+    if run_path.name != "run.json":
+        raise _invalid(
+            "local_prepare_binding_mismatch",
+            "prepared paper_reader run path must end in run.json",
+        )
+    with open_directory_fd(run_path.parent, create=False) as (
+        descriptor,
+        bound_run_dir,
+    ):
+        metadata = os.fstat(descriptor)
+        if (
+            bound_run_dir != run_path.parent
+            or metadata.st_dev != expected_identity.device
+            or metadata.st_ino != expected_identity.inode
+        ):
+            raise _invalid(
+                "local_prepare_binding_mismatch",
+                "paper_reader run directory differs from the prepared stable identity",
+            )
+        token = _RUN_ARTIFACT_ANCHOR.set((bound_run_dir, descriptor))
+        try:
+            yield run_path
+        finally:
+            _RUN_ARTIFACT_ANCHOR.reset(token)
+
+
 def _require_normalized_absolute_path(value: str, *, code: str, label: str) -> Path:
     normalized = normalized_absolute_path(Path(value))
     if str(normalized) != value:
@@ -1000,8 +1047,17 @@ def _relative_path(value: str) -> PurePosixPath:
     return candidate
 
 
+def _read_artifact_bytes(path: Path, *, code: str) -> bytes:
+    anchor = _RUN_ARTIFACT_ANCHOR.get()
+    normalized = normalized_absolute_path(path)
+    if anchor is not None and normalized.is_relative_to(anchor[0]):
+        relative = normalized.relative_to(anchor[0]).as_posix()
+        return read_relative_bytes(anchor[1], relative, code=code)
+    return read_bytes(path, code=code)
+
+
 def _read_model(path: Path, model_type, *, code: str):
-    raw = read_bytes(path, code=code)
+    raw = _read_artifact_bytes(path, code=code)
     try:
         json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
         model = model_type.model_validate_json(raw)
@@ -1040,7 +1096,7 @@ def _read_envelope(
 def _read_inner(run_dir: Path, ref: ForeignArtifactRef, *, model_type=None, code: str = "artifact_invalid"):
     relative = _relative_path(ref.path)
     path = run_dir.joinpath(*relative.parts)
-    raw = read_bytes(path, code=code)
+    raw = _read_artifact_bytes(path, code=code)
     if len(raw) != ref.size_bytes or sha256_bytes(raw) != ref.sha256:
         raise _invalid("artifact_binding_mismatch", f"foreign artifact reference hash/size mismatch: {ref.path}")
     if model_type is None:
@@ -1177,6 +1233,18 @@ def _validate_local_run_target(
 
 
 def _walk_regular_files(root: Path) -> set[str]:
+    anchor = _RUN_ARTIFACT_ANCHOR.get()
+    normalized_root = normalized_absolute_path(root)
+    if anchor is not None and normalized_root.is_relative_to(anchor[0]):
+        relative_root = normalized_root.relative_to(anchor[0]).as_posix()
+        try:
+            return walk_relative_regular_files(anchor[1], relative_root)
+        except BatchRuntimeError as exc:
+            raise _invalid(
+                "artifact_closed_world_mismatch",
+                f"foreign bundle cannot be walked through its held run directory: {root}",
+                exc,
+            ) from exc
     found: set[str] = set()
 
     def walk(directory: Path, prefix: PurePosixPath) -> None:
@@ -1759,8 +1827,96 @@ def _validate_review_and_candidate(
             or candidate.source.attachment.sha256 != source_sha
         ):
             raise _invalid("candidate_binding_mismatch", "Zotero rendered title/source attachment binding is invalid")
-        return review_path, package, candidate_path, candidate, resolved_key, inventory_sha256
-    return review_path, package, candidate_path, candidate, resolved_key, None
+        return (
+            review_path,
+            package,
+            candidate_path,
+            candidate,
+            evidence_path,
+            evidence,
+            resolved_key,
+            inventory_sha256,
+        )
+    return (
+        review_path,
+        package,
+        candidate_path,
+        candidate,
+        evidence_path,
+        evidence,
+        resolved_key,
+        None,
+    )
+
+
+def _validate_prepared_local_continuation(
+    result: WorkerResult,
+    prepared: LocalPrepareResult,
+    *,
+    run_path: Path,
+    run: ForeignRun,
+    package: ForeignReviewPackage,
+    candidate: ForeignCandidate,
+    canonical_evidence_path: Path,
+    canonical_evidence: ForeignEvidence,
+) -> None:
+    if prepared.status != "prepared" or prepared.paper_reader_run is None or prepared.evidence is None:
+        raise _invalid(
+            "local_prepare_binding_mismatch",
+            "worker success requires a complete prepared local result binding",
+        )
+    assert result.paper_reader_run is not None
+    if (
+        prepared.manifest_sha256 != result.manifest_sha256
+        or prepared.item_id != result.item_id
+        or prepared.source != result.source
+        or prepared.paper_reader_run.path != result.paper_reader_run.path
+        or prepared.paper_reader_run.schema_version != result.paper_reader_run.schema_version
+        or prepared.paper_reader_run.artifact_id != result.paper_reader_run.artifact_id
+        or run.run_id != prepared.paper_reader_run.artifact_id
+    ):
+        raise _invalid(
+            "local_prepare_binding_mismatch",
+            "worker success does not continue the exact prepared paper_reader run identity",
+        )
+    evidence_path = normalized_absolute_path(Path(prepared.evidence.path))
+    expected_evidence_path = (
+        run_path.parent
+        / "evidence"
+        / prepared.evidence.artifact_id
+        / "evidence.json"
+    )
+    if (
+        evidence_path != expected_evidence_path
+        or evidence_path != canonical_evidence_path
+        or prepared.evidence.schema_version != "paper_reader.evidence.v2-internal"
+        or prepared.evidence.artifact_id != canonical_evidence.evidence_id
+        or canonical_evidence.run_id != run.run_id
+        or package.evidence_digest != prepared.evidence.sha256
+        or package.evidence_manifest.sha256 != prepared.evidence.sha256
+        or package.evidence_manifest.size_bytes != prepared.evidence.size_bytes
+        or candidate.evidence_manifest.sha256 != prepared.evidence.sha256
+        or candidate.evidence_manifest.size_bytes != prepared.evidence.size_bytes
+    ):
+        raise _invalid(
+            "local_prepare_binding_mismatch",
+            "worker success does not use the exact prepared evidence closure",
+        )
+    evidence_relative = evidence_path.relative_to(run_path.parent).as_posix()
+    matches = [
+        ref
+        for ref in run.artifacts
+        if ref.role == "evidence_manifest"
+        and ref.path == evidence_relative
+        and ref.sha256 == prepared.evidence.sha256
+        and ref.size_bytes == prepared.evidence.size_bytes
+        and ref.media_type == "application/json"
+    ]
+    if len(matches) != 1:
+        raise _invalid(
+            "local_prepare_binding_mismatch",
+            "worker success does not retain the exact prepared evidence closure",
+        )
 
 
 def validate_worker_result_artifacts(
@@ -1768,6 +1924,53 @@ def validate_worker_result_artifacts(
     result: WorkerResult,
     *,
     allow_mutable_run: bool = False,
+    prepared_local_result: LocalPrepareResult | None = None,
+    allow_legacy_prepared_run_identity: bool = False,
+) -> str | None:
+    if prepared_local_result is None or result.status != "succeeded":
+        return _validate_worker_result_artifacts_unanchored(
+            manifest,
+            result,
+            allow_mutable_run=allow_mutable_run,
+            prepared_local_result=prepared_local_result,
+        )
+    if (
+        prepared_local_result.paper_reader_run_directory is None
+        or result.paper_reader_run is None
+    ):
+        if (
+            allow_legacy_prepared_run_identity
+            and prepared_local_result.paper_reader_run_directory is None
+            and result.paper_reader_run is not None
+        ):
+            return _validate_worker_result_artifacts_unanchored(
+                manifest,
+                result,
+                allow_mutable_run=allow_mutable_run,
+                prepared_local_result=prepared_local_result,
+            )
+        raise _invalid(
+            "local_prepare_binding_mismatch",
+            "worker success lacks the prepared stable run directory identity",
+        )
+    with _bound_paper_reader_run_directory(
+        result.paper_reader_run,
+        prepared_local_result.paper_reader_run_directory,
+    ):
+        return _validate_worker_result_artifacts_unanchored(
+            manifest,
+            result,
+            allow_mutable_run=allow_mutable_run,
+            prepared_local_result=prepared_local_result,
+        )
+
+
+def _validate_worker_result_artifacts_unanchored(
+    manifest: BatchManifest,
+    result: WorkerResult,
+    *,
+    allow_mutable_run: bool = False,
+    prepared_local_result: LocalPrepareResult | None = None,
 ) -> str | None:
     manifest_item = next((item for item in manifest.items if item.item_id == result.item_id), None)
     if manifest_item is None:
@@ -1810,9 +2013,11 @@ def validate_worker_result_artifacts(
     resolved_key = _source_matches(manifest_item, run.source, refingerprint=not allow_mutable_run)
     (
         _review_path,
-        _package,
+        package,
         candidate_path,
         candidate,
+        canonical_evidence_path,
+        canonical_evidence,
         candidate_key,
         candidate_inventory_sha256,
     ) = _validate_review_and_candidate(
@@ -1823,6 +2028,17 @@ def validate_worker_result_artifacts(
         result.candidate,
         refingerprint=not allow_mutable_run,
     )
+    if prepared_local_result is not None:
+        _validate_prepared_local_continuation(
+            result,
+            prepared_local_result,
+            run_path=run_path,
+            run=run,
+            package=package,
+            candidate=candidate,
+            canonical_evidence_path=canonical_evidence_path,
+            canonical_evidence=canonical_evidence,
+        )
     if candidate_key != resolved_key:
         raise _invalid("candidate_binding_mismatch", "candidate and run resolve different sources")
     if isinstance(manifest_item, ZoteroTitleManifestItem):
@@ -1971,6 +2187,49 @@ def paper_reader_root_identity(root: Path) -> SkillRootIdentity:
 
 
 def validate_local_prepare_result_artifacts(
+    manifest: BatchManifest,
+    result: LocalPrepareResult,
+    *,
+    expected_root: Path | None = None,
+    allow_mutable_run: bool = False,
+    allow_legacy_prepared_run_identity: bool = False,
+) -> None:
+    if result.status != "prepared":
+        return _validate_local_prepare_result_artifacts_unanchored(
+            manifest,
+            result,
+            expected_root=expected_root,
+            allow_mutable_run=allow_mutable_run,
+        )
+    if result.paper_reader_run_directory is None or result.paper_reader_run is None:
+        if (
+            allow_legacy_prepared_run_identity
+            and result.paper_reader_run_directory is None
+            and result.paper_reader_run is not None
+        ):
+            return _validate_local_prepare_result_artifacts_unanchored(
+                manifest,
+                result,
+                expected_root=expected_root,
+                allow_mutable_run=allow_mutable_run,
+            )
+        raise _invalid(
+            "local_prepare_binding_mismatch",
+            "prepared result lacks its stable paper_reader run directory identity",
+        )
+    with _bound_paper_reader_run_directory(
+        result.paper_reader_run,
+        result.paper_reader_run_directory,
+    ):
+        return _validate_local_prepare_result_artifacts_unanchored(
+            manifest,
+            result,
+            expected_root=expected_root,
+            allow_mutable_run=allow_mutable_run,
+        )
+
+
+def _validate_local_prepare_result_artifacts_unanchored(
     manifest: BatchManifest,
     result: LocalPrepareResult,
     *,

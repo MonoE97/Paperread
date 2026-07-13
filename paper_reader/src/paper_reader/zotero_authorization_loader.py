@@ -18,6 +18,7 @@ from paper_reader.contracts import (
 )
 from paper_reader.note_hash import canonicalize_note_html_for_hash, note_html_sha256
 from paper_reader.raw_schema import require_raw_schema_version
+from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import ExpectedRunArtifact
 from paper_reader.storage import (
     UnsafeStoragePathError,
@@ -61,13 +62,29 @@ def _read_closed_authorization_sidecar(
                 "authorization_tampered",
                 "authorization sidecar membership is not the exact closed set",
             )
-        before_snapshot = snapshot_directory_fd(sidecar_anchor.descriptor)
+        before_snapshot = snapshot_directory_fd(
+            sidecar_anchor.descriptor,
+            max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+            max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+            max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+        )
         members = {
-            name: read_anchored_bytes(sidecar_anchor, sidecar / name)
+            name: read_anchored_bytes(
+                sidecar_anchor,
+                sidecar / name,
+                max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            )
             for name in _AUTHORIZATION_SIDECAR_NAMES
         }
         after_names = tuple(sorted(os.listdir(sidecar_anchor.descriptor)))
-        after_snapshot = snapshot_directory_fd(sidecar_anchor.descriptor)
+        after_snapshot = snapshot_directory_fd(
+            sidecar_anchor.descriptor,
+            max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+            max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+            max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+        )
         if (
             after_names != before_names
             or after_snapshot != before_snapshot
@@ -154,7 +171,11 @@ def preflight_authorization_schema_versions(
             manifest_path=run_dir / "run.json",
         )
         try:
-            raw = read_anchored_bytes(anchor, path)
+            raw = read_anchored_bytes(
+                anchor,
+                path,
+                max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            )
         except (OSError, ValueError) as exc:
             raise ZoteroAuthorizationBindingError(
                 "authorization_unreadable",
@@ -574,7 +595,11 @@ def load_authorization_artifact(
     if raw_override is None:
         try:
             if loaded.run_directory_anchor is not None:
-                raw = read_anchored_bytes(loaded.run_directory_anchor, resolved)
+                raw = read_anchored_bytes(
+                    loaded.run_directory_anchor,
+                    resolved,
+                    max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                )
             else:
                 if resolved.is_symlink() or resolved.parent.is_symlink():
                     raise OSError("authorization path uses a symlink")
