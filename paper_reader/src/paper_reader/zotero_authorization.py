@@ -723,8 +723,7 @@ def _validate_authorization_options(
     ttl_seconds: int,
     external_claim_id: str | None,
     write_attempt_id: str | None,
-    now: datetime | None,
-) -> tuple[str | None, str | None, datetime | None]:
+) -> tuple[str | None, str | None]:
     if (external_claim_id is None) != (write_attempt_id is None):
         raise ZoteroAuthorizationError(
             "invalid_identity_options",
@@ -750,14 +749,23 @@ def _validate_authorization_options(
             "invalid_authorization_ttl",
             "authorization TTL must be between 1 and 300 seconds",
         )
-    if now is not None:
-        if now.tzinfo is None or now.utcoffset() is None:
-            raise ZoteroAuthorizationError(
-                "invalid_authorization_time",
-                "authorization time must be timezone-aware",
-            )
-        now = now.astimezone(timezone.utc)
-    return external_claim_id, write_attempt_id, now
+    return external_claim_id, write_attempt_id
+
+
+def _trusted_utc_wall_clock() -> datetime:
+    """Return the process wall clock for authorization security decisions."""
+
+    return datetime.now(timezone.utc)
+
+
+def _authorization_instant() -> datetime:
+    instant = _trusted_utc_wall_clock()
+    if instant.tzinfo is None or instant.utcoffset() is None:
+        raise ZoteroAuthorizationError(
+            "invalid_authorization_clock",
+            "trusted authorization clock must be timezone-aware",
+        )
+    return instant.astimezone(timezone.utc)
 
 
 def _refreshed_candidate_preflight(
@@ -796,14 +804,7 @@ def _authorize_zotero_candidate_once(
     ttl_seconds: int,
     external_claim_id: str | None,
     write_attempt_id: str | None,
-    fixed_instant: datetime | None,
 ) -> AuthorizedZoteroWrite:
-
-    def current_instant() -> datetime:
-        if fixed_instant is not None:
-            return fixed_instant
-        return datetime.now(timezone.utc)
-
     candidate_path = inspected.candidate_path
     run_dir = inspected.run_dir
     resolved_provider = provider or LocalApiZoteroReadProvider()
@@ -867,7 +868,7 @@ def _authorize_zotero_candidate_once(
                     "local_candidate_forbidden",
                     "local candidates cannot produce Zotero write authorization",
                 )
-            active_instant = current_instant()
+            active_instant = _authorization_instant()
             _reject_active_authorization(
                 run_dir,
                 loaded,
@@ -922,7 +923,7 @@ def _authorize_zotero_candidate_once(
                 allow_existing_main=False,
             )
             parent_bytes, children_bytes = _fresh_live_preflight(candidate, resolved_provider)
-            grant_instant = current_instant()
+            grant_instant = _authorization_instant()
 
             if external_claim_id is None:
                 resolved_claim_id = new_random_id("direct")
@@ -1122,7 +1123,7 @@ def _authorize_zotero_candidate_once(
                         "authorization_status_update_failed",
                         "authorization tree is durable but run binding failed",
                     ) from exc
-                if current_instant() >= _parse_utc(authorization.expires_at):
+                if _authorization_instant() >= _parse_utc(authorization.expires_at):
                     raise ZoteroAuthorizationError(
                         "authorization_expired_before_return",
                         (
@@ -1162,15 +1163,11 @@ def authorize_zotero_candidate(
     ttl_seconds: int = 300,
     external_claim_id: str | None = None,
     write_attempt_id: str | None = None,
-    now: datetime | None = None,
 ) -> AuthorizedZoteroWrite:
-    external_claim_id, write_attempt_id, fixed_instant = (
-        _validate_authorization_options(
-            ttl_seconds=ttl_seconds,
-            external_claim_id=external_claim_id,
-            write_attempt_id=write_attempt_id,
-            now=now,
-        )
+    external_claim_id, write_attempt_id = _validate_authorization_options(
+        ttl_seconds=ttl_seconds,
+        external_claim_id=external_claim_id,
+        write_attempt_id=write_attempt_id,
     )
     inspected = _candidate_target_without_network(candidate_input)
     for attempt in range(2):
@@ -1181,7 +1178,6 @@ def authorize_zotero_candidate(
                 ttl_seconds=ttl_seconds,
                 external_claim_id=external_claim_id,
                 write_attempt_id=write_attempt_id,
-                fixed_instant=fixed_instant,
             )
         except (RunLoadError, ZoteroAuthorizationError) as exc:
             if exc.code not in {

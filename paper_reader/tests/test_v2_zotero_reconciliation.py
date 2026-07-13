@@ -27,7 +27,9 @@ from test_v2_zotero_authorization import (
     _candidate,
     _filesystem_snapshot,
     _inject_root_swap_at_anchor_recheck,
+    _install_authorization_clock,
     _install_unsafe_artifact_layout,
+    _module as _authorization_module,
 )
 from test_v2_zotero_candidate import InMemoryZoteroProvider
 from test_v2_zotero_verification import _note_snapshot
@@ -292,12 +294,17 @@ def test_reconcile_one_exact_match_runs_full_verify_before_verified(tmp_path: Pa
 
 def test_reconcile_expired_authorization_still_runs_full_readback_verification(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _install_authorization_clock(
+        _authorization_module(),
+        monkeypatch,
+        NOW.replace(year=2000),
+    )
     candidate_path, provider = _candidate(tmp_path)
     authorized = _authorize(
         candidate_path,
         provider,
-        now=NOW.replace(year=2000),
         ttl_seconds=1,
     )
     authorization_path = authorized.authorization_path

@@ -151,7 +151,6 @@ def _authorize(
     candidate_path: Path,
     provider,
     *,
-    now: datetime = NOW,
     ttl_seconds: int = 300,
     external_claim_id: str | None = None,
     write_attempt_id: str | None = None,
@@ -159,7 +158,6 @@ def _authorize(
     return _module().authorize_zotero_candidate(
         candidate_path,
         provider=provider,
-        now=now,
         ttl_seconds=ttl_seconds,
         external_claim_id=external_claim_id,
         write_attempt_id=write_attempt_id,
@@ -172,15 +170,13 @@ def _install_authorization_clock(
     initial: datetime,
 ) -> dict[str, datetime]:
     clock = {"now": initial}
-
-    class FakeDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            instant = clock["now"]
-            return instant if tz is None else instant.astimezone(tz)
-
-    monkeypatch.setattr(module, "datetime", FakeDateTime)
+    monkeypatch.setattr(module, "_trusted_utc_wall_clock", lambda: clock["now"])
     return clock
+
+
+@pytest.fixture(autouse=True)
+def authorization_clock(monkeypatch: pytest.MonkeyPatch) -> dict[str, datetime]:
+    return _install_authorization_clock(_module(), monkeypatch, NOW)
 
 
 def test_direct_authorization_binds_exact_envelope_and_returns_token_only_once(
@@ -613,16 +609,19 @@ def test_authorization_detects_same_title_suffix_race_as_stale_candidate(
 
 def test_only_one_unexpired_authorization_can_bind_a_candidate_then_expiry_allows_new(
     tmp_path: Path,
+    authorization_clock: dict[str, datetime],
 ) -> None:
     candidate_path, provider = _candidate(tmp_path)
     first = _authorize(candidate_path, provider, ttl_seconds=60)
 
+    authorization_clock["now"] = NOW + timedelta(seconds=30)
     with pytest.raises(Exception) as exc_info:
-        _authorize(candidate_path, provider, now=NOW + timedelta(seconds=30))
+        _authorize(candidate_path, provider)
 
     assert getattr(exc_info.value, "code", None) == "authorization_active"
 
-    second = _authorize(candidate_path, provider, now=NOW + timedelta(seconds=61))
+    authorization_clock["now"] = NOW + timedelta(seconds=61)
+    second = _authorize(candidate_path, provider)
 
     assert second.authorization.authorization_id != first.authorization.authorization_id
     assert second.authorization.nonce != first.authorization.nonce
@@ -633,15 +632,15 @@ def test_only_one_unexpired_authorization_can_bind_a_candidate_then_expiry_allow
 def test_production_ttl_starts_after_lock_wait_and_live_readback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    authorization_clock: dict[str, datetime],
 ) -> None:
     module = _module()
     candidate_path, provider = _candidate(tmp_path)
-    clock = _install_authorization_clock(module, monkeypatch, NOW)
     original_parent_lock = module.locked_zotero_parent
 
     @contextmanager
     def delayed_parent_lock(*args, **kwargs):
-        clock["now"] += timedelta(seconds=120)
+        authorization_clock["now"] += timedelta(seconds=120)
         with original_parent_lock(*args, **kwargs) as locked:
             yield locked
 
@@ -651,7 +650,7 @@ def test_production_ttl_starts_after_lock_wait_and_live_readback(
 
         def get_children(self, parent_key: str):
             children = provider.get_children(parent_key)
-            clock["now"] += timedelta(seconds=120)
+            authorization_clock["now"] += timedelta(seconds=120)
             return children
 
     monkeypatch.setattr(module, "locked_zotero_parent", delayed_parent_lock)
@@ -659,7 +658,6 @@ def test_production_ttl_starts_after_lock_wait_and_live_readback(
     authorized = module.authorize_zotero_candidate(
         candidate_path,
         provider=SlowProvider(),
-        now=None,
         ttl_seconds=1,
     )
 
@@ -671,16 +669,16 @@ def test_production_ttl_starts_after_lock_wait_and_live_readback(
 def test_expired_authorization_commit_never_returns_plaintext_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    authorization_clock: dict[str, datetime],
 ) -> None:
     module = _module()
     candidate_path, provider = _candidate(tmp_path)
-    clock = _install_authorization_clock(module, monkeypatch, NOW)
     original_write = module.atomic_write_json
 
     def commit_then_expire(path: Path, value, **kwargs):
         result = original_write(path, value, **kwargs)
         if Path(path).name == "run.json":
-            clock["now"] += timedelta(seconds=2)
+            authorization_clock["now"] += timedelta(seconds=2)
         return result
 
     monkeypatch.setattr(module, "atomic_write_json", commit_then_expire)
@@ -689,7 +687,6 @@ def test_expired_authorization_commit_never_returns_plaintext_token(
         module.authorize_zotero_candidate(
             candidate_path,
             provider=provider,
-            now=None,
             ttl_seconds=1,
         )
 
@@ -701,6 +698,7 @@ def test_expired_authorization_commit_never_returns_plaintext_token(
 
 def test_unexpired_authorization_blocks_second_candidate_for_same_parent_and_title(
     tmp_path: Path,
+    authorization_clock: dict[str, datetime],
 ) -> None:
     run_dir = _sealed_zotero_run(tmp_path)
     provider = InMemoryZoteroProvider()
@@ -709,11 +707,11 @@ def test_unexpired_authorization_blocks_second_candidate_for_same_parent_and_tit
     assert first_candidate.candidate.note_title == second_candidate.candidate.note_title
     _authorize(first_candidate.candidate_dir / "candidate.json", provider, ttl_seconds=60)
 
+    authorization_clock["now"] = NOW + timedelta(seconds=30)
     with pytest.raises(Exception) as exc_info:
         _authorize(
             second_candidate.candidate_dir / "candidate.json",
             provider,
-            now=NOW + timedelta(seconds=30),
             ttl_seconds=60,
         )
 
@@ -799,7 +797,7 @@ def test_bound_authorization_schema_is_rejected_before_parent_lock(
     monkeypatch.setattr(module, "locked_zotero_parent", forbidden_parent_lock)
 
     with pytest.raises(Exception) as exc_info:
-        _authorize(candidate_path, provider, now=NOW + timedelta(seconds=2))
+        _authorize(candidate_path, provider)
 
     assert getattr(exc_info.value, "code", None) == "unsupported_run_schema"
     assert (run_dir / "run.json").read_bytes() == run_before
@@ -841,7 +839,7 @@ def test_orphan_authorization_schema_is_rejected_before_parent_lock(
     monkeypatch.setattr(module, "locked_zotero_parent", forbidden_parent_lock)
 
     with pytest.raises(Exception) as exc_info:
-        _authorize(candidate_path, provider, now=NOW + timedelta(seconds=2))
+        _authorize(candidate_path, provider)
 
     assert getattr(exc_info.value, "code", None) == "unsupported_run_schema"
     assert (run_dir / "run.json").read_bytes() == run_before
@@ -956,7 +954,6 @@ def test_manifest_change_repreflights_once_before_provider_read(
     authorized = module.authorize_zotero_candidate(
         candidate_path,
         provider=CountingProvider(),
-        now=NOW,
     )
 
     assert authorized.authorization.schema_version == "paper_reader.write-authorization.v2"
@@ -995,7 +992,6 @@ def test_manifest_change_retry_is_bounded_to_one_repreflight(
         module.authorize_zotero_candidate(
             candidate_path,
             provider=NetworkForbiddenProvider(),
-            now=NOW,
         )
 
     assert exc_info.value.code == "run_manifest_changed"
@@ -1052,7 +1048,6 @@ def test_manifest_change_retry_rejects_skill_root_identity_replacement(
         module.authorize_zotero_candidate(
             candidate_path,
             provider=CountingProvider(),
-            now=NOW,
         )
 
     assert exc_info.value.code == "run_directory_changed"

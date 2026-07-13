@@ -15,12 +15,22 @@ from paper_reader.storage import canonical_json_bytes
 from paper_reader.zotero_lock import locked_zotero_parent
 
 from test_v2_review_package import _invoke, _result_payload, _write_summary_and_review
-from test_v2_zotero_authorization import _authorize, _candidate as _candidate_for_orphan
+from test_v2_zotero_authorization import (
+    _authorize,
+    _candidate as _candidate_for_orphan,
+    _install_authorization_clock,
+    _module,
+)
 from test_v2_zotero_candidate import InMemoryZoteroProvider, _build
 from test_v2_zotero_init import FIXTURE_PDF, _bundle, _initialize
 
 
 NOW = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def authorization_clock(monkeypatch: pytest.MonkeyPatch) -> dict[str, datetime]:
+    return _install_authorization_clock(_module(), monkeypatch, NOW)
 
 
 def _authorize_process(
@@ -33,7 +43,6 @@ def _authorize_process(
         authorized = _authorize(
             candidate,
             InMemoryZoteroProvider(),
-            now=NOW,
             ttl_seconds=60,
         )
     except Exception as exc:
@@ -110,9 +119,10 @@ def test_single_side_commitment_loss_is_repaired_before_active_collision_check(
     missing_side: str,
     missing_scope: str,
     tmp_path: Path,
+    authorization_clock: dict[str, datetime],
 ) -> None:
     skill_root, first_candidate, second_candidate, provider = _two_candidates(tmp_path)
-    first = _authorize(first_candidate, provider, now=NOW, ttl_seconds=60)
+    first = _authorize(first_candidate, provider, ttl_seconds=60)
     ledger_path = _reservation_paths(skill_root)[0]
     index_path = _commitment_paths(skill_root)[0]
     expected_record = ledger_path.read_bytes()
@@ -130,11 +140,11 @@ def test_single_side_commitment_loss_is_repaired_before_active_collision_check(
         def get_children(self, _parent_key: str):
             raise AssertionError("single-side recovery reached Zotero readback")
 
+    authorization_clock["now"] = NOW + timedelta(seconds=30)
     with pytest.raises(Exception) as exc_info:
         _authorize(
             second_candidate,
             NetworkForbiddenProvider(),
-            now=NOW + timedelta(seconds=30),
             ttl_seconds=60,
         )
 
@@ -151,9 +161,10 @@ def test_single_side_commitment_loss_is_repaired_before_active_collision_check(
 
 def test_active_reservation_blocks_same_parent_and_exact_title_across_runs_before_readback(
     tmp_path: Path,
+    authorization_clock: dict[str, datetime],
 ) -> None:
     skill_root, first_candidate, second_candidate, provider = _two_candidates(tmp_path)
-    first = _authorize(first_candidate, provider, now=NOW, ttl_seconds=60)
+    first = _authorize(first_candidate, provider, ttl_seconds=60)
     second_run = second_candidate.parent.parent.parent
     run_before = (second_run / "run.json").read_bytes()
 
@@ -164,11 +175,11 @@ def test_active_reservation_blocks_same_parent_and_exact_title_across_runs_befor
         def get_children(self, _parent_key: str):
             raise AssertionError("active cross-run reservation reached Zotero readback")
 
+    authorization_clock["now"] = NOW + timedelta(seconds=30)
     with pytest.raises(Exception) as exc_info:
         _authorize(
             second_candidate,
             NetworkForbiddenProvider(),
-            now=NOW + timedelta(seconds=30),
             ttl_seconds=60,
         )
 
@@ -199,11 +210,48 @@ def test_active_reservation_blocks_same_parent_and_exact_title_across_runs_befor
     assert records[0].read_bytes() == canonical_json_bytes(record)
 
 
+def test_public_authorize_rejects_caller_clock_that_would_bypass_active_reservation(
+    tmp_path: Path,
+    authorization_clock: dict[str, datetime],
+) -> None:
+    module = _module()
+    skill_root, first_candidate, second_candidate, provider = _two_candidates(tmp_path)
+
+    first = module.authorize_zotero_candidate(
+        first_candidate,
+        provider=provider,
+        ttl_seconds=60,
+    )
+    authorization_clock["now"] += timedelta(seconds=1)
+
+    with pytest.raises(TypeError, match="unexpected keyword argument 'now'"):
+        module.authorize_zotero_candidate(
+            second_candidate,
+            provider=provider,
+            ttl_seconds=60,
+            now=NOW + timedelta(days=365),
+        )
+
+    with pytest.raises(module.ZoteroAuthorizationError) as active_error:
+        module.authorize_zotero_candidate(
+            second_candidate,
+            provider=provider,
+            ttl_seconds=60,
+        )
+
+    assert active_error.value.code == "authorization_active"
+    assert first.authorization.created_at == "2026-07-10T12:00:00Z"
+    assert first.authorization.expires_at == "2026-07-10T12:01:00Z"
+    assert len(_reservation_paths(skill_root)) == 1
+    assert not (second_candidate.parent.parent.parent / "authorizations").exists()
+
+
 def test_expired_reservation_is_ignored_but_never_deleted_or_modified(
     tmp_path: Path,
+    authorization_clock: dict[str, datetime],
 ) -> None:
     skill_root, first_candidate, second_candidate, provider = _two_candidates(tmp_path)
-    first = _authorize(first_candidate, provider, now=NOW, ttl_seconds=60)
+    first = _authorize(first_candidate, provider, ttl_seconds=60)
     first_path = _reservation_paths(skill_root)[0]
     first_bytes = first_path.read_bytes()
     first_stat = first_path.stat()
@@ -211,10 +259,10 @@ def test_expired_reservation_is_ignored_but_never_deleted_or_modified(
     witness_bytes = first_witness.read_bytes()
     witness_stat = first_witness.stat()
 
+    authorization_clock["now"] = NOW + timedelta(seconds=61)
     second = _authorize(
         second_candidate,
         provider,
-        now=NOW + timedelta(seconds=61),
         ttl_seconds=30,
     )
 
@@ -237,7 +285,7 @@ def test_concurrent_cross_run_authorization_creates_only_one_active_reservation(
 
     def authorize(candidate: Path):
         try:
-            return _authorize(candidate, provider, now=NOW, ttl_seconds=60)
+            return _authorize(candidate, provider, ttl_seconds=60)
         except Exception as exc:
             return exc
 
@@ -371,6 +419,7 @@ def test_parent_lock_rejects_run_replacement_before_creating_lock_artifacts(
 def test_durable_reservation_survives_authorization_publication_failure_and_blocks_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    authorization_clock: dict[str, datetime],
 ) -> None:
     import paper_reader.zotero_authorization as module
 
@@ -384,7 +433,7 @@ def test_durable_reservation_survives_authorization_publication_failure_and_bloc
     monkeypatch.setattr(module, "anchored_artifact_publication", fail_publication)
 
     with pytest.raises(Exception) as first_error:
-        _authorize(first_candidate, provider, now=NOW, ttl_seconds=60)
+        _authorize(first_candidate, provider, ttl_seconds=60)
 
     assert getattr(first_error.value, "code", None) == "authorization_publication_failed"
     assert (first_run / "run.json").read_bytes() == first_run_before
@@ -397,11 +446,11 @@ def test_durable_reservation_survives_authorization_publication_failure_and_bloc
         def get_children(self, _parent_key: str):
             raise AssertionError("durable failed-attempt reservation reached Zotero readback")
 
+    authorization_clock["now"] = NOW + timedelta(seconds=30)
     with pytest.raises(Exception) as retry_error:
         _authorize(
             second_candidate,
             NetworkForbiddenProvider(),
-            now=NOW + timedelta(seconds=30),
             ttl_seconds=60,
         )
 
@@ -412,6 +461,7 @@ def test_durable_reservation_survives_authorization_publication_failure_and_bloc
 def test_atomic_reservation_commit_survives_post_rename_crash_and_blocks_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    authorization_clock: dict[str, datetime],
 ) -> None:
     import paper_reader.zotero_authorization_reservations as reservations_module
 
@@ -430,7 +480,7 @@ def test_atomic_reservation_commit_survives_post_rename_crash_and_blocks_retry(
         publish_then_crash,
     )
     with pytest.raises(Exception) as first_error:
-        _authorize(first_candidate, provider, now=NOW, ttl_seconds=60)
+        _authorize(first_candidate, provider, ttl_seconds=60)
 
     assert getattr(first_error.value, "code", None) == "authorization_reservation_failed"
     assert (first_run / "run.json").read_bytes() == run_before
@@ -448,11 +498,11 @@ def test_atomic_reservation_commit_survives_post_rename_crash_and_blocks_retry(
         def get_children(self, _parent_key: str):
             raise AssertionError("durable post-rename reservation reached Zotero readback")
 
+    authorization_clock["now"] = NOW + timedelta(seconds=1)
     with pytest.raises(Exception) as retry_error:
         _authorize(
             second_candidate,
             NetworkForbiddenProvider(),
-            now=NOW + timedelta(seconds=1),
         )
 
     assert getattr(retry_error.value, "code", None) == "authorization_active"
@@ -475,6 +525,7 @@ def test_each_commitment_publish_fault_converges_without_duplicate_active_grant(
     reservation_is_durable: bool,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    authorization_clock: dict[str, datetime],
 ) -> None:
     import paper_reader.zotero_authorization_reservations as reservations_module
 
@@ -503,7 +554,7 @@ def test_each_commitment_publish_fault_converges_without_duplicate_active_grant(
         fail_selected_publish,
     )
     with pytest.raises(Exception) as first_error:
-        _authorize(first_candidate, provider, now=NOW, ttl_seconds=60)
+        _authorize(first_candidate, provider, ttl_seconds=60)
     assert getattr(first_error.value, "code", None) == "authorization_reservation_failed"
     assert failed is True
     monkeypatch.setattr(
@@ -511,6 +562,7 @@ def test_each_commitment_publish_fault_converges_without_duplicate_active_grant(
         "atomic_publish_tree",
         original_publish,
     )
+    authorization_clock["now"] = NOW + timedelta(seconds=1)
 
     if reservation_is_durable:
         class NetworkForbiddenProvider:
@@ -524,7 +576,6 @@ def test_each_commitment_publish_fault_converges_without_duplicate_active_grant(
             _authorize(
                 second_candidate,
                 NetworkForbiddenProvider(),
-                now=NOW + timedelta(seconds=1),
                 ttl_seconds=60,
             )
         assert getattr(retry_error.value, "code", None) == "authorization_active"
@@ -532,7 +583,6 @@ def test_each_commitment_publish_fault_converges_without_duplicate_active_grant(
         retry = _authorize(
             second_candidate,
             provider,
-            now=NOW + timedelta(seconds=1),
             ttl_seconds=60,
         )
         assert retry.authorization.run_id
@@ -547,9 +597,10 @@ def test_each_commitment_publish_fault_converges_without_duplicate_active_grant(
 
 def test_tampered_reservation_fails_closed_before_provider_or_run_mutation(
     tmp_path: Path,
+    authorization_clock: dict[str, datetime],
 ) -> None:
     skill_root, first_candidate, second_candidate, provider = _two_candidates(tmp_path)
-    _authorize(first_candidate, provider, now=NOW, ttl_seconds=1)
+    _authorize(first_candidate, provider, ttl_seconds=1)
     reservation_path = _reservation_paths(skill_root)[0]
     reservation_path.write_bytes(b'{"schema_version":"tampered"}')
     second_run = second_candidate.parent.parent.parent
@@ -562,11 +613,11 @@ def test_tampered_reservation_fails_closed_before_provider_or_run_mutation(
         def get_children(self, _parent_key: str):
             raise AssertionError("tampered reservation reached Zotero readback")
 
+    authorization_clock["now"] = NOW + timedelta(seconds=2)
     with pytest.raises(Exception) as exc_info:
         _authorize(
             second_candidate,
             NetworkForbiddenProvider(),
-            now=NOW + timedelta(seconds=2),
         )
 
     assert getattr(exc_info.value, "code", None) == "authorization_reservation_tampered"
@@ -584,9 +635,10 @@ def test_tampered_reservation_fails_closed_before_provider_or_run_mutation(
 def test_unsafe_commitment_root_is_classified_as_tamper_before_provider(
     root_name: str,
     tmp_path: Path,
+    authorization_clock: dict[str, datetime],
 ) -> None:
     skill_root, first_candidate, second_candidate, provider = _two_candidates(tmp_path)
-    _authorize(first_candidate, provider, now=NOW, ttl_seconds=60)
+    _authorize(first_candidate, provider, ttl_seconds=60)
     root = skill_root / root_name
     detached = skill_root / f"{root_name}.detached"
     outside = tmp_path / f"{root_name}.outside"
@@ -601,11 +653,11 @@ def test_unsafe_commitment_root_is_classified_as_tamper_before_provider(
         def get_children(self, _parent_key: str):
             raise AssertionError("unsafe commitment root reached Zotero readback")
 
+    authorization_clock["now"] = NOW + timedelta(seconds=30)
     with pytest.raises(Exception) as exc_info:
         _authorize(
             second_candidate,
             NetworkForbiddenProvider(),
-            now=NOW + timedelta(seconds=30),
             ttl_seconds=60,
         )
 
@@ -614,9 +666,10 @@ def test_unsafe_commitment_root_is_classified_as_tamper_before_provider(
 
 def test_canonical_reservation_rewrite_fails_closed_before_provider_or_run_mutation(
     tmp_path: Path,
+    authorization_clock: dict[str, datetime],
 ) -> None:
     skill_root, first_candidate, second_candidate, provider = _two_candidates(tmp_path)
-    _authorize(first_candidate, provider, now=NOW, ttl_seconds=60)
+    _authorize(first_candidate, provider, ttl_seconds=60)
     reservation_path = _reservation_paths(skill_root)[0]
     rewritten = json.loads(reservation_path.read_bytes())
     rewritten["note_title"] = f"{rewritten['note_title']} tampered"
@@ -631,11 +684,11 @@ def test_canonical_reservation_rewrite_fails_closed_before_provider_or_run_mutat
         def get_children(self, _parent_key: str):
             raise AssertionError("canonical reservation tamper reached Zotero readback")
 
+    authorization_clock["now"] = NOW + timedelta(seconds=30)
     with pytest.raises(Exception) as exc_info:
         _authorize(
             second_candidate,
             NetworkForbiddenProvider(),
-            now=NOW + timedelta(seconds=30),
         )
 
     assert getattr(exc_info.value, "code", None) == "authorization_reservation_tampered"
@@ -645,9 +698,10 @@ def test_canonical_reservation_rewrite_fails_closed_before_provider_or_run_mutat
 
 def test_deleted_reservation_record_fails_closed_before_provider_or_run_mutation(
     tmp_path: Path,
+    authorization_clock: dict[str, datetime],
 ) -> None:
     skill_root, first_candidate, second_candidate, provider = _two_candidates(tmp_path)
-    _authorize(first_candidate, provider, now=NOW, ttl_seconds=60)
+    _authorize(first_candidate, provider, ttl_seconds=60)
     reservation_path = _reservation_paths(skill_root)[0]
     reservation_path.unlink()
     second_run = second_candidate.parent.parent.parent
@@ -660,11 +714,11 @@ def test_deleted_reservation_record_fails_closed_before_provider_or_run_mutation
         def get_children(self, _parent_key: str):
             raise AssertionError("deleted reservation reached Zotero readback")
 
+    authorization_clock["now"] = NOW + timedelta(seconds=30)
     with pytest.raises(Exception) as exc_info:
         _authorize(
             second_candidate,
             NetworkForbiddenProvider(),
-            now=NOW + timedelta(seconds=30),
         )
 
     assert getattr(exc_info.value, "code", None) == "authorization_reservation_tampered"
@@ -674,6 +728,7 @@ def test_deleted_reservation_record_fails_closed_before_provider_or_run_mutation
 def test_tampered_reservation_blocks_orphan_recovery_before_run_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    authorization_clock: dict[str, datetime],
 ) -> None:
     import paper_reader.zotero_authorization as module
 
@@ -691,15 +746,16 @@ def test_tampered_reservation_blocks_orphan_recovery_before_run_mutation(
 
     monkeypatch.setattr(module, "atomic_write_json", fail_binding_once)
     with pytest.raises(Exception) as first_error:
-        _authorize(candidate_path, provider, now=NOW, ttl_seconds=60)
+        _authorize(candidate_path, provider, ttl_seconds=60)
     assert getattr(first_error.value, "code", None) == "authorization_status_update_failed"
     reservation_path = _reservation_paths(run_dir.parent.parent.parent)[0]
     reservation_path.write_bytes(b'{"schema_version":"tampered"}')
     run_before = (run_dir / "run.json").read_bytes()
     monkeypatch.setattr(module, "atomic_write_json", original_write)
 
+    authorization_clock["now"] = NOW + timedelta(seconds=1)
     with pytest.raises(Exception) as retry_error:
-        _authorize(candidate_path, provider, now=NOW + timedelta(seconds=1))
+        _authorize(candidate_path, provider)
 
     assert getattr(retry_error.value, "code", None) == "authorization_reservation_tampered"
     assert (run_dir / "run.json").read_bytes() == run_before
