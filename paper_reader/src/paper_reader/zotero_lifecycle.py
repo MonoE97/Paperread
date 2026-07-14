@@ -132,17 +132,17 @@ def _required_version(payload: dict[str, Any], *, context: str) -> int:
     return _non_negative_version(payload["version"], context=context)
 
 
-def _validated_selected_item_type(value: object) -> str:
-    item_type = str(value or "").strip()
-    if not item_type:
+def _validated_item_type(value: object, *, context: str) -> str:
+    if not isinstance(value, str) or not value.strip():
         raise ZoteroLifecycleError(
             "invalid_discovery_bundle",
-            "selected_item itemType is required",
+            f"{context} itemType must be a non-empty string",
         )
+    item_type = value.strip()
     if item_type in {"attachment", "note"}:
         raise ZoteroLifecycleError(
             "invalid_discovery_bundle",
-            "selected_item itemType must identify a regular Zotero item",
+            f"{context} itemType must identify a regular Zotero item",
         )
     return item_type
 
@@ -309,7 +309,10 @@ def _read_bundle(path: Path) -> tuple[bytes, dict[str, Any], dict[str, Any], lis
         )
     try:
         selected = normalize_item_details_payload(payload["selected_item"])
-        _validated_selected_item_type(selected.get("itemType"))
+        selected["itemType"] = _validated_item_type(
+            selected.get("itemType"),
+            context="selected_item",
+        )
         canonical_json_bytes(selected)
     except (ValueError, json.JSONDecodeError) as exc:
         raise ZoteroLifecycleError(
@@ -355,6 +358,10 @@ def _validated_inventory(
                 f"search inventory repeats key {key}",
             )
         keys.add(key)
+        item_type = _validated_item_type(
+            item.get("itemType"),
+            context=f"search_results[{index}]",
+        )
         version = _required_version(item, context=f"search_results[{index}]")
         normalized_inventory.append(
             {
@@ -362,6 +369,7 @@ def _validated_inventory(
                 "title": title,
                 "normalized_title": normalized_title(title),
                 "DOI": normalized_doi(item.get("DOI", "")),
+                "itemType": item_type,
                 "version": version,
             }
         )
@@ -372,6 +380,10 @@ def _validated_inventory(
         )
     selected_normalized_title = normalized_title(selected.get("title", ""))
     selected_doi = normalized_doi(selected.get("DOI", ""))
+    selected_item_type = _validated_item_type(
+        selected.get("itemType"),
+        context="selected_item",
+    )
     selected_version = _required_version(selected, context="selected_item")
     matches = [
         item for item in normalized_inventory if item["normalized_title"] == selected_normalized_title
@@ -387,16 +399,17 @@ def _validated_inventory(
         "key": selected_key,
         "normalized_title": selected_normalized_title,
         "DOI": selected_doi,
+        "itemType": selected_item_type,
         "version": selected_version,
     }
     inventory_membership = {
         key: selected_inventory[key]
-        for key in ("key", "normalized_title", "DOI", "version")
+        for key in ("key", "normalized_title", "DOI", "itemType", "version")
     }
     if inventory_membership != selected_membership:
         raise ZoteroLifecycleError(
             "selected_item_inventory_mismatch",
-            "selected item key/title/DOI/version does not match its search inventory entry",
+            "selected item key/title/DOI/itemType/version does not match its search inventory entry",
         )
     return normalized_inventory
 

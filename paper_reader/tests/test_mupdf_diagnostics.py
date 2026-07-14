@@ -77,3 +77,26 @@ def test_record_mupdf_diagnostics_restores_display_when_extraction_raises(monkey
 
     assert tools.errors == 1
     assert tools.warnings == 0
+
+
+def test_record_mupdf_diagnostics_restores_first_toggle_when_second_toggle_fails(
+    monkeypatch,
+) -> None:
+    class FailingTools(_FakeTools):
+        def mupdf_display_warnings(self, on=None):
+            if on is False:
+                raise RuntimeError("cannot disable warnings")
+            return super().mupdf_display_warnings(on)
+
+    tools = FailingTools("")
+    monkeypatch.setattr(mupdf_diagnostics, "fitz", SimpleNamespace(TOOLS=tools))
+
+    @record_mupdf_diagnostics
+    def extract() -> dict[str, object]:
+        raise AssertionError("extractor must not run")
+
+    with pytest.raises(RuntimeError, match="cannot disable warnings"):
+        extract()
+
+    assert tools.errors == 1
+    assert tools.warnings == 0

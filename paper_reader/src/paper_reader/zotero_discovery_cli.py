@@ -14,9 +14,9 @@ Discover = Callable[..., dict[str, Any]]
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Build one read-only exact-title Zotero discovery bundle on stdout.",
+        description="Build one read-only Zotero title/title-fragment discovery bundle on stdout.",
     )
-    parser.add_argument("--title", required=True, help="Exact Zotero paper title")
+    parser.add_argument("--title", required=True, help="Zotero paper title or title fragment")
     parser.add_argument("--mcp-endpoint", default="http://127.0.0.1:23120/mcp")
     parser.add_argument("--local-api-base", default="http://127.0.0.1:23119")
     parser.add_argument("--timeout-seconds", type=float, default=30.0)

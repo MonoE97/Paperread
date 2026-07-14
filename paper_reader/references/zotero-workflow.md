@@ -29,10 +29,10 @@ Load Zotero MCP tools before the workflow: `search_library`, `get_item_details`,
 
 If native MCP tools are not injected, use the local Zotero MCP endpoint `http://127.0.0.1:23120/mcp` as an HTTP JSON-RPC fallback. The fallback still calls Zotero MCP methods such as `zotero-mcp write_note`; it is not a Zotero local API write path. If localhost requests hit a proxy, clear `ALL_PROXY`, `HTTP_PROXY`, and `HTTPS_PROXY`, then set `NO_PROXY=127.0.0.1,localhost` and `no_proxy=127.0.0.1,localhost`.
 
-For discovery, prefer the bundled read-only helper. It has a hard allowlist containing only `search_library` and `get_item_details`; it cannot call `write_note`. It also reads the selected item's read-only parent snapshot from Zotero local API so the bundle carries the authoritative non-negative `version` and regular-item `itemType`, while preserving the untouched MCP responses and parent snapshots as provenance:
+For discovery, prefer the bundled read-only helper. It has a hard allowlist containing only `search_library` and `get_item_details`; it cannot call `write_note`. It also reads the selected item's read-only parent snapshot from Zotero local API so the bundle carries the authoritative non-negative `version` and regular-item `itemType`, while preserving every untouched paginated MCP response and parent snapshot as provenance:
 
 ```bash
-uv run python scripts/discover-zotero-item.py --title "<exact title>" > <raw-discovery.json>
+uv run python scripts/discover-zotero-item.py --title "<title or unique title fragment>" > <raw-discovery.json>
 ```
 
 If native MCP tools are used instead, apply the same checks before run allocation: fetch a read-only parent snapshot for every search result, require its key, normalized title, DOI, `version`, and `itemType` to agree with the MCP inventory, and preserve both raw sources in the discovery bundle. Missing identity fields are blockers; never substitute version `0` or guess an item type.
@@ -40,7 +40,7 @@ If native MCP tools are used instead, apply the same checks before run allocatio
 ## Steps
 
 1. Run `uv run paper_reader route "<original user input>"` before Zotero search. Existing `.pdf` paths must use the local PDF path workflow, existing directory paths must be delegated to `$paper_reader_batch`, and missing path-like input must fail as `unsupported_local_path`; none may trigger Zotero lookup or duplicate checks.
-2. Use `scripts/discover-zotero-item.py` for exact-title resolution, or reproduce its read-only procedure with injected `search_library` and `get_item_details` tools. Save the exact `search_library response`, selected item details and read-only parent snapshot provenance in one raw discovery bundle. The validated bundle surface must include authoritative `version` and `itemType` values for the inventory and selected item. It must preserve every search candidate needed to prove whether multiple entries have the same normalized title and identify the exact selected item key. If duplicates exist, stop before run allocation/lock/mutation and ask the user to de-duplicate in Zotero.
+2. Use `scripts/discover-zotero-item.py` for title/title-fragment resolution, or reproduce its read-only procedure with injected `search_library` and `get_item_details` tools. The helper first performs a complete paginated exact-title search. If that has no normalized-title match, it performs a complete paginated `contains` search; when Zotero title HTML such as `<sub>` splits the visible fragment, it also uses bounded long-token title anchors and filters candidates by the complete visible normalized title. It accepts only one matching candidate, then repeats a complete paginated exact-title search using that item's stored title. Save every raw `search_library response` page, selected item details and read-only parent snapshot provenance in one raw discovery bundle. Pagination metadata must prove the inventory is complete; a stalled/changing page sequence, multiple fragment candidates or multiple items with the same normalized title is a blocker before run allocation/lock/mutation. The validated bundle surface must include authoritative `version` and `itemType` values for the final exact inventory and selected item.
 3. Initialize from the saved raw discovery bundle and exact expected item key:
 
 ```bash
@@ -67,7 +67,7 @@ uv run paper_reader review validate <run_dir>
 uv run paper_reader review seal <run_dir>
 ```
 
-The preflight reports the exact summary field responsible for Chinese-first, locator, limitation-source, figure-quality or formatting issues, before the review hash makes correction expensive. It is an early lint only; the strict review validation and sealing gates remain authoritative. Failed review, changed summary hash, unresolved locator or rendered English prose blocks sealing and candidate creation.
+The preflight first requires a strict `paper_reader.summary.v2` artifact, then reports the exact summary field responsible for Chinese-first, locator, limitation-source, figure-quality or formatting issues before the review hash makes correction expensive. It remains an early preflight; the strict review validation and sealing gates remain authoritative. Failed review, changed summary hash, unresolved locator or rendered English prose blocks sealing and candidate creation.
 
 8. Refresh the read-only parent/children snapshot and build `paper_reader.candidate.v2`:
 

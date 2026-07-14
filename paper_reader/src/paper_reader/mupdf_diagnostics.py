@@ -53,18 +53,23 @@ def record_mupdf_diagnostics(function: Callable[P, R]) -> Callable[P, R]:
             tools = fitz.TOOLS
             display_errors = tools.mupdf_display_errors()
             display_warnings = tools.mupdf_display_warnings()
-            tools.reset_mupdf_warnings()
-            tools.mupdf_display_errors(False)
-            tools.mupdf_display_warnings(False)
             captured = ""
+            capture_ready = False
             try:
+                tools.reset_mupdf_warnings()
+                tools.mupdf_display_errors(False)
+                tools.mupdf_display_warnings(False)
+                capture_ready = True
                 result = function(*args, **kwargs)
             finally:
                 try:
-                    captured = tools.mupdf_warnings(reset=1)
+                    if capture_ready:
+                        captured = tools.mupdf_warnings(reset=1)
                 finally:
-                    tools.mupdf_display_errors(display_errors)
-                    tools.mupdf_display_warnings(display_warnings)
+                    try:
+                        tools.mupdf_display_errors(display_errors)
+                    finally:
+                        tools.mupdf_display_warnings(display_warnings)
             return _append_warnings(result, _normalized_warnings(captured))
 
     return wrapped

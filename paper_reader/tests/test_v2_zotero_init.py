@@ -217,6 +217,50 @@ def test_init_zotero_rejects_blank_selected_item_type_before_allocating_run(
     assert not (skill_root / "runs").exists()
 
 
+def test_init_zotero_rejects_non_string_selected_item_type_before_allocating_run(
+    tmp_path: Path,
+) -> None:
+    pdf_path = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, pdf_path)
+    bundle = _bundle(pdf_path)
+    selected_item = bundle["selected_item"]
+    assert isinstance(selected_item, dict)
+    selected_item["itemType"] = 123
+    bundle_path = tmp_path / "discovery.json"
+    bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+
+    with pytest.raises(ZoteroLifecycleError) as exc_info:
+        _initialize(bundle_path, "PARENT1", skill_root)
+
+    assert exc_info.value.code == "invalid_discovery_bundle"
+    assert "itemType" in str(exc_info.value)
+    assert not (skill_root / "runs").exists()
+
+
+def test_init_zotero_rejects_missing_inventory_item_type_before_allocating_run(
+    tmp_path: Path,
+) -> None:
+    pdf_path = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, pdf_path)
+    bundle = _bundle(pdf_path)
+    search_results = bundle["search_results"]
+    assert isinstance(search_results, list)
+    search_results[0].pop("itemType")
+    bundle_path = tmp_path / "discovery.json"
+    bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+
+    with pytest.raises(ZoteroLifecycleError) as exc_info:
+        _initialize(bundle_path, "PARENT1", skill_root)
+
+    assert exc_info.value.code == "invalid_discovery_bundle"
+    assert "itemType" in str(exc_info.value)
+    assert not (skill_root / "runs").exists()
+
+
 def test_init_zotero_rehashes_locked_pdf_before_allocating_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -336,7 +380,16 @@ def test_init_zotero_accepts_raw_mcp_selected_item_and_allocates_versioned_runs(
         (
             "PARENT1",
             lambda payload: payload.update(
-                {"search_results": [{"key": "OTHER", "title": "Other", "version": 1}]}
+                {
+                    "search_results": [
+                        {
+                            "key": "OTHER",
+                            "title": "Other",
+                            "itemType": "journalArticle",
+                            "version": 1,
+                        }
+                    ]
+                }
             ),
             "selected_item_not_in_inventory",
         ),
