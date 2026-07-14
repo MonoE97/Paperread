@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 from paper_reader.contracts import PaperReaderCommandResult
 from paper_reader.public_cli import app
+from paper_reader.zotero_lifecycle import ZoteroLifecycleError
 
 
 FIXTURE_PDF = Path(__file__).parent / "fixtures" / "minimal.pdf"
@@ -167,6 +168,53 @@ def test_init_zotero_preserves_raw_bytes_and_binds_normalized_source_and_pdf(
         source["raw_discovery_bundle"],
         source["normalized_source"],
     ]
+
+
+def test_init_zotero_rejects_missing_parent_versions_before_allocating_run(
+    tmp_path: Path,
+) -> None:
+    pdf_path = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, pdf_path)
+    bundle = _bundle(pdf_path)
+    selected_item = bundle["selected_item"]
+    search_results = bundle["search_results"]
+    assert isinstance(selected_item, dict)
+    assert isinstance(search_results, list)
+    selected_item.pop("version")
+    search_results[0].pop("version")
+    bundle_path = tmp_path / "discovery.json"
+    bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+
+    with pytest.raises(ZoteroLifecycleError) as exc_info:
+        _initialize(bundle_path, "PARENT1", skill_root)
+
+    assert exc_info.value.code == "invalid_discovery_bundle"
+    assert "version" in str(exc_info.value)
+    assert not (skill_root / "runs").exists()
+
+
+def test_init_zotero_rejects_blank_selected_item_type_before_allocating_run(
+    tmp_path: Path,
+) -> None:
+    pdf_path = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, pdf_path)
+    bundle = _bundle(pdf_path)
+    selected_item = bundle["selected_item"]
+    assert isinstance(selected_item, dict)
+    selected_item["itemType"] = ""
+    bundle_path = tmp_path / "discovery.json"
+    bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+
+    with pytest.raises(ZoteroLifecycleError) as exc_info:
+        _initialize(bundle_path, "PARENT1", skill_root)
+
+    assert exc_info.value.code == "invalid_discovery_bundle"
+    assert "itemType" in str(exc_info.value)
+    assert not (skill_root / "runs").exists()
 
 
 def test_init_zotero_rehashes_locked_pdf_before_allocating_run(

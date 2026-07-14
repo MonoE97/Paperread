@@ -20,6 +20,8 @@ ZOTERO_REFERENCE = SKILL_ROOT / "references" / "zotero-workflow.md"
 PDF_REFERENCE = SKILL_ROOT / "references" / "pdf-path-workflow.md"
 SUMMARY_REFERENCE = SKILL_ROOT / "references" / "summary-schema.md"
 CAPTURE_SCRIPT = SKILL_ROOT / "scripts" / "capture-secondary-url.mjs"
+DISCOVERY_SCRIPT = SKILL_ROOT / "scripts" / "discover-zotero-item.py"
+SUMMARY_LINT_SCRIPT = SKILL_ROOT / "scripts" / "lint-summary.py"
 VALIDATE_SCRIPT = SKILL_ROOT / "scripts" / "validate-skill.py"
 
 
@@ -59,6 +61,10 @@ def test_skill_bundle_contains_required_runtime_assets() -> None:
         SKILL_ROOT / "src" / "paper_reader" / "contracts.py",
         SKILL_ROOT / "src" / "paper_reader" / "storage.py",
         SKILL_ROOT / "src" / "paper_reader" / "local_lifecycle.py",
+        SKILL_ROOT / "src" / "paper_reader" / "mupdf_diagnostics.py",
+        SKILL_ROOT / "src" / "paper_reader" / "summary_preflight_cli.py",
+        SKILL_ROOT / "src" / "paper_reader" / "zotero_discovery.py",
+        SKILL_ROOT / "src" / "paper_reader" / "zotero_discovery_cli.py",
         SKILL_ROOT / "src" / "paper_reader" / "zotero_lifecycle.py",
         SKILL_ROOT / "references" / "schemas" / "paper_reader.run.v2.schema.json",
         SKILL_ROOT / "references" / "schemas" / "paper_reader.command-result.v2.schema.json",
@@ -67,6 +73,8 @@ def test_skill_bundle_contains_required_runtime_assets() -> None:
         PDF_REFERENCE,
         SUMMARY_REFERENCE,
         CAPTURE_SCRIPT,
+        DISCOVERY_SCRIPT,
+        SUMMARY_LINT_SCRIPT,
         VALIDATE_SCRIPT,
         SKILL_ROOT / "tests" / "fixtures" / "minimal.pdf",
     ]
@@ -219,6 +227,8 @@ def test_references_use_skill_root_paths_and_workflow_terms() -> None:
 
     for phrase in [
         "scripts/capture-secondary-url.mjs",
+        "scripts/discover-zotero-item.py",
+        "scripts/lint-summary.py",
         "uv run paper_reader route",
         "uv run paper_reader run init-zotero",
         "uv run paper_reader run prepare",
@@ -281,6 +291,10 @@ def test_zotero_reference_keeps_single_paper_write_safety_contract() -> None:
     for phrase in [
         "search_library",
         "get_item_details",
+        "scripts/discover-zotero-item.py",
+        "read-only parent snapshot",
+        "version",
+        "itemType",
         "raw discovery bundle",
         "search_library response",
         "selected item details",
@@ -294,6 +308,7 @@ def test_zotero_reference_keeps_single_paper_write_safety_contract() -> None:
         "same normalized title",
         "uv run paper_reader run init-zotero",
         "uv run paper_reader run prepare",
+        "scripts/lint-summary.py",
         "section_context.md",
         "not a canonical evidence source",
         "paper_reader.candidate.v2",
@@ -556,7 +571,13 @@ def test_single_validator_tracks_v2_runtime_and_schemas() -> None:
         "src/paper_reader/candidate_integrity.py",
         "src/paper_reader/local_publish.py",
         "src/paper_reader/pdf_extract.py",
+        "src/paper_reader/mupdf_diagnostics.py",
+        "src/paper_reader/summary_preflight_cli.py",
+        "src/paper_reader/zotero_discovery.py",
+        "src/paper_reader/zotero_discovery_cli.py",
         "src/paper_reader/zotero_lifecycle.py",
+        "scripts/discover-zotero-item.py",
+        "scripts/lint-summary.py",
         "references/schemas/paper_reader.run.v2.schema.json",
         "references/schemas/paper_reader.command-result.v2.schema.json",
         "paper_reader.public_cli:app",

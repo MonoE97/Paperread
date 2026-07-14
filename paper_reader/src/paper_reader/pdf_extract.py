@@ -6,6 +6,8 @@ from typing import Any
 
 import fitz
 
+from paper_reader.mupdf_diagnostics import record_mupdf_diagnostics
+
 SECTION_KIND_BY_HEADING = {
     "abstract": "abstract",
     "introduction": "introduction",
@@ -220,6 +222,7 @@ def _build_table_candidates(pages: list[dict[str, Any]], sections: list[dict[str
     return candidates
 
 
+@record_mupdf_diagnostics
 def extract_pdf(
     pdf_path: Path,
     max_pages: int | None = None,

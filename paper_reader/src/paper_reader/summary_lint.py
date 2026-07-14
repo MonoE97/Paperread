@@ -78,6 +78,7 @@ UNIT_TOKENS = {
     "vs",
 }
 ALLOWED_MIXED_ENGLISH_PHRASES = (
+    "Coble creep",
     "on-the-fly",
     "solid-state electrolyte",
     "all-solid-state",

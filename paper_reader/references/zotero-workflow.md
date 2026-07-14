@@ -29,10 +29,18 @@ Load Zotero MCP tools before the workflow: `search_library`, `get_item_details`,
 
 If native MCP tools are not injected, use the local Zotero MCP endpoint `http://127.0.0.1:23120/mcp` as an HTTP JSON-RPC fallback. The fallback still calls Zotero MCP methods such as `zotero-mcp write_note`; it is not a Zotero local API write path. If localhost requests hit a proxy, clear `ALL_PROXY`, `HTTP_PROXY`, and `HTTPS_PROXY`, then set `NO_PROXY=127.0.0.1,localhost` and `no_proxy=127.0.0.1,localhost`.
 
+For discovery, prefer the bundled read-only helper. It has a hard allowlist containing only `search_library` and `get_item_details`; it cannot call `write_note`. It also reads the selected item's read-only parent snapshot from Zotero local API so the bundle carries the authoritative non-negative `version` and regular-item `itemType`, while preserving the untouched MCP responses and parent snapshots as provenance:
+
+```bash
+uv run python scripts/discover-zotero-item.py --title "<exact title>" > <raw-discovery.json>
+```
+
+If native MCP tools are used instead, apply the same checks before run allocation: fetch a read-only parent snapshot for every search result, require its key, normalized title, DOI, `version`, and `itemType` to agree with the MCP inventory, and preserve both raw sources in the discovery bundle. Missing identity fields are blockers; never substitute version `0` or guess an item type.
+
 ## Steps
 
 1. Run `uv run paper_reader route "<original user input>"` before Zotero search. Existing `.pdf` paths must use the local PDF path workflow, existing directory paths must be delegated to `$paper_reader_batch`, and missing path-like input must fail as `unsupported_local_path`; none may trigger Zotero lookup or duplicate checks.
-2. Use `search_library` for exact-title resolution. Save the exact `search_library response` together with the selected item details from `get_item_details(mode="complete")` as one unmodified raw discovery bundle. The bundle must preserve every search candidate needed to prove whether multiple entries have the same normalized title and identify the exact selected item key. If duplicates exist, stop before run allocation/lock/mutation and ask the user to de-duplicate in Zotero.
+2. Use `scripts/discover-zotero-item.py` for exact-title resolution, or reproduce its read-only procedure with injected `search_library` and `get_item_details` tools. Save the exact `search_library response`, selected item details and read-only parent snapshot provenance in one raw discovery bundle. The validated bundle surface must include authoritative `version` and `itemType` values for the inventory and selected item. It must preserve every search candidate needed to prove whether multiple entries have the same normalized title and identify the exact selected item key. If duplicates exist, stop before run allocation/lock/mutation and ask the user to de-duplicate in Zotero.
 3. Initialize from the saved raw discovery bundle and exact expected item key:
 
 ```bash
@@ -51,14 +59,15 @@ uv run paper_reader run validate <run_dir>
 5. Treat URLs in `secondary_sources.json` as metadata only. The current grouped runtime has no immutable secondary-capture ingestion command. The bundled `scripts/capture-secondary-url.mjs` helper is not such an ingestion command: outputs labelled `source_status: secondary_context` or `source_status: secondary_context_unavailable` remain unbound. A secondary source may be used only after an immutable evidence ingestion step publishes it inside the evidence directory and `evidence.json` records its exact membership, size, and SHA-256. Until that lifecycle exists, secondary captures must not be written into the run and neither listed URLs nor separately captured bytes may participate in review or candidate construction.
 
 6. Read `context.md`, `section_context.md`, and `figure_context.md` if available. `section_context.md` is not a canonical evidence source. Final locators must use canonical forms such as `context.md page 3 section Methods`, `context.md page 6 section Results table_candidate 1`, or `figure_context.md fig_p4_1`. Bare `context.md` / `figure_context.md`, prose locators, `section_context.md`, and secondary context paths are invalid.
-7. Create `paper_reader.summary.v2` and `paper_reader.review.v2`, then validate and seal an immutable `paper_reader.review-package.v2`:
+7. Create `paper_reader.summary.v2`, run the rendered-field preflight before computing the summary hash for `paper_reader.review.v2`, then validate and seal an immutable `paper_reader.review-package.v2`:
 
 ```bash
+uv run python scripts/lint-summary.py <run_dir>/summary.json
 uv run paper_reader review validate <run_dir>
 uv run paper_reader review seal <run_dir>
 ```
 
-Failed review, changed summary hash, unresolved locator or rendered English prose blocks sealing and candidate creation.
+The preflight reports the exact summary field responsible for Chinese-first, locator, limitation-source, figure-quality or formatting issues, before the review hash makes correction expensive. It is an early lint only; the strict review validation and sealing gates remain authoritative. Failed review, changed summary hash, unresolved locator or rendered English prose blocks sealing and candidate creation.
 
 8. Refresh the read-only parent/children snapshot and build `paper_reader.candidate.v2`:
 

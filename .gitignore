@@ -26,6 +26,9 @@ tmp/
 # Paper, Zotero, and generated note outputs
 docs/
 runs/
+paper_reader/.zotero-authorization-reservations/
+paper_reader/.zotero-authorization-reservation-index/
+paper_reader/.zotero-parent-locks/
 paper_reader_batch/runs/
 paper_reader_batch/.paper_reader_batch/
 papers/

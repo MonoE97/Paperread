@@ -123,6 +123,30 @@ def _non_negative_version(value: object, *, context: str) -> int:
     return value
 
 
+def _required_version(payload: dict[str, Any], *, context: str) -> int:
+    if "version" not in payload:
+        raise ZoteroLifecycleError(
+            "invalid_discovery_bundle",
+            f"{context} version is required",
+        )
+    return _non_negative_version(payload["version"], context=context)
+
+
+def _validated_selected_item_type(value: object) -> str:
+    item_type = str(value or "").strip()
+    if not item_type:
+        raise ZoteroLifecycleError(
+            "invalid_discovery_bundle",
+            "selected_item itemType is required",
+        )
+    if item_type in {"attachment", "note"}:
+        raise ZoteroLifecycleError(
+            "invalid_discovery_bundle",
+            "selected_item itemType must identify a regular Zotero item",
+        )
+    return item_type
+
+
 def normalize_parent_snapshot(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ZoteroLifecycleError("invalid_parent_snapshot", "Zotero parent snapshot must be an object")
@@ -285,6 +309,7 @@ def _read_bundle(path: Path) -> tuple[bytes, dict[str, Any], dict[str, Any], lis
         )
     try:
         selected = normalize_item_details_payload(payload["selected_item"])
+        _validated_selected_item_type(selected.get("itemType"))
         canonical_json_bytes(selected)
     except (ValueError, json.JSONDecodeError) as exc:
         raise ZoteroLifecycleError(
@@ -330,7 +355,7 @@ def _validated_inventory(
                 f"search inventory repeats key {key}",
             )
         keys.add(key)
-        version = _non_negative_version(item.get("version", 0), context=f"search_results[{index}]")
+        version = _required_version(item, context=f"search_results[{index}]")
         normalized_inventory.append(
             {
                 "key": key,
@@ -347,10 +372,7 @@ def _validated_inventory(
         )
     selected_normalized_title = normalized_title(selected.get("title", ""))
     selected_doi = normalized_doi(selected.get("DOI", ""))
-    selected_version = _non_negative_version(
-        selected.get("version", 0),
-        context="selected_item",
-    )
+    selected_version = _required_version(selected, context="selected_item")
     matches = [
         item for item in normalized_inventory if item["normalized_title"] == selected_normalized_title
     ]
@@ -506,7 +528,7 @@ def initialize_zotero_run(
     ) = _attachment_identity(selected)
     title = display_title(selected["title"])
     doi = normalized_doi(selected.get("DOI", ""))
-    parent_version = _non_negative_version(selected.get("version", 0), context="selected_item")
+    parent_version = _required_version(selected, context="selected_item")
     selected_normalized = dict(selected)
     selected_normalized.update({"title": title, "DOI": doi, "version": parent_version})
     selected_normalized["attachments"] = [

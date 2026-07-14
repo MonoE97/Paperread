@@ -10,6 +10,7 @@ from typing import Any, Literal, NotRequired, TypedDict
 import fitz
 
 from paper_reader import arxiv_source
+from paper_reader.mupdf_diagnostics import record_mupdf_diagnostics
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
 
 CAPTION_PATTERN = re.compile(
@@ -205,6 +206,7 @@ def classify_figure_evidence_tier(figure: dict[str, Any]) -> dict[str, str]:
     return {"tier": "not_usable", "reason": "missing caption and weak source provenance"}
 
 
+@record_mupdf_diagnostics
 def extract_figures(
     pdf_path: Path,
     output_dir: Path,
