@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Annotated, Literal, TypeAlias
+from datetime import datetime, timedelta
+from typing import Annotated, Literal, Self, TypeAlias
 
 from pydantic import (
     AfterValidator,
@@ -11,6 +11,7 @@ from pydantic import (
     JsonValue,
     StringConstraints,
     ValidationError,
+    model_validator,
 )
 
 from paper_reader.storage import safe_relative_artifact_path
@@ -34,6 +35,17 @@ def _validate_absolute_path(value: str) -> str:
     if not value.startswith("/"):
         raise ValueError("resolved path must be absolute")
     return value
+
+
+def _authorization_utc_instant(value: str) -> datetime:
+    time_text = value[:-1]
+    if "." in time_text:
+        fractional = time_text.rsplit(".", 1)[1]
+        if len(fractional) > 6:
+            raise ValueError(
+                "authorization timestamps must not exceed microsecond precision"
+            )
+    return datetime.fromisoformat(f"{time_text}+00:00")
 
 
 Rfc3339Utc: TypeAlias = Annotated[
@@ -353,6 +365,16 @@ class PaperReaderWriteAuthorization(StrictContractModel):
     artifacts: tuple[ArtifactRef, ...]
     live_preflight: LivePreflight
     gate: GateState
+
+    @model_validator(mode="after")
+    def _validate_exact_ttl_interval(self) -> Self:
+        created_at = _authorization_utc_instant(self.created_at)
+        expires_at = _authorization_utc_instant(self.expires_at)
+        if expires_at - created_at != timedelta(seconds=self.ttl_seconds):
+            raise ValueError(
+                "expires_at must equal created_at + ttl_seconds exactly"
+            )
+        return self
 
 
 class PaperReaderVerification(StrictContractModel):

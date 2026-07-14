@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 import fcntl
 import hashlib
+import os
+import time
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,6 +19,7 @@ import paper_reader.candidate_integrity as candidate_integrity_module
 from paper_reader.candidate_integrity import verify_artifact_ref
 from paper_reader.contracts import ArtifactRef
 from paper_reader.run_lock import locked_v2_run
+from paper_reader.run_size import RunSizeLimitError
 from paper_reader.storage import (
     UnsafeStoragePathError,
     atomic_publish_tree,
@@ -61,6 +66,40 @@ def _write_valid_run(run_dir: Path) -> Path:
     manifest = run_dir / "run.json"
     manifest.write_text(json.dumps(_valid_run_payload()), encoding="utf-8")
     return manifest
+
+
+def test_run_loader_rejects_same_size_manifest_mutation_with_restored_mtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    manifest = _write_valid_run(run_dir)
+    original_read = loader_module.os.read
+    changed = False
+
+    def mutate_after_read(descriptor: int, requested: int) -> bytes:
+        nonlocal changed
+        chunk = original_read(descriptor, requested)
+        if chunk and not changed:
+            metadata = manifest.stat()
+            raw = manifest.read_bytes()
+            replacement = raw.replace(b"run_safe_storage", b"run_evil_storage", 1)
+            assert len(replacement) == len(raw)
+            manifest.write_bytes(replacement)
+            os.utime(
+                manifest,
+                ns=(metadata.st_atime_ns, metadata.st_mtime_ns),
+            )
+            changed = True
+        return chunk
+
+    monkeypatch.setattr(loader_module.os, "read", mutate_after_read)
+
+    with pytest.raises(RunLoadError) as exc_info:
+        load_v2_run(run_dir)
+
+    assert changed is True
+    assert exc_info.value.code == "run_manifest_unsafe"
 
 
 def test_anchored_read_rejects_declared_size_mismatch_before_reading(
@@ -461,6 +500,41 @@ def test_locked_v2_run_rejects_run_directory_replacement_during_lock_acquisition
     assert (detached / ".run.lock").is_file()
 
 
+def test_locked_v2_run_rejects_run_directory_replacement_at_context_exit(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    _write_valid_run(run_dir)
+    detached = tmp_path / "detached-run"
+
+    with pytest.raises(run_lock_module.RunLockError) as exc_info:
+        with locked_v2_run(run_dir):
+            run_dir.rename(detached)
+            _write_valid_run(run_dir)
+
+    assert exc_info.value.code == "run_directory_changed"
+    assert (detached / ".run.lock").is_file()
+    assert (run_dir / "run.json").is_file()
+
+
+def test_locked_v2_run_rejects_named_lock_replacement_at_context_exit(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    _write_valid_run(run_dir)
+    detached_lock = run_dir / ".run.lock.detached"
+
+    with pytest.raises(run_lock_module.RunLockError) as exc_info:
+        with locked_v2_run(run_dir):
+            lock_path = run_dir / ".run.lock"
+            lock_path.rename(detached_lock)
+            lock_path.write_bytes(b"")
+
+    assert exc_info.value.code == "run_lock_changed"
+    assert detached_lock.is_file()
+    assert (run_dir / ".run.lock").is_file()
+
+
 def test_load_v2_run_rejects_directory_replacement_during_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -495,23 +569,26 @@ def test_directory_lock_survives_named_lock_replacement(tmp_path: Path) -> None:
     _write_valid_run(run_dir)
     detached_lock = run_dir / ".run.lock.detached"
 
-    with locked_v2_run(run_dir):
-        lock_path = run_dir / ".run.lock"
-        lock_path.rename(detached_lock)
-        lock_path.write_bytes(b"")
-        competing_directory_fd = storage_module.os.open(
-            run_dir,
-            storage_module.os.O_RDONLY
-            | getattr(storage_module.os, "O_DIRECTORY", 0),
-        )
-        try:
-            with pytest.raises(BlockingIOError):
-                fcntl.flock(
-                    competing_directory_fd,
-                    fcntl.LOCK_EX | fcntl.LOCK_NB,
-                )
-        finally:
-            storage_module.os.close(competing_directory_fd)
+    with pytest.raises(run_lock_module.RunLockError) as exc_info:
+        with locked_v2_run(run_dir):
+            lock_path = run_dir / ".run.lock"
+            lock_path.rename(detached_lock)
+            lock_path.write_bytes(b"")
+            competing_directory_fd = storage_module.os.open(
+                run_dir,
+                storage_module.os.O_RDONLY
+                | getattr(storage_module.os, "O_DIRECTORY", 0),
+            )
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(
+                        competing_directory_fd,
+                        fcntl.LOCK_EX | fcntl.LOCK_NB,
+                    )
+            finally:
+                storage_module.os.close(competing_directory_fd)
+
+    assert exc_info.value.code == "run_lock_changed"
 
 
 @pytest.mark.parametrize("fault_point", ["stat", "fsync"])
@@ -605,6 +682,511 @@ def test_anchored_atomic_write_preserves_unknown_replacement_after_temp_name_swa
 
     assert injected is True
     assert manifest.read_bytes() == b"attacker"
+
+
+def test_identity_bound_atomic_write_preserves_last_moment_replacement_as_orphan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    manifest = run_dir / "run.json"
+    manifest.write_bytes(b"expected-current")
+    original_exchange = getattr(storage_module, "_native_exchangeat", None)
+    injected = False
+    retired_name: str | None = None
+
+    def replace_then_exchange(
+        parent_fd: int,
+        first_name: str,
+        second_name: str,
+        **kwargs,
+    ) -> None:
+        nonlocal injected, retired_name
+        if not injected:
+            replacement = run_dir / ".external-run.json"
+            replacement.write_bytes(b"external")
+            os.replace(replacement, manifest)
+            injected = True
+            retired_name = first_name
+        assert original_exchange is not None
+        original_exchange(
+            parent_fd,
+            first_name,
+            second_name,
+            **kwargs,
+        )
+
+    with DirectoryAnchor.open(
+        run_dir,
+        manifest_path=manifest,
+    ) as anchor, storage_module.open_anchored_regular_file(
+        anchor,
+        manifest,
+        expected_size=len(b"expected-current"),
+    ) as expected_current:
+        monkeypatch.setattr(
+            storage_module,
+            "_native_exchangeat",
+            replace_then_exchange,
+            raising=False,
+        )
+        with pytest.raises(UnsafeStoragePathError):
+            atomic_write_bytes(
+                manifest,
+                b"restored",
+                anchor=anchor,
+                hold_open=True,
+                expected_current=expected_current,
+            )
+
+    assert injected is True
+    assert retired_name is not None
+    assert manifest.read_bytes() == b"restored"
+    assert (run_dir / retired_name).read_bytes() == b"external"
+
+
+def test_open_anchored_regular_file_rejects_oversized_replacement_before_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    manifest = run_dir / "run.json"
+    expected = b"expected-current"
+    manifest.write_bytes(expected)
+
+    with DirectoryAnchor.open(run_dir, manifest_path=manifest) as anchor:
+        replacement = run_dir / ".oversized-run.json"
+        with replacement.open("wb") as handle:
+            handle.seek(
+                storage_module.V2_RESOURCE_POLICY.structured_artifact_max_bytes
+            )
+            handle.write(b"\0")
+        os.replace(replacement, manifest)
+
+        def forbidden_hash(*_args, **_kwargs):
+            pytest.fail("oversized held file reached descriptor hashing")
+
+        monkeypatch.setattr(
+            storage_module,
+            "_sha256_descriptor",
+            forbidden_hash,
+        )
+
+        with pytest.raises(storage_module.UnexpectedStorageSizeError):
+            storage_module.open_anchored_regular_file(
+                anchor,
+                manifest,
+                expected_size=len(expected),
+            )
+
+
+def test_identity_bound_atomic_write_preserves_last_moment_rewrite_as_orphan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    manifest = run_dir / "run.json"
+    manifest.write_bytes(b"expected-current")
+    original_exchange = storage_module._native_exchangeat
+    injected = False
+    retired_name: str | None = None
+
+    def rewrite_then_exchange(
+        parent_fd: int,
+        first_name: str,
+        second_name: str,
+        **kwargs,
+    ) -> None:
+        nonlocal injected, retired_name
+        if not injected:
+            before = manifest.stat()
+            time.sleep(0.01)
+            with manifest.open("r+b") as handle:
+                handle.write(b"attacker-current")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.utime(
+                manifest,
+                ns=(before.st_atime_ns, before.st_mtime_ns),
+            )
+            after = manifest.stat()
+            assert after.st_size == before.st_size
+            assert after.st_mtime_ns == before.st_mtime_ns
+            assert after.st_ctime_ns != before.st_ctime_ns
+            injected = True
+            retired_name = first_name
+        original_exchange(
+            parent_fd,
+            first_name,
+            second_name,
+            **kwargs,
+        )
+
+    with DirectoryAnchor.open(
+        run_dir,
+        manifest_path=manifest,
+    ) as anchor, storage_module.open_anchored_regular_file(
+        anchor,
+        manifest,
+        expected_size=len(b"expected-current"),
+    ) as expected_current:
+        monkeypatch.setattr(
+            storage_module,
+            "_native_exchangeat",
+            rewrite_then_exchange,
+        )
+        with pytest.raises(UnsafeStoragePathError):
+            atomic_write_bytes(
+                manifest,
+                b"restored",
+                anchor=anchor,
+                hold_open=True,
+                expected_current=expected_current,
+            )
+
+    assert injected is True
+    assert retired_name is not None
+    assert manifest.read_bytes() == b"restored"
+    assert (run_dir / retired_name).read_bytes() == b"attacker-current"
+
+
+def test_identity_bound_atomic_write_never_reexchanges_replaced_retired_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    manifest = run_dir / "run.json"
+    manifest.write_bytes(b"expected-current")
+    original_exchange = storage_module._native_exchangeat
+    exchange_calls = 0
+    retired_name: str | None = None
+    late_replacement_created = False
+
+    def replace_around_exchange(
+        parent_fd: int,
+        first_name: str,
+        second_name: str,
+        **kwargs,
+    ) -> None:
+        nonlocal exchange_calls, retired_name, late_replacement_created
+        exchange_calls += 1
+        if exchange_calls == 1:
+            replacement = run_dir / ".external-run.json"
+            replacement.write_bytes(b"external-current")
+            os.replace(replacement, manifest)
+            retired_name = first_name
+        else:
+            os.rename(
+                first_name,
+                f"{first_name}.detached-external",
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            external_fd = os.open(
+                first_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o644,
+                dir_fd=parent_fd,
+            )
+            try:
+                os.write(external_fd, b"late-external")
+            finally:
+                os.close(external_fd)
+            late_replacement_created = True
+        original_exchange(parent_fd, first_name, second_name, **kwargs)
+
+    with DirectoryAnchor.open(
+        run_dir,
+        manifest_path=manifest,
+    ) as anchor, storage_module.open_anchored_regular_file(
+        anchor,
+        manifest,
+        expected_size=len(b"expected-current"),
+    ) as expected_current:
+        monkeypatch.setattr(storage_module, "_native_exchangeat", replace_around_exchange)
+        with pytest.raises(UnsafeStoragePathError):
+            atomic_write_bytes(
+                manifest,
+                b"updated",
+                anchor=anchor,
+                expected_current=expected_current,
+            )
+
+    assert exchange_calls == 1
+    assert late_replacement_created is False
+    assert retired_name is not None
+    assert manifest.read_bytes() == b"updated"
+    assert (run_dir / retired_name).read_bytes() == b"external-current"
+
+
+def test_identity_bound_atomic_write_never_reopens_the_retired_inode_for_writing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    manifest = run_dir / "run.json"
+    manifest.write_bytes(b"expected-current")
+    expected_bytes = b"expected-current"
+    original_open = storage_module.os.open
+
+    def reject_retired_writable_open(path, flags, *args, **kwargs):
+        if (
+            manifest.read_bytes() == b"updated"
+            and isinstance(path, str)
+            and path.startswith(".run.json.")
+            and path.endswith(".tmp")
+            and flags & os.O_WRONLY
+            and kwargs.get("dir_fd") is not None
+        ):
+            raise AssertionError("retired CAS inode was reopened for mutation")
+        return original_open(path, flags, *args, **kwargs)
+
+    with DirectoryAnchor.open(
+        run_dir,
+        manifest_path=manifest,
+    ) as anchor, storage_module.open_anchored_regular_file(
+        anchor,
+        manifest,
+        expected_size=len(expected_bytes),
+    ) as expected_current:
+        monkeypatch.setattr(
+            storage_module.os,
+            "open",
+            reject_retired_writable_open,
+        )
+        atomic_write_bytes(
+            manifest,
+            b"updated",
+            anchor=anchor,
+            expected_current=expected_current,
+        )
+
+    assert manifest.read_bytes() == b"updated"
+    retired = tuple(run_dir.glob(".run.json.*.tmp"))
+    assert len(retired) == 1
+    assert retired[0].read_bytes() == expected_bytes
+
+
+def test_identity_bound_atomic_write_never_truncates_a_new_retired_inode_hardlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    manifest = run_dir / "run.json"
+    expected_bytes = b"expected-current"
+    manifest.write_bytes(expected_bytes)
+    outside = tmp_path / "outside-hardlink.json"
+    original_ftruncate = storage_module.os.ftruncate
+    injected = False
+
+    def hardlink_after_identity_check(descriptor: int, length: int) -> None:
+        nonlocal injected
+        if not injected:
+            retired = next(run_dir.glob(".run.json.*.tmp"))
+            os.link(retired, outside)
+            injected = True
+        original_ftruncate(descriptor, length)
+
+    with DirectoryAnchor.open(
+        run_dir,
+        manifest_path=manifest,
+    ) as anchor, storage_module.open_anchored_regular_file(
+        anchor,
+        manifest,
+        expected_size=len(expected_bytes),
+    ) as expected_current:
+        monkeypatch.setattr(
+            storage_module.os,
+            "ftruncate",
+            hardlink_after_identity_check,
+        )
+        atomic_write_bytes(
+            manifest,
+            b"updated",
+            anchor=anchor,
+            expected_current=expected_current,
+        )
+
+    assert manifest.read_bytes() == b"updated"
+    retired = tuple(run_dir.glob(".run.json.*.tmp"))
+    assert len(retired) == 1
+    assert retired[0].read_bytes() == expected_bytes
+    if injected:
+        assert outside.read_bytes() == expected_bytes
+
+
+def test_compare_and_swap_never_rolls_back_after_post_exchange_guard_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    manifest = run_dir / "run.json"
+    old_bytes = b"expected-current"
+    new_bytes = b"updated-current"
+    manifest.write_bytes(old_bytes)
+    sidecar = run_dir / "artifact.json"
+    sidecar.write_bytes(b"sealed-artifact")
+    original_atomic_write = storage_module.atomic_write_bytes
+    writes = 0
+
+    def count_atomic_writes(*args, **kwargs):
+        nonlocal writes
+        writes += 1
+        return original_atomic_write(*args, **kwargs)
+
+    class DriftAfterExchangeGuard:
+        def __init__(self) -> None:
+            self.verifications = 0
+
+        def verify(self) -> None:
+            self.verifications += 1
+            if self.verifications == 2:
+                sidecar.write_bytes(b"drifted-after-exchange")
+                raise UnsafeStoragePathError("finalization artifact changed")
+
+    monkeypatch.setattr(storage_module, "atomic_write_bytes", count_atomic_writes)
+    with DirectoryAnchor.open(run_dir, manifest_path=manifest) as anchor:
+        with pytest.raises(UnsafeStoragePathError):
+            storage_module.compare_and_swap_bytes(
+                manifest,
+                new_bytes,
+                anchor=anchor,
+                expected_current_bytes=old_bytes,
+                finalization_guards=(DriftAfterExchangeGuard(),),
+            )
+
+    assert writes == 1
+    assert manifest.read_bytes() == new_bytes
+    retired = tuple(run_dir.glob(".run.json.*.tmp"))
+    assert len(retired) == 1
+    assert retired[0].read_bytes() == old_bytes
+    assert sidecar.read_bytes() == b"drifted-after-exchange"
+
+
+def test_cas_update_run_counts_the_retained_manifest_before_mutating(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    manifest = run_dir / "run.json"
+    old_bytes = b'{"status":"old"}'
+    manifest.write_bytes(old_bytes)
+    filler = run_dir / "immutable-artifact.bin"
+    filler.write_bytes(b"x" * 32)
+    updated_run = {"status": "updated", "payload": "y" * 32}
+    updated_bytes = storage_module.canonical_json_bytes(updated_run)
+    projected = len(old_bytes) + filler.stat().st_size + len(updated_bytes)
+    monkeypatch.setattr(
+        storage_module,
+        "V2_RESOURCE_POLICY",
+        replace(storage_module.V2_RESOURCE_POLICY, run_max_bytes=projected - 1),
+    )
+
+    with DirectoryAnchor.open(run_dir, manifest_path=manifest) as anchor:
+        loaded = SimpleNamespace(
+            manifest_path=manifest,
+            manifest_bytes=old_bytes,
+            run_directory_anchor=anchor,
+        )
+        with pytest.raises(RunSizeLimitError):
+            storage_module.cas_update_run(loaded, updated_run)
+
+    assert manifest.read_bytes() == old_bytes
+    assert not tuple(run_dir.glob(".run.json.*.tmp"))
+
+
+def test_identity_bound_atomic_write_has_no_stat_then_exchange_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    manifest = run_dir / "run.json"
+    manifest.write_bytes(b"expected-current")
+    original_exchange = storage_module._native_exchangeat
+    original_stat = storage_module.os.stat
+    temp_stat_calls = 0
+    injected = False
+
+    def replace_destination_then_exchange(
+        parent_fd: int,
+        first_name: str,
+        second_name: str,
+        **kwargs,
+    ) -> None:
+        if not (run_dir / ".initial-exchange-done").exists():
+            marker = run_dir / ".initial-exchange-done"
+            marker.write_bytes(b"marker")
+            replacement = run_dir / ".external-run.json"
+            replacement.write_bytes(b"external-current")
+            os.replace(replacement, manifest)
+        original_exchange(parent_fd, first_name, second_name, **kwargs)
+
+    def race_second_temp_stat(path, *args, **kwargs):
+        nonlocal temp_stat_calls, injected
+        result = original_stat(path, *args, **kwargs)
+        if (
+            isinstance(path, str)
+            and path.startswith(".run.json.")
+            and path.endswith(".tmp")
+            and kwargs.get("dir_fd") is not None
+        ):
+            temp_stat_calls += 1
+            if temp_stat_calls == 3:
+                injected = True
+                os.rename(
+                    path,
+                    f"{path}.detached-external",
+                    src_dir_fd=kwargs["dir_fd"],
+                    dst_dir_fd=kwargs["dir_fd"],
+                )
+                external_fd = os.open(
+                    path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o644,
+                    dir_fd=kwargs["dir_fd"],
+                )
+                try:
+                    os.write(external_fd, b"late-external")
+                finally:
+                    os.close(external_fd)
+        return result
+
+    with DirectoryAnchor.open(
+        run_dir,
+        manifest_path=manifest,
+    ) as anchor, storage_module.open_anchored_regular_file(
+        anchor,
+        manifest,
+        expected_size=len(b"expected-current"),
+    ) as expected_current:
+        monkeypatch.setattr(storage_module, "_native_exchangeat", replace_destination_then_exchange)
+        monkeypatch.setattr(storage_module.os, "stat", race_second_temp_stat)
+        with pytest.raises(UnsafeStoragePathError):
+            atomic_write_bytes(
+                manifest,
+                b"updated",
+                anchor=anchor,
+                expected_current=expected_current,
+            )
+
+    assert injected is False
+    assert temp_stat_calls == 2
+    assert manifest.read_bytes() == b"updated"
+    retired = [
+        path
+        for path in run_dir.glob(".run.json.*.tmp")
+        if path.read_bytes() == b"external-current"
+    ]
+    assert len(retired) == 1
 
 
 def test_anchored_no_replace_preserves_unknown_replacement_after_temp_name_swap(
@@ -937,6 +1519,32 @@ def test_anchored_tree_publication_fsyncs_source_and_destination_parents(
         atomic_publish_tree(staging, destination, anchor=anchor)
 
     assert observed_inodes == expected_parent_inodes
+
+
+def test_held_tree_publication_rejects_unsafe_file_before_commit(
+    tmp_path: Path,
+) -> None:
+    anchor_path = tmp_path / "anchor"
+    anchor_path.mkdir()
+    staging = anchor_path / ".candidate.staging"
+    staging.mkdir()
+    (staging / "run.json").write_text("sealed", encoding="utf-8")
+    destination = anchor_path / "candidate-id"
+
+    with DirectoryAnchor.open(
+        anchor_path,
+        manifest_path=anchor_path / "run.json",
+    ) as anchor:
+        with pytest.raises(ValueError):
+            atomic_publish_tree(
+                staging,
+                destination,
+                anchor=anchor,
+                hold_open_relative_file="../run.json",
+            )
+
+    assert staging.is_dir()
+    assert not destination.exists()
 
 
 def test_anchored_tree_publication_rejects_changed_closed_set(

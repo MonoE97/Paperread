@@ -28,10 +28,13 @@ from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
+    HeldExactTreeGuard,
+    OwnedPublishedTree,
     UnsafeStoragePathError,
     atomic_publish_tree,
     atomic_write_bytes,
     atomic_write_json,
+    cas_update_run,
     canonical_json_bytes,
     canonical_json_sha256,
     create_anchored_directory,
@@ -584,6 +587,7 @@ def _seal_review_run_locked(run_path: Path, loaded: LoadedRun) -> SealedReview:
                 replacements={
                     validation.loaded_run.manifest_path: canonical_json_bytes(updated_run),
                 },
+                retained_replacement_paths=(validation.loaded_run.manifest_path,),
             )
         except RunSizeLimitError as exc:
             raise ReviewSealError(
@@ -601,13 +605,20 @@ def _seal_review_run_locked(run_path: Path, loaded: LoadedRun) -> SealedReview:
             }
         )
         try:
-            atomic_publish_tree(
+            published = atomic_publish_tree(
                 staging,
                 package_dir,
                 anchor=validation.loaded_run.run_directory_anchor,
                 expected_staging_anchor=staging_anchor,
                 expected_tree_snapshot=staging_snapshot,
+                hold_open_relative_file="review-package.json",
             )
+            if not isinstance(published, OwnedPublishedTree):
+                raise ReviewSealError(
+                    "review_seal_failed",
+                    "immutable review publication did not retain its held identity",
+                    data={"run_id": validation.loaded_run.run.run_id},
+                )
         except Exception as exc:
             raise ReviewSealError(
                 "review_seal_failed",
@@ -615,11 +626,19 @@ def _seal_review_run_locked(run_path: Path, loaded: LoadedRun) -> SealedReview:
                 data={"run_id": validation.loaded_run.run.run_id},
             ) from exc
         try:
-            atomic_write_json(
-                validation.loaded_run.manifest_path,
-                updated_run,
-                anchor=validation.loaded_run.run_directory_anchor,
-            )
+            with HeldExactTreeGuard(
+                published_tree=published,
+                expected_tree=staging_snapshot,
+                expected_held_bytes=canonical_json_bytes(review_package),
+                label="review package",
+            ) as published_guard:
+                published_guard.verify()
+                cas_update_run(
+                    validation.loaded_run,
+                    updated_run,
+                    finalization_guards=(published_guard,),
+                )
+                published_guard.verify()
         except Exception as exc:
             raise ReviewSealError(
                 "review_status_update_failed",

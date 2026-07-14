@@ -34,7 +34,7 @@ from paper_reader_batch.v2_contracts import (
     PdfManifestItem,
     PdfSource,
     SkillRootIdentity,
-    local_prepare_result_canonical_payload,
+    StateItem,
 )
 from paper_reader_batch.v2_errors import BatchRuntimeError
 from paper_reader_batch.v2_journal import (
@@ -42,10 +42,14 @@ from paper_reader_batch.v2_journal import (
     ResultPublication,
     RunView,
     append_transaction,
+    load_request_preflight,
     load_run_view,
+    load_run_view_for_mutation,
     locked_run,
 )
 from paper_reader_batch.v2_json import (
+    MAX_JSON_ARTIFACT_BYTES,
+    active_transition_targets,
     canonical_json_bytes,
     canonical_sha256,
     ensure_directory,
@@ -56,8 +60,11 @@ from paper_reader_batch.v2_json import (
     open_directory_fd,
     publish_bytes_no_replace,
     read_bytes,
+    read_active_transition_owner,
+    read_committed_transitions,
     read_relative_bytes,
     read_locked_bytes,
+    read_pending_swap,
     read_json_bytes,
     replace_bytes_atomic,
     sha256_bytes,
@@ -72,6 +79,7 @@ COORDINATION_SCHEMA_VERSION = "paper_reader_batch.local-prepare-coordination.v2-
 ATTEMPT_OWNER_SCHEMA_VERSION = "paper_reader_batch.local-prepare-attempt-owner.v2-internal"
 CHILD_COMMAND_RESULT_SCHEMA_VERSION = "paper_reader.command-result.v2"
 CHILD_STARTED_SCHEMA_VERSION = "paper_reader_batch.local-prepare-child-started.v2-internal"
+MAX_CHILD_STDOUT_BYTES = 1024 * 1024
 DEFAULT_CHILD_TIMEOUT_SECONDS = 600
 INIT_CHILD_TIMEOUT_SECONDS = 60
 COMMIT_BUFFER_SECONDS = 60
@@ -82,6 +90,15 @@ MAX_CHILD_TIMEOUT_SECONDS = (
     - COMMIT_BUFFER_SECONDS
     - CLAIM_TO_RUN_COORDINATION_MARGIN_SECONDS
 )
+
+
+def _raise_input_error(existing_event, code: str, message: str) -> None:
+    if existing_event is not None:
+        raise BatchRuntimeError(
+            "idempotency_conflict",
+            "request id is already bound to different command input",
+        )
+    raise BatchRuntimeError(code, message)
 
 
 class _InternalModel(BaseModel):
@@ -119,12 +136,14 @@ class _CoordinationRecord(_InternalModel):
     timeout_seconds: int
     stage: Literal["reserved", "initialized", "result_ready", "finished"]
     init_invoked: bool = False
+    init_execution_released: bool = False
     init_argv: list[str]
     init_stdout_sha256: str | None = None
     paper_reader_run_dir: str | None = None
     paper_reader_run_id: str | None = None
     local_target_path: str | None = None
     prepare_invoked: bool = False
+    prepare_execution_released: bool = False
     prepare_argv: list[str] | None = None
     prepare_stdout_sha256: str | None = None
     evidence_dir: str | None = None
@@ -160,6 +179,10 @@ class _CoordinationRecord(_InternalModel):
             raise ValueError("nonterminal coordination stage cannot bind a result")
         if self.prepare_invoked and self.stage == "reserved":
             raise ValueError("prepare cannot be invoked before init is accepted")
+        if self.init_execution_released and not self.init_invoked:
+            raise ValueError("init execution release requires an invocation reservation")
+        if self.prepare_execution_released and not self.prepare_invoked:
+            raise ValueError("prepare execution release requires an invocation reservation")
         return self
 
 
@@ -200,6 +223,7 @@ class _ChildInvocation:
     request_dir_inode: int
     run_lock_descriptors: tuple[int, ...]
     launcher_fault_stage: str | None = None
+    started_callback: Callable[[], None] | None = None
 
     def mark_started(self) -> None:
         publish_bytes_no_replace(
@@ -207,6 +231,8 @@ class _ChildInvocation:
             self.started_payload,
             allow_existing_exact=True,
         )
+        if self.started_callback is not None:
+            self.started_callback()
 
     def write_stdout(self, payload: bytes) -> None:
         publish_bytes_no_replace(
@@ -244,6 +270,10 @@ ChildRunner = Callable[
     int | _RunningChild,
 ]
 
+_COORDINATION_TRANSITION_TARGETS = frozenset(
+    {"record.json", "init.started", "prepare.started"}
+)
+
 
 class _ChildProtocolError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
@@ -270,18 +300,161 @@ def _coordination_hmac(secret: bytes, payload: dict[str, Any]) -> str:
 
 
 def _signed_model_bytes(model_type, payload: dict[str, Any], secret: bytes) -> tuple[Any, bytes]:
-    unsigned = dict(payload)
-    unsigned.pop("hmac_sha256", None)
-    signed = {**unsigned, "hmac_sha256": _coordination_hmac(secret, unsigned)}
+    supplied_unsigned = dict(payload)
+    supplied_unsigned.pop("hmac_sha256", None)
     try:
+        normalized = model_type.model_validate(
+            {**supplied_unsigned, "hmac_sha256": "0" * 64}
+        )
+        unsigned = normalized.model_dump(mode="json", exclude={"hmac_sha256"})
+        signed = {**unsigned, "hmac_sha256": _coordination_hmac(secret, unsigned)}
         model = model_type.model_validate(signed)
     except ValidationError as exc:
         raise BatchRuntimeError("coordination_corrupt", "coordination record failed strict validation") from exc
     return model, canonical_json_bytes(model)
 
 
-def _load_signed_model(path: Path, model_type, secret: bytes):
-    raw, payload = read_json_bytes(path, code="coordination_corrupt")
+def _load_signed_model(
+    path: Path,
+    model_type,
+    secret: bytes,
+    *,
+    max_bytes: int | None = None,
+    recover_pending: bool = False,
+):
+    transition_targets = (
+        _COORDINATION_TRANSITION_TARGETS
+        if model_type in {_CoordinationRecord, _ChildStarted}
+        else frozenset({path.name})
+    )
+    if path.name not in transition_targets:
+        raise BatchRuntimeError(
+            "coordination_corrupt",
+            f"signed coordination artifact is outside its legal transition set: {path}",
+        )
+
+    def parse_current(raw: bytes) -> _CoordinationRecord:
+        try:
+            payload = json.loads(
+                raw,
+                parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+            )
+            model = _CoordinationRecord.model_validate(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError, ValidationError) as exc:
+            raise BatchRuntimeError("coordination_corrupt", "pending coordination transition is invalid") from exc
+        unsigned = model.model_dump(mode="json", exclude={"hmac_sha256"})
+        if (
+            raw != canonical_json_bytes(model)
+            or not hmac.compare_digest(model.hmac_sha256, _coordination_hmac(secret, unsigned))
+        ):
+            raise BatchRuntimeError("coordination_corrupt", "pending coordination transition HMAC is invalid")
+        return model
+
+    active = active_transition_targets(
+        path.parent,
+        replace_targets=transition_targets,
+    )
+    pending_swap = read_pending_swap(
+        path,
+        max_bytes=(MAX_CHILD_STDOUT_BYTES if max_bytes is None else max_bytes),
+        replace_targets=transition_targets,
+    )
+    if pending_swap is not None:
+        if model_type is not _CoordinationRecord or not recover_pending:
+            raise BatchRuntimeError(
+                "storage_recovery_required",
+                f"signed coordination swap requires its coordinator lock: {path}",
+            )
+        public_raw, slot_raw = pending_swap
+
+        public_model = parse_current(public_raw)
+        slot_model = parse_current(slot_raw)
+
+        def advances(older: _CoordinationRecord, newer: _CoordinationRecord) -> bool:
+            old = older.model_dump(mode="json", exclude={"hmac_sha256"})
+            new = newer.model_dump(mode="json", exclude={"hmac_sha256"})
+            rank = {"reserved": 0, "initialized": 1, "result_ready": 2, "finished": 3}
+            if rank[newer.stage] < rank[older.stage]:
+                return False
+            mutable = {
+                "stage",
+                "init_invoked",
+                "init_execution_released",
+                "init_stdout_sha256",
+                "paper_reader_run_dir",
+                "paper_reader_run_id",
+                "local_target_path",
+                "prepare_invoked",
+                "prepare_execution_released",
+                "prepare_argv",
+                "prepare_stdout_sha256",
+                "evidence_dir",
+                "evidence_id",
+                "evidence_digest",
+                "result_sha256",
+            }
+            if any(old[key] != new[key] for key in old.keys() - mutable):
+                return False
+            for key in mutable - {"stage"}:
+                previous = old[key]
+                current = new[key]
+                if isinstance(previous, bool):
+                    if previous and not current:
+                        return False
+                elif previous is not None and previous != current:
+                    return False
+            return old != new
+
+        if advances(public_model, slot_model):
+            replace_bytes_atomic(
+                path,
+                slot_raw,
+                expected_current=public_raw,
+                transition_id=(
+                    f"coordination:{slot_model.request_id}:{slot_model.attempt_id}:"
+                    f"{sha256_bytes(slot_raw)}"
+                ),
+                allowed_transition_targets=transition_targets,
+            )
+        else:
+            raise BatchRuntimeError(
+                "coordination_corrupt",
+                "pending coordination swap is not one monotonic signed transition",
+            )
+    elif path.name in active:
+        if model_type is not _CoordinationRecord or not recover_pending:
+            raise BatchRuntimeError(
+                "storage_recovery_required",
+                f"signed coordination transition requires its coordinator lock: {path}",
+            )
+        committed = read_committed_transitions(
+            path,
+            max_bytes=(MAX_CHILD_STDOUT_BYTES if max_bytes is None else max_bytes),
+            replace_targets=transition_targets,
+        )
+        if committed:
+            public_raw, retired_raw, _transition_name = committed[0]
+            public_model = parse_current(public_raw)
+            retired_model = parse_current(retired_raw)
+            owner_raw = read_active_transition_owner(
+                path,
+                replace_targets=transition_targets,
+            )
+            if owner_raw is None:
+                raise BatchRuntimeError("coordination_corrupt", "committed coordination transition has no owner")
+            owner = json.loads(owner_raw)
+            replace_bytes_atomic(
+                path,
+                public_raw,
+                expected_current=retired_raw,
+                transition_id=owner["transition_id"],
+                allowed_transition_targets=transition_targets,
+            )
+    raw, payload = read_json_bytes(
+        path,
+        code="coordination_corrupt",
+        max_bytes=max_bytes,
+    )
     if not isinstance(payload, dict):
         raise BatchRuntimeError("coordination_corrupt", f"coordination record must be an object: {path}")
     signature = payload.get("hmac_sha256")
@@ -292,6 +465,12 @@ def _load_signed_model(path: Path, model_type, secret: bytes):
         _coordination_hmac(secret, unsigned),
     ):
         raise BatchRuntimeError("coordination_corrupt", f"coordination HMAC is invalid: {path}")
+    release_fields = frozenset({"init_execution_released", "prepare_execution_released"})
+    if model_type is _CoordinationRecord and release_fields.difference(payload):
+        raise BatchRuntimeError(
+            "coordination_corrupt",
+            f"coordination record lacks an execution-release identity: {path}",
+        )
     try:
         model = model_type.model_validate(payload)
     except ValidationError as exc:
@@ -337,7 +516,17 @@ def _replace_coordination_record(
     payload = current.model_dump(mode="json", exclude={"hmac_sha256"})
     payload.update(updates)
     updated, raw = _signed_model_bytes(_CoordinationRecord, payload, secret)
-    replace_bytes_atomic(path, raw, expected_current=current_raw)
+    if raw == current_raw:
+        return updated, raw
+    replace_bytes_atomic(
+        path,
+        raw,
+        expected_current=current_raw,
+        transition_id=(
+            f"coordination:{updated.request_id}:{updated.attempt_id}:{sha256_bytes(raw)}"
+        ),
+        allowed_transition_targets=_COORDINATION_TRANSITION_TARGETS,
+    )
     return updated, raw
 
 
@@ -381,8 +570,13 @@ def _load_exact_child_started(
 ) -> _ChildStarted | None:
     if not entry_exists_allow_missing_parent(path):
         return None
-    actual, _actual_raw = _load_signed_model(path, _ChildStarted, secret)
-    expected, _expected_raw = _child_started_bytes(record, step=step, secret=secret)
+    expected, expected_raw = _child_started_bytes(record, step=step, secret=secret)
+    actual, _actual_raw = _load_signed_model(
+        path,
+        _ChildStarted,
+        secret,
+        max_bytes=len(expected_raw),
+    )
     if actual != expected:
         raise BatchRuntimeError(
             "coordination_corrupt",
@@ -392,8 +586,11 @@ def _load_exact_child_started(
 
 
 _CHILD_LAUNCHER = r"""
+import ctypes
+import errno
 import fcntl
 import os
+import secrets
 import signal
 import stat
 import subprocess
@@ -421,15 +618,50 @@ directory_metadata = os.fstat(directory_fd)
 if (directory_metadata.st_dev, directory_metadata.st_ino) != (request_dir_device, request_dir_inode):
     raise SystemExit(127)
 
-def open_empty(name):
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(name, flags, 0o600, dir_fd=directory_fd)
+def require_empty_regular(descriptor):
     metadata = os.fstat(descriptor)
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size != 0:
         raise SystemExit(121)
     return descriptor
 
-stdout_fd = open_empty(os.path.basename(stdout_path))
+def open_stdout(name):
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(name, flags, 0o600, dir_fd=directory_fd)
+    return require_empty_regular(descriptor)
+
+def open_empty(name):
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(name, flags, 0o600, dir_fd=directory_fd)
+    return require_empty_regular(descriptor)
+
+def rename_no_replace(source_name, target_name):
+    libc = ctypes.CDLL(None, use_errno=True)
+    source = os.fsencode(source_name)
+    target = os.fsencode(target_name)
+    if sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
+        function = libc.renameatx_np
+        flags = 0x00000004
+    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        function = libc.renameat2
+        flags = 0x00000001
+    else:
+        raise SystemExit(128)
+    function.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    function.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    if function(directory_fd, source, directory_fd, target, flags) != 0:
+        error_number = ctypes.get_errno()
+        if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+            raise SystemExit(122)
+        raise SystemExit(128)
+
+stdout_fd = open_stdout(os.path.basename(stdout_path))
 fcntl.flock(stdout_fd, fcntl.LOCK_EX)
 gate_read, gate_write = os.pipe()
 ownership_read, ownership_write = os.pipe()
@@ -456,12 +688,45 @@ if executor_pid == 0:
         if not stat.S_ISREG(marker_metadata.st_mode) or marker_metadata.st_nlink != 1:
             raise SystemExit(124)
         marker_chunks = []
-        while True:
-            marker_chunk = os.read(marker_fd, 1024 * 1024)
+        marker_size = 0
+        marker_limit = len(started_payload)
+        while marker_size <= marker_limit:
+            marker_chunk = os.read(
+                marker_fd,
+                min(1024 * 1024, marker_limit - marker_size + 1),
+            )
             if not marker_chunk:
                 break
+            marker_size += len(marker_chunk)
+            if marker_size > marker_limit:
+                raise SystemExit(125)
             marker_chunks.append(marker_chunk)
-        os.close(marker_fd)
+        marker_metadata_after = os.fstat(marker_fd)
+        try:
+            named_marker_metadata = os.stat(
+                os.path.basename(started_path),
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except OSError:
+            raise SystemExit(124)
+        marker_identity = lambda metadata: (
+            stat.S_ISREG(metadata.st_mode),
+            metadata.st_nlink,
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+        expected_marker_identity = marker_identity(marker_metadata)
+        if (
+            expected_marker_identity[0] is not True
+            or expected_marker_identity[1] != 1
+            or marker_identity(marker_metadata_after) != expected_marker_identity
+            or marker_identity(named_marker_metadata) != expected_marker_identity
+        ):
+            raise SystemExit(124)
         marker_raw = b"".join(marker_chunks)
     if marker_raw != started_payload:
         raise SystemExit(125)
@@ -470,9 +735,42 @@ if executor_pid == 0:
     # the bound argv. Without that marker it exits above and performs no work.
     if gate_value not in {b"", b"1"}:
         raise SystemExit(126)
-    for run_lock_fd in run_lock_fds:
-        os.close(run_lock_fd)
-    os.close(directory_fd)
+    # Keep the opened marker and its containing directory bound through the
+    # exact Popen handoff. Re-read both the held inode and its no-follow name
+    # immediately before release so an unlink/replacement after the earlier
+    # classification cannot authorize the target.
+    final_marker_metadata = os.fstat(marker_fd)
+    try:
+        final_named_marker_metadata = os.stat(
+            os.path.basename(started_path),
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except OSError:
+        raise SystemExit(124)
+    os.lseek(marker_fd, 0, os.SEEK_SET)
+    final_marker_chunks = []
+    final_marker_size = 0
+    final_marker_limit = len(started_payload)
+    while final_marker_size <= final_marker_limit:
+        final_marker_chunk = os.read(
+            marker_fd,
+            min(1024 * 1024, final_marker_limit - final_marker_size + 1),
+        )
+        if not final_marker_chunk:
+            break
+        final_marker_size += len(final_marker_chunk)
+        if final_marker_size > final_marker_limit:
+            raise SystemExit(125)
+        final_marker_chunks.append(final_marker_chunk)
+    final_marker_metadata_after = os.fstat(marker_fd)
+    if (
+        marker_identity(final_marker_metadata) != expected_marker_identity
+        or marker_identity(final_marker_metadata_after) != expected_marker_identity
+        or marker_identity(final_named_marker_metadata) != expected_marker_identity
+        or b"".join(final_marker_chunks) != started_payload
+    ):
+        raise SystemExit(124)
     child = subprocess.Popen(
         target_argv,
         stdin=subprocess.DEVNULL,
@@ -482,6 +780,10 @@ if executor_pid == 0:
         close_fds=True,
         start_new_session=True,
     )
+    for run_lock_fd in run_lock_fds:
+        os.close(run_lock_fd)
+    os.close(marker_fd)
+    os.close(directory_fd)
     try:
         returncode = child.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
@@ -531,16 +833,13 @@ if decision != b"1":
 
 if fault_stage == "supervisor_before_marker":
     os._exit(97)
-writing_name = os.path.basename(started_path) + ".writing"
-try:
-    writing_metadata = os.stat(writing_name, dir_fd=directory_fd, follow_symlinks=False)
-except FileNotFoundError:
-    pass
-else:
-    if not stat.S_ISREG(writing_metadata.st_mode) or writing_metadata.st_nlink != 1:
-        raise SystemExit(122)
-    os.unlink(writing_name, dir_fd=directory_fd)
-    os.fsync(directory_fd)
+writing_name = (
+    "."
+    + os.path.basename(started_path)
+    + "."
+    + secrets.token_hex(16)
+    + ".writing"
+)
 writing_fd = open_empty(writing_name)
 offset = 0
 while offset < len(started_payload):
@@ -549,14 +848,10 @@ while offset < len(started_payload):
         raise SystemExit(123)
     offset += written
 os.fsync(writing_fd)
-os.link(
+rename_no_replace(
     writing_name,
     os.path.basename(started_path),
-    src_dir_fd=directory_fd,
-    dst_dir_fd=directory_fd,
-    follow_symlinks=False,
 )
-os.unlink(writing_name, dir_fd=directory_fd)
 os.fsync(directory_fd)
 os.close(writing_fd)
 if fault_stage == "supervisor_after_marker":
@@ -622,14 +917,26 @@ def _read_held_started_marker(
     invocation: _ChildInvocation,
 ) -> bytes | None:
     try:
+        os.stat(
+            invocation.started_path.name,
+            dir_fd=request_dir_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _ChildProtocolError(
+            "coordination_uncertain",
+            "paper_reader child start marker cannot be classified through its held request directory",
+        ) from exc
+    try:
         return read_relative_bytes(
             request_dir_descriptor,
             invocation.started_path.name,
-            code="coordination_marker_missing",
+            code="coordination_marker_invalid",
+            max_bytes=len(invocation.started_payload),
         )
     except BatchRuntimeError as exc:
-        if exc.code == "coordination_marker_missing":
-            return None
         raise _ChildProtocolError(
             "coordination_uncertain",
             "paper_reader child start marker cannot be classified through its held request directory",
@@ -676,6 +983,8 @@ def _default_child_runner_anchored(
             start_new_session=True,
         )
     except OSError as exc:
+        os.close(read_ack)
+        os.close(write_decision)
         raise _ChildProtocolError("child_execution_failed", "paper_reader child command could not start") from exc
     finally:
         os.close(write_ack)
@@ -836,6 +1145,18 @@ def _active_count(view: RunView) -> int:
     )
 
 
+def _is_claimable_local_prepare_item(item: StateItem) -> bool:
+    if item.local_prepare_status not in {"queued", "failed", "blocked"}:
+        return False
+    # This blocker means the previous child may already have crossed its
+    # external side-effect boundary. Only recovery of that exact attempt is
+    # safe; allocating a fresh attempt could execute the child twice.
+    return not (
+        item.local_prepare_status == "blocked"
+        and item.local_prepare_failure_code == "coordination_uncertain"
+    )
+
+
 def _claim_result(view: RunView, data: ClaimedData) -> dict[str, Any]:
     manifest_by_id = {item.item_id: item for item in view.manifest.items}
     assignments = []
@@ -864,6 +1185,17 @@ def _claim_result(view: RunView, data: ClaimedData) -> dict[str, Any]:
     return {"assignments": assignments}
 
 
+def _validate_local_pdf_source(view: RunView, item_id: str) -> PdfManifestItem:
+    manifest_item = next(
+        (item for item in view.manifest.items if item.item_id == item_id),
+        None,
+    )
+    if not isinstance(manifest_item, PdfManifestItem):
+        raise BatchRuntimeError("journal_corrupt", "local prepare item is not a PDF manifest item")
+    validate_pdf_source(manifest_item.source)
+    return manifest_item
+
+
 def claim_local_prepare(
     run_dir: Path,
     *,
@@ -874,27 +1206,26 @@ def claim_local_prepare(
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
+    preflight, canonical_request_id, existing_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="local-prepare.claim",
+    )
     if not worker_id.strip():
-        raise BatchRuntimeError("invalid_worker", "worker id must not be empty")
-    preflight = load_run_view(run_dir)
+        _raise_input_error(existing_event, "invalid_worker", "worker id must not be empty")
     requested_limit = preflight.manifest.default_concurrency if limit is None else limit
     if requested_limit < 1 or requested_limit > preflight.manifest.default_concurrency:
-        raise BatchRuntimeError("invalid_limit", "local prepare claim limit exceeds manifest concurrency")
+        _raise_input_error(
+            existing_event,
+            "invalid_limit",
+            "local prepare claim limit exceeds manifest concurrency",
+        )
     if lease_seconds < 1 or lease_seconds > MAX_LEASE_SECONDS:
-        raise BatchRuntimeError("invalid_lease", f"lease seconds must be between 1 and {MAX_LEASE_SECONDS}")
-    preflight_manifest_by_id = {item.item_id: item for item in preflight.manifest.items}
-    preflight_capacity = preflight.manifest.default_concurrency - _active_count(preflight)
-    preflight_eligible = [
-        item
-        for item in preflight.state.items
-        if isinstance(preflight_manifest_by_id[item.item_id], PdfManifestItem)
-        and item.local_prepare_status in {"queued", "failed", "blocked"}
-        and item.worker_status != "claimed"
-    ][: min(requested_limit, preflight_capacity)]
-    for item in preflight_eligible:
-        manifest_item = preflight_manifest_by_id[item.item_id]
-        assert isinstance(manifest_item, PdfManifestItem)
-        validate_pdf_source(manifest_item.source)
+        _raise_input_error(
+            existing_event,
+            "invalid_lease",
+            f"lease seconds must be between 1 and {MAX_LEASE_SECONDS}",
+        )
     fingerprint = canonical_sha256(
         {
             "command": "local-prepare.claim",
@@ -910,13 +1241,13 @@ def claim_local_prepare(
     def propose(view: RunView, transaction_time: str) -> ProposedTransition:
         expires_at = _format_utc(_parse_utc(transaction_time) + timedelta(seconds=lease_seconds))
         capacity = view.manifest.default_concurrency - _active_count(view)
-        count = min(requested_limit, capacity)
+        count = min(requested_limit, capacity, 1)
         manifest_by_id = {item.item_id: item for item in view.manifest.items}
         eligible = [
             item
             for item in view.state.items
             if isinstance(manifest_by_id[item.item_id], PdfManifestItem)
-            and item.local_prepare_status in {"queued", "failed", "blocked"}
+            and _is_claimable_local_prepare_item(item)
             and item.worker_status != "claimed"
         ][:count]
         if not eligible:
@@ -957,16 +1288,42 @@ def claim_local_prepare(
             raise BatchRuntimeError("journal_corrupt", "local prepare claim request points to another event")
         return _claim_result(view, event.data)
 
+    def replay_validate(view: RunView, event) -> None:
+        if not isinstance(event.data, ClaimedData) or event.data.kind != "local_prepare.claimed":
+            raise BatchRuntimeError("journal_corrupt", "local prepare claim replay points to another event")
+        manifest_by_id = {item.item_id: item for item in view.manifest.items}
+        for assignment in event.data.assignments:
+            manifest_item = manifest_by_id.get(assignment.item_id)
+            if not isinstance(manifest_item, PdfManifestItem) or manifest_item.source != assignment.source:
+                raise BatchRuntimeError("journal_corrupt", "local prepare claim source differs from manifest")
+            validate_pdf_source(manifest_item.source)
+
+    def commit_validate(view: RunView) -> None:
+        capacity = view.manifest.default_concurrency - _active_count(view)
+        count = min(requested_limit, capacity, 1)
+        manifest_by_id = {item.item_id: item for item in view.manifest.items}
+        eligible = [
+            item
+            for item in view.state.items
+            if isinstance(manifest_by_id[item.item_id], PdfManifestItem)
+            and _is_claimable_local_prepare_item(item)
+            and item.worker_status != "claimed"
+        ][:count]
+        for item in eligible:
+            _validate_local_pdf_source(view, item.item_id)
+
     return append_transaction(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
         expected_run_dir_identity=preflight.run_dir_identity,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="local-prepare.claim",
         request_fingerprint=fingerprint,
         occurred_at=now,
         propose=propose,
         reconstruct=reconstruct,
+        replay_validate=replay_validate,
+        commit_validate=commit_validate,
         fault=fault,
     )
 
@@ -1192,6 +1549,7 @@ def _validate_prepared_child(
             run_descriptor,
             "run.json",
             code="child_artifact_mismatch",
+            max_bytes=MAX_JSON_ARTIFACT_BYTES,
         )
         run = _canonical_object_from_bytes(
             run_raw,
@@ -1204,6 +1562,7 @@ def _validate_prepared_child(
             run_descriptor,
             evidence_relative,
             code="child_artifact_mismatch",
+            max_bytes=MAX_JSON_ARTIFACT_BYTES,
         )
         evidence = _canonical_object_from_bytes(
             evidence_raw,
@@ -1265,7 +1624,6 @@ def _validate_bound_execution_inputs(
     manifest_item = next((item for item in view.manifest.items if item.item_id == item_id), None)
     if not isinstance(manifest_item, PdfManifestItem) or manifest_item.source != source:
         raise BatchRuntimeError("source_drift", "local prepare source differs from the accepted manifest")
-    validate_pdf_source(manifest_item.source)
     bound_root = normalized_absolute_path(Path(root_identity.path))
     if normalized_absolute_path(cwd) != bound_root:
         raise BatchRuntimeError("paper_reader_root_drift", "paper_reader child cwd differs from the bound root")
@@ -1281,6 +1639,7 @@ def _validate_bound_execution_inputs(
             "paper_reader_root_drift",
             "paper_reader root identity changed before child execution",
         )
+    validate_pdf_source(manifest_item.source)
 
 
 def _child_step(
@@ -1312,6 +1671,7 @@ def _child_step(
         inode=record.request_dir_inode,
     )
     invoked_field = f"{step}_invoked"
+    execution_released_field = f"{step}_execution_released"
     stored_argv = record.init_argv if step == "init" else record.prepare_argv
     argv = tuple(stored_argv) if stored_argv is not None else None
     if argv is None:
@@ -1325,7 +1685,25 @@ def _child_step(
     )
     returncode: int | None = None
     execution: int | _RunningChild | None = None
+
+    def persist_execution_release() -> None:
+        nonlocal record, record_raw
+        if getattr(record, execution_released_field):
+            return
+        record, record_raw = _replace_coordination_record(
+            record_path,
+            record,
+            record_raw,
+            secret,
+            **{execution_released_field: True},
+        )
+
     if not raw and started is None:
+        if getattr(record, execution_released_field):
+            raise _ChildProtocolError(
+                "coordination_uncertain",
+                f"{step} execution was released but its durable marker is missing; refusing to re-execute",
+            )
         with locked_run(run_dir) as current:
             if not hmac.compare_digest(current.lease_secret, secret):
                 raise BatchRuntimeError(
@@ -1346,6 +1724,11 @@ def _child_step(
             if started is None:
                 raw = _read_stdout_stage(stdout_path)
             if not raw and started is None:
+                if getattr(record, execution_released_field):
+                    raise _ChildProtocolError(
+                        "coordination_uncertain",
+                        f"{step} execution was released but its durable marker is missing; refusing to re-execute",
+                    )
                 authoritative_now = now or utc_now()
                 _item, lease = _active_lease(
                     current,
@@ -1400,7 +1783,9 @@ def _child_step(
                         current.lock_descriptor,
                         *current.lock_ancestor_descriptors,
                     ),
+                    started_callback=persist_execution_release,
                 )
+                validate_pdf_source(record.source)
                 try:
                     execution = runner(argv, cwd, timeout_seconds, invocation)
                 except _ChildProtocolError:
@@ -1410,6 +1795,21 @@ def _child_step(
                         "child_execution_failed",
                         f"{step} child runner failed before a valid result was accepted",
                     ) from exc
+                durable_started = _load_exact_child_started(
+                    started_path,
+                    record,
+                    step=step,
+                    secret=secret,
+                )
+                if durable_started is not None:
+                    persist_execution_release()
+                elif not getattr(record, execution_released_field):
+                    raise _ChildProtocolError(
+                        "child_execution_failed",
+                        f"{step} child runner returned without a durable start marker",
+                    )
+                if fault is not None:
+                    fault(f"after_{step}_execution_released")
         if execution is not None:
             if isinstance(execution, _RunningChild):
                 returncode = execution.wait()
@@ -1473,9 +1873,17 @@ def renew_local_prepare(
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
+    preflight, canonical_request_id, existing_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="local-prepare.renew",
+    )
     if lease_seconds < 1 or lease_seconds > MAX_LEASE_SECONDS:
-        raise BatchRuntimeError("invalid_lease", f"lease seconds must be between 1 and {MAX_LEASE_SECONDS}")
-    preflight = load_run_view(run_dir)
+        _raise_input_error(
+            existing_event,
+            "invalid_lease",
+            f"lease seconds must be between 1 and {MAX_LEASE_SECONDS}",
+        )
     token_hash = sha256_bytes(lease_token.encode())
     fingerprint = canonical_sha256(
         {
@@ -1494,7 +1902,7 @@ def renew_local_prepare(
 
     def propose(view: RunView, transaction_time: str) -> ProposedTransition:
         expires_at = _format_utc(_parse_utc(transaction_time) + timedelta(seconds=lease_seconds))
-        _item, lease = _active_lease(
+        item, lease = _active_lease(
             view,
             item_id=item_id,
             worker_id=worker_id,
@@ -1527,7 +1935,7 @@ def renew_local_prepare(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
         expected_run_dir_identity=preflight.run_dir_identity,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="local-prepare.renew",
         request_fingerprint=fingerprint,
         occurred_at=now,
@@ -1615,7 +2023,12 @@ def local_prepare_attempt_has_execution_side_effects(
             "coordination_corrupt",
             "owned local prepare attempt is missing its exact coordination record",
         )
-    record, _record_raw = _load_signed_model(record_path, _CoordinationRecord, view.lease_secret)
+    record, _record_raw = _load_signed_model(
+        record_path,
+        _CoordinationRecord,
+        view.lease_secret,
+        recover_pending=view.lock_descriptor is not None,
+    )
     if (
         record.request_id != owner.request_id
         or record.request_fingerprint != owner.request_fingerprint
@@ -1644,12 +2057,21 @@ def local_prepare_attempt_has_execution_side_effects(
             saw_started = True
     if record.stage in {"result_ready", "finished"}:
         return True
-    if saw_started or record.stage == "initialized":
+    if (
+        saw_started
+        or record.stage == "initialized"
+        or record.init_execution_released
+        or record.prepare_execution_released
+    ):
         return True
     for step in ("init", "prepare"):
         stdout_path = coordination_root / owner.request_id / f"{step}.stdout"
         if entry_exists_allow_missing_parent(stdout_path):
-            stdout_raw = read_bytes(stdout_path, code="coordination_corrupt")
+            stdout_raw = read_bytes(
+                stdout_path,
+                code="coordination_corrupt",
+                max_bytes=MAX_CHILD_STDOUT_BYTES,
+            )
             if stdout_raw:
                 # Output without the atomic marker is unverifiable and must
                 # never be converted into a fresh attempt.
@@ -1670,9 +2092,17 @@ def release_local_prepare(
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
+    preflight, canonical_request_id, existing_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="local-prepare.release",
+    )
     if not acknowledge_no_side_effects:
-        raise BatchRuntimeError("acknowledgement_required", "local prepare release requires explicit acknowledgement")
-    preflight = load_run_view(run_dir)
+        _raise_input_error(
+            existing_event,
+            "acknowledgement_required",
+            "local prepare release requires explicit acknowledgement",
+        )
     token_hash = sha256_bytes(lease_token.encode())
     fingerprint = canonical_sha256(
         {
@@ -1690,7 +2120,7 @@ def release_local_prepare(
     )
 
     def propose(view: RunView, transaction_time: str) -> ProposedTransition:
-        _item, lease = _active_lease(
+        item, lease = _active_lease(
             view,
             item_id=item_id,
             worker_id=worker_id,
@@ -1729,7 +2159,7 @@ def release_local_prepare(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
         expected_run_dir_identity=preflight.run_dir_identity,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="local-prepare.release",
         request_fingerprint=fingerprint,
         occurred_at=now,
@@ -1751,7 +2181,7 @@ def _load_result(path: Path) -> tuple[Path, bytes, LocalPrepareResult, str]:
         result = LocalPrepareResult.model_validate(payload)
     except ValidationError as exc:
         raise BatchRuntimeError("invalid_result", "local prepare result failed strict validation") from exc
-    if raw != canonical_json_bytes(local_prepare_result_canonical_payload(result)):
+    if raw != canonical_json_bytes(result):
         raise BatchRuntimeError("invalid_result", "local prepare result must use canonical JSON")
     return result_path, raw, result, sha256_bytes(raw)
 
@@ -1777,11 +2207,16 @@ def finish_local_prepare(
     result_path: Path,
     request_id: str,
     expected_root: Path | None = None,
+    coordination_request_fingerprint: str | None = None,
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
+    preflight, canonical_request_id, _existing_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="local-prepare.finish",
+    )
     input_path, raw, result, result_sha256 = _load_result(result_path)
-    preflight = load_run_view(run_dir)
     token_hash = sha256_bytes(lease_token.encode())
     fingerprint = canonical_sha256(
         {
@@ -1796,12 +2231,13 @@ def finish_local_prepare(
             "result_input_path": str(input_path),
             "result_sha256": result_sha256,
             "expected_root": str(normalized_absolute_path(expected_root)) if expected_root is not None else None,
+            "coordination_request_fingerprint": coordination_request_fingerprint,
             "now_override": now,
         }
     )
 
     def propose(view: RunView, transaction_time: str) -> ProposedTransition:
-        _item, lease = _active_lease(
+        item, lease = _active_lease(
             view,
             item_id=item_id,
             worker_id=worker_id,
@@ -1823,6 +2259,30 @@ def finish_local_prepare(
         validate_local_prepare_result_artifacts(view.manifest, result, expected_root=expected_root)
         error_code = result.error.code if result.error is not None else None
         error_message = result.error.message if result.error is not None else None
+        if error_code == "coordination_uncertain":
+            binding = (
+                item.local_prepare_coordination_request_id,
+                item.local_prepare_coordination_fingerprint,
+                item.local_prepare_coordination_device,
+                item.local_prepare_coordination_inode,
+            )
+            if result.status != "blocked" or not all(
+                value is not None for value in binding
+            ):
+                raise BatchRuntimeError(
+                    "coordination_corrupt",
+                    "coordination uncertainty requires one exact journaled coordinator binding",
+                )
+            if not local_prepare_attempt_has_execution_side_effects(
+                view,
+                item_id=item_id,
+                claim_id=claim_id,
+                attempt_id=attempt_id,
+            ):
+                raise BatchRuntimeError(
+                    "coordination_corrupt",
+                    "coordination uncertainty requires durable execution-side-effect evidence",
+                )
         data = FinishedData(
             kind="local_prepare.finished",
             item_id=item_id,
@@ -1847,16 +2307,65 @@ def finish_local_prepare(
             raise BatchRuntimeError("journal_corrupt", "local prepare finish request points to another event")
         return _finish_result(view, event.data)
 
+    def replay_validate(view: RunView, event) -> None:
+        if not isinstance(event.data, FinishedData) or event.data.kind != "local_prepare.finished":
+            raise BatchRuntimeError("journal_corrupt", "local prepare finish replay points to another event")
+        manifest_item = next(
+            (item for item in view.manifest.items if item.item_id == event.data.item_id),
+            None,
+        )
+        if not isinstance(manifest_item, PdfManifestItem):
+            raise BatchRuntimeError("journal_corrupt", "local prepare finish replay item is not a PDF")
+        validate_pdf_source(manifest_item.source)
+
+    def commit_validate(view: RunView) -> None:
+        validate_local_prepare_result_artifacts(
+            view.manifest,
+            result,
+            expected_root=expected_root,
+        )
+        if coordination_request_fingerprint is not None:
+            state_item = next(
+                (item for item in view.state.items if item.item_id == item_id),
+                None,
+            )
+            if state_item is None or (
+                state_item.local_prepare_coordination_request_id != canonical_request_id
+                or state_item.local_prepare_coordination_fingerprint
+                != coordination_request_fingerprint
+                or state_item.local_prepare_coordination_device is None
+                or state_item.local_prepare_coordination_inode is None
+            ):
+                raise BatchRuntimeError(
+                    "coordination_corrupt",
+                    "local prepare finish lost its exact journaled coordination binding",
+                )
+            request_dir = (
+                view.run_dir
+                / "results"
+                / "local-prepare"
+                / ".coordination"
+                / canonical_request_id
+            )
+            _assert_request_directory_identity(
+                request_dir,
+                device=state_item.local_prepare_coordination_device,
+                inode=state_item.local_prepare_coordination_inode,
+            )
+        _validate_local_pdf_source(view, item_id)
+
     return append_transaction(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
         expected_run_dir_identity=preflight.run_dir_identity,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="local-prepare.finish",
         request_fingerprint=fingerprint,
         occurred_at=now,
         propose=propose,
         reconstruct=reconstruct,
+        replay_validate=replay_validate,
+        commit_validate=commit_validate,
         fault=fault,
     )
 
@@ -1912,8 +2421,9 @@ def _reserve_coordination_in_journal(
     coordinator_request_fingerprint: str,
     record_path: Path,
     now: str | None,
+    fault: FaultHook | None,
 ) -> RequestOutcome:
-    preflight = load_run_view(run_dir)
+    preflight = load_run_view_for_mutation(run_dir)
     token_hash = sha256_bytes(lease_token.encode())
     record, _record_raw = _load_signed_model(record_path, _CoordinationRecord, preflight.lease_secret)
     internal_request_id = _coordination_reservation_request_id(coordinator_request_id)
@@ -1944,21 +2454,24 @@ def _reserve_coordination_in_journal(
         }
 
     def propose(view: RunView, transaction_time: str) -> ProposedTransition:
+        _assert_request_directory_identity(
+            record_path.parent,
+            device=record.request_dir_device,
+            inode=record.request_dir_inode,
+        )
         current_record, _current_raw = _load_signed_model(
             record_path,
             _CoordinationRecord,
             view.lease_secret,
+            # append_transaction first invokes proposals with a read-only
+            # pre-recovery view whose lock descriptor is intentionally absent.
+            recover_pending=view.lock_descriptor is not None,
         )
         if current_record != record:
             raise BatchRuntimeError(
                 "coordination_corrupt",
                 "coordination record changed before its journal reservation",
             )
-        _assert_request_directory_identity(
-            record_path.parent,
-            device=record.request_dir_device,
-            inode=record.request_dir_inode,
-        )
         _item, lease = _active_lease(
             view,
             item_id=item_id,
@@ -2001,6 +2514,31 @@ def _reserve_coordination_in_journal(
             )
         return result_payload(data)
 
+    def commit_validate(view: RunView) -> None:
+        _assert_request_directory_identity(
+            record_path.parent,
+            device=record.request_dir_device,
+            inode=record.request_dir_inode,
+        )
+        current_record, _current_raw = _load_signed_model(
+            record_path,
+            _CoordinationRecord,
+            view.lease_secret,
+            recover_pending=False,
+        )
+        if current_record != record:
+            raise BatchRuntimeError(
+                "coordination_corrupt",
+                "coordination record changed before its journal reservation commit",
+            )
+        _validate_bound_execution_inputs(
+            view,
+            item_id=item_id,
+            source=record.source,
+            root_identity=record.paper_reader_root,
+            cwd=Path(record.paper_reader_root.path),
+        )
+
     return append_transaction(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
@@ -2011,7 +2549,8 @@ def _reserve_coordination_in_journal(
         occurred_at=now,
         propose=propose,
         reconstruct=reconstruct,
-        fault=None,
+        commit_validate=commit_validate,
+        fault=fault,
     )
 
 
@@ -2031,7 +2570,84 @@ def _coordination_setup(
     now: str | None,
 ) -> tuple[Path, Path, bytes]:
     token_hash = sha256_bytes(lease_token.encode())
-    with locked_run(run_dir) as view:
+
+    def validate_before_recovery(view: RunView) -> None:
+        pre_recovery_now = now if now is not None else utc_now()
+        if view.manifest_sha256 != request_fingerprint.split(":", 1)[0]:
+            raise BatchRuntimeError(
+                "manifest_drift",
+                "manifest changed before local prepare coordination",
+            )
+        manifest_item = next(
+            (item for item in view.manifest.items if item.item_id == item_id),
+            None,
+        )
+        if not isinstance(manifest_item, PdfManifestItem) or manifest_item.source != source:
+            raise BatchRuntimeError(
+                "source_drift",
+                "local prepare source differs from the accepted manifest",
+            )
+        _validate_bound_execution_inputs(
+            view,
+            item_id=item_id,
+            source=source,
+            root_identity=root_identity,
+            cwd=Path(root_identity.path),
+        )
+        _item, lease = _active_lease(
+            view,
+            item_id=item_id,
+            worker_id=worker_id,
+            claim_id=claim_id,
+            lease_token=lease_token,
+            attempt_id=attempt_id,
+            now=pre_recovery_now,
+        )
+        state_item = next(entry for entry in view.state.items if entry.item_id == item_id)
+        binding = (
+            state_item.local_prepare_coordination_request_id,
+            state_item.local_prepare_coordination_fingerprint,
+            state_item.local_prepare_coordination_device,
+            state_item.local_prepare_coordination_inode,
+        )
+        if any(value is not None for value in binding) and not all(
+            value is not None for value in binding
+        ):
+            raise BatchRuntimeError(
+                "coordination_corrupt",
+                "journaled local prepare coordination binding is incomplete",
+            )
+        if binding[0] is not None:
+            if binding[0] != request_id or binding[1] != request_fingerprint:
+                raise BatchRuntimeError(
+                    "idempotency_conflict",
+                    "local prepare request id is already bound to different input",
+                )
+            request_dir = (
+                view.run_dir
+                / "results"
+                / "local-prepare"
+                / ".coordination"
+                / request_id
+            )
+            assert binding[2] is not None and binding[3] is not None
+            _assert_request_directory_identity(
+                request_dir,
+                device=binding[2],
+                inode=binding[3],
+            )
+        else:
+            _require_lease_budget(
+                lease,
+                pre_recovery_now,
+                INIT_CHILD_TIMEOUT_SECONDS + timeout_seconds + COMMIT_BUFFER_SECONDS,
+            )
+
+    with locked_run(
+        run_dir,
+        pre_recovery_validate=validate_before_recovery,
+    ) as view:
+        locked_now = now if now is not None else utc_now()
         if view.manifest_sha256 != request_fingerprint.split(":", 1)[0]:
             # The fingerprint is prefixed with the manifest digest so drift is
             # detected before creating internal coordination state.
@@ -2046,7 +2662,6 @@ def _coordination_setup(
             root_identity=root_identity,
             cwd=Path(root_identity.path),
         )
-        authoritative_now = now or utc_now()
         _item, lease = _active_lease(
             view,
             item_id=item_id,
@@ -2054,7 +2669,7 @@ def _coordination_setup(
             claim_id=claim_id,
             lease_token=lease_token,
             attempt_id=attempt_id,
-            now=authoritative_now,
+            now=locked_now,
         )
         coordination_root = view.run_dir / "results" / "local-prepare" / ".coordination"
         attempts_root = coordination_root / ".attempts"
@@ -2068,8 +2683,8 @@ def _coordination_setup(
                 or state_item.local_prepare_coordination_fingerprint != request_fingerprint
             ):
                 raise BatchRuntimeError(
-                    "coordination_corrupt",
-                    "journaled local prepare coordination binding differs from this request",
+                    "idempotency_conflict",
+                    "local prepare request id is already bound to different input",
                 )
             assert state_item.local_prepare_coordination_device is not None
             assert state_item.local_prepare_coordination_inode is not None
@@ -2081,7 +2696,7 @@ def _coordination_setup(
         if not entry_exists_allow_missing_parent(record_path):
             _require_lease_budget(
                 lease,
-                authoritative_now,
+                locked_now,
                 INIT_CHILD_TIMEOUT_SECONDS + timeout_seconds + COMMIT_BUFFER_SECONDS,
             )
         owner_path = attempts_root / f"{attempt_id}.json"
@@ -2161,12 +2776,14 @@ def _coordination_setup(
             "timeout_seconds": timeout_seconds,
             "stage": "reserved",
             "init_invoked": False,
+            "init_execution_released": False,
             "init_argv": init_argv,
             "init_stdout_sha256": None,
             "paper_reader_run_dir": None,
             "paper_reader_run_id": None,
             "local_target_path": None,
             "prepare_invoked": False,
+            "prepare_execution_released": False,
             "prepare_argv": None,
             "prepare_stdout_sha256": None,
             "evidence_dir": None,
@@ -2184,6 +2801,7 @@ def _coordination_setup(
                 record_path,
                 _CoordinationRecord,
                 view.lease_secret,
+                recover_pending=True,
             )
             fixed_fields = {
                 "schema_version",
@@ -2247,6 +2865,7 @@ def _result_from_error(
         status=status,
         source=source,
         paper_reader_root=root_identity,
+        paper_reader_run_directory=None,
         error={"code": code, "message": message},
     )
 
@@ -2266,43 +2885,31 @@ def run_local_prepare(
     runner: ChildRunner | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
-    canonical_request_id = validate_request_id(request_id)
-    if timeout_seconds < 1 or timeout_seconds > MAX_CHILD_TIMEOUT_SECONDS:
-        raise BatchRuntimeError(
+    invalid_timeout = timeout_seconds < 1 or timeout_seconds > MAX_CHILD_TIMEOUT_SECONDS
+    try:
+        preflight, canonical_request_id, existing_event = load_request_preflight(
+            run_dir,
+            request_id=request_id,
+            command="local-prepare.finish",
+        )
+    except BatchRuntimeError as exc:
+        if invalid_timeout and exc.code == "storage_missing":
+            raise BatchRuntimeError(
+                "invalid_timeout",
+                f"child timeout must be between 1 and {MAX_CHILD_TIMEOUT_SECONDS} seconds",
+            ) from exc
+        raise
+    if invalid_timeout:
+        _raise_input_error(
+            existing_event,
             "invalid_timeout",
             f"child timeout must be between 1 and {MAX_CHILD_TIMEOUT_SECONDS} seconds",
         )
     root = normalized_absolute_path(paper_reader_root)
-    preflight = load_run_view(run_dir)
     token_hash = sha256_bytes(lease_token.encode())
-    committed = _matching_committed_finish(
-        preflight,
-        request_id=canonical_request_id,
-        item_id=item_id,
-        worker_id=worker_id,
-        claim_id=claim_id,
-        attempt_id=attempt_id,
-        lease_token_sha256=token_hash,
-    )
-    if committed is not None:
-        result_path = preflight.run_dir / "results" / "local-prepare" / f"{committed.result_sha256}.json"
-        return finish_local_prepare(
-            preflight.run_dir,
-            item_id,
-            worker_id=worker_id,
-            claim_id=claim_id,
-            lease_token=lease_token,
-            attempt_id=attempt_id,
-            result_path=result_path,
-            request_id=canonical_request_id,
-            expected_root=root,
-            now=now,
-            fault=fault,
-        )
     manifest_item = next((item for item in preflight.manifest.items if item.item_id == item_id), None)
     if not isinstance(manifest_item, PdfManifestItem):
         raise BatchRuntimeError("unknown_item", "local-prepare run requires one PDF manifest item")
-    validate_pdf_source(manifest_item.source)
     root_identity = paper_reader_root_identity(root)
     fingerprint_digest = canonical_sha256(
         {
@@ -2321,6 +2928,56 @@ def run_local_prepare(
         }
     )
     request_fingerprint = f"{preflight.manifest_sha256}:{fingerprint_digest}"
+    state_item = next(
+        (item for item in preflight.state.items if item.item_id == item_id),
+        None,
+    )
+    if state_item is not None and state_item.local_prepare_coordination_request_id == canonical_request_id:
+        if state_item.local_prepare_coordination_fingerprint != request_fingerprint:
+            raise BatchRuntimeError(
+                "idempotency_conflict",
+                "local prepare request id is already bound to different run input",
+            )
+    validate_pdf_source(manifest_item.source)
+    if existing_event is not None:
+        committed = _matching_committed_finish(
+            preflight,
+            request_id=canonical_request_id,
+            item_id=item_id,
+            worker_id=worker_id,
+            claim_id=claim_id,
+            attempt_id=attempt_id,
+            lease_token_sha256=token_hash,
+        )
+        if committed is None:
+            raise BatchRuntimeError(
+                "idempotency_conflict",
+                "local prepare request id is already bound to different finish input",
+            )
+        if (
+            state_item is None
+            or state_item.local_prepare_coordination_request_id != canonical_request_id
+            or state_item.local_prepare_coordination_fingerprint != request_fingerprint
+        ):
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "completed local prepare run lacks its exact coordination request binding",
+            )
+        result_path = preflight.run_dir / "results" / "local-prepare" / f"{committed.result_sha256}.json"
+        return finish_local_prepare(
+            preflight.run_dir,
+            item_id,
+            worker_id=worker_id,
+            claim_id=claim_id,
+            lease_token=lease_token,
+            attempt_id=attempt_id,
+            result_path=result_path,
+            request_id=canonical_request_id,
+            expected_root=root,
+            coordination_request_fingerprint=request_fingerprint,
+            now=now,
+            fault=fault,
+        )
     request_dir, record_path, secret = _coordination_setup(
         preflight.run_dir,
         request_id=canonical_request_id,
@@ -2346,6 +3003,7 @@ def run_local_prepare(
         coordinator_request_fingerprint=request_fingerprint,
         record_path=record_path,
         now=now,
+        fault=fault,
     )
     child_runner = runner or _default_child_runner
     # The exact run-lock descriptor bundle is inherited through marker
@@ -2356,7 +3014,25 @@ def run_local_prepare(
         create=True,
         guard_parent_replacement=False,
     ):
-        record, record_raw = _load_signed_model(record_path, _CoordinationRecord, secret)
+        coordination_root = preflight.run_dir / "results" / "local-prepare" / ".coordination"
+        owner_path = coordination_root / ".attempts" / f"{attempt_id}.json"
+        owner, _owner_raw = _load_signed_model(owner_path, _AttemptOwner, secret)
+        if owner.request_id != canonical_request_id or owner.attempt_id != attempt_id:
+            raise BatchRuntimeError(
+                "coordination_corrupt",
+                "coordination owner differs from the exact local prepare request",
+            )
+        _assert_request_directory_identity(
+            request_dir,
+            device=owner.request_dir_device,
+            inode=owner.request_dir_inode,
+        )
+        record, record_raw = _load_signed_model(
+            record_path,
+            _CoordinationRecord,
+            secret,
+            recover_pending=True,
+        )
         _assert_request_directory_identity(
             request_dir,
             device=record.request_dir_device,
@@ -2436,6 +3112,7 @@ def run_local_prepare(
                         record_path,
                         _CoordinationRecord,
                         secret,
+                        recover_pending=True,
                     )
                     result = _result_from_error(
                         manifest_sha256=preflight.manifest_sha256,
@@ -2547,6 +3224,7 @@ def run_local_prepare(
                         record_path,
                         _CoordinationRecord,
                         secret,
+                        recover_pending=True,
                     )
                     result = _result_from_error(
                         manifest_sha256=preflight.manifest_sha256,
@@ -2586,7 +3264,7 @@ def run_local_prepare(
                 result,
                 expected_root=root,
             )
-            result_raw = canonical_json_bytes(local_prepare_result_canonical_payload(result))
+            result_raw = canonical_json_bytes(result)
             result_sha256 = sha256_bytes(result_raw)
             result_path = preflight.run_dir / "results" / "local-prepare" / f"{result_sha256}.json"
             publish_bytes_no_replace(result_path, result_raw, allow_existing_exact=True)
@@ -2613,6 +3291,7 @@ def run_local_prepare(
             result_path=result_path,
             request_id=canonical_request_id,
             expected_root=root,
+            coordination_request_fingerprint=request_fingerprint,
             now=now,
             fault=fault,
         )

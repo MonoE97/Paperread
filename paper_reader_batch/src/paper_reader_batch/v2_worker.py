@@ -36,7 +36,6 @@ from paper_reader_batch.v2_contracts import (
     StrictModel,
     UuidString,
     WorkerResult,
-    local_prepare_result_canonical_payload,
 )
 from paper_reader_batch.v2_errors import BatchRuntimeError
 from paper_reader_batch.v2_journal import (
@@ -44,6 +43,7 @@ from paper_reader_batch.v2_journal import (
     ResultPublication,
     RunView,
     append_transaction,
+    load_request_preflight,
     load_run_view,
 )
 from paper_reader_batch.v2_json import (
@@ -60,6 +60,15 @@ from paper_reader_batch.v2_receipts import FaultHook, RequestOutcome
 
 DEFAULT_LEASE_SECONDS = 900
 MAX_LEASE_SECONDS = 3600
+
+
+def _raise_input_error(existing_event, code: str, message: str) -> None:
+    if existing_event is not None:
+        raise BatchRuntimeError(
+            "idempotency_conflict",
+            "request id is already bound to different command input",
+        )
+    raise BatchRuntimeError(code, message)
 
 
 class _WorkerPromptContract(StrictModel):
@@ -118,6 +127,37 @@ def _active_claim_count(view: RunView) -> int:
     )
 
 
+def _claimable_worker_items(view: RunView, *, max_items: int) -> list[StateItem]:
+    if max_items <= 0:
+        return []
+    manifest_by_id = {item.item_id: item for item in view.manifest.items}
+    selected: list[StateItem] = []
+    selected_pdf = False
+    for item in view.state.items:
+        if item.worker_status != "queued" or item.local_prepare_status == "claimed":
+            continue
+        manifest_item = manifest_by_id[item.item_id]
+        if isinstance(manifest_item, PdfManifestItem):
+            if selected_pdf:
+                continue
+            selected_pdf = True
+        selected.append(item)
+        if len(selected) == max_items:
+            break
+    return selected
+
+
+def _validate_worker_pdf_source(view: RunView, item_id: str) -> None:
+    manifest_item = next(
+        (item for item in view.manifest.items if item.item_id == item_id),
+        None,
+    )
+    if manifest_item is None:
+        raise BatchRuntimeError("journal_corrupt", "worker item is absent from manifest")
+    if isinstance(manifest_item, PdfManifestItem):
+        validate_pdf_source(manifest_item.source)
+
+
 def _claim_result(view: RunView, data: ClaimedData) -> dict[str, Any]:
     assignments: list[dict[str, Any]] = []
     manifest_by_id = {item.item_id: item for item in view.manifest.items}
@@ -156,17 +196,26 @@ def claim_worker(
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
+    preflight, canonical_request_id, existing_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="worker.claim",
+    )
     if not worker_id.strip():
-        raise BatchRuntimeError("invalid_worker", "worker id must not be empty")
-    preflight = load_run_view(run_dir)
+        _raise_input_error(existing_event, "invalid_worker", "worker id must not be empty")
     requested_limit = preflight.manifest.default_concurrency if limit is None else limit
     if requested_limit < 1 or requested_limit > preflight.manifest.default_concurrency:
-        raise BatchRuntimeError(
+        _raise_input_error(
+            existing_event,
             "invalid_limit",
             "worker claim limit must be positive and no greater than manifest default concurrency",
         )
     if lease_seconds < 1 or lease_seconds > MAX_LEASE_SECONDS:
-        raise BatchRuntimeError("invalid_lease", f"lease seconds must be between 1 and {MAX_LEASE_SECONDS}")
+        _raise_input_error(
+            existing_event,
+            "invalid_lease",
+            f"lease seconds must be between 1 and {MAX_LEASE_SECONDS}",
+        )
     fingerprint = canonical_sha256(
         {
             "command": "worker.claim",
@@ -183,11 +232,7 @@ def claim_worker(
         expires_at = _format_utc(_parse_utc(transaction_time) + timedelta(seconds=lease_seconds))
         capacity = view.manifest.default_concurrency - _active_claim_count(view)
         count = min(requested_limit, capacity)
-        eligible = [
-            item
-            for item in view.state.items
-            if item.worker_status == "queued" and item.local_prepare_status != "claimed"
-        ][:count]
+        eligible = _claimable_worker_items(view, max_items=count)
         if not eligible:
             raise BatchRuntimeError("no_available_work", "no worker item is currently claimable")
         manifest_by_id = {item.item_id: item for item in view.manifest.items}
@@ -227,16 +272,35 @@ def claim_worker(
             raise BatchRuntimeError("journal_corrupt", "worker claim request points to another event type")
         return _claim_result(view, event.data)
 
+    def replay_validate(view: RunView, event) -> None:
+        if not isinstance(event.data, ClaimedData) or event.data.kind != "worker.claimed":
+            raise BatchRuntimeError("journal_corrupt", "worker claim replay points to another event type")
+        manifest_by_id = {item.item_id: item for item in view.manifest.items}
+        for assignment in event.data.assignments:
+            manifest_item = manifest_by_id.get(assignment.item_id)
+            if manifest_item is None or manifest_item.source != assignment.source:
+                raise BatchRuntimeError("journal_corrupt", "worker claim source differs from manifest")
+            if isinstance(manifest_item, PdfManifestItem):
+                validate_pdf_source(manifest_item.source)
+
+    def commit_validate(view: RunView) -> None:
+        capacity = view.manifest.default_concurrency - _active_claim_count(view)
+        count = min(requested_limit, capacity)
+        for item in _claimable_worker_items(view, max_items=count):
+            _validate_worker_pdf_source(view, item.item_id)
+
     return append_transaction(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
         expected_run_dir_identity=preflight.run_dir_identity,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="worker.claim",
         request_fingerprint=fingerprint,
         occurred_at=now,
         propose=propose,
         reconstruct=reconstruct,
+        replay_validate=replay_validate,
+        commit_validate=commit_validate,
         fault=fault,
     )
 
@@ -309,7 +373,7 @@ def _load_prepared_local_result(
             "journal_corrupt",
             "prepared local result fails strict validation",
         ) from exc
-    if raw != canonical_json_bytes(local_prepare_result_canonical_payload(result)):
+    if raw != canonical_json_bytes(result):
         raise BatchRuntimeError(
             "journal_corrupt",
             "prepared local result is not canonical JSON",
@@ -396,6 +460,8 @@ def worker_prompt(
         paper_reader_run=prepared.paper_reader_run if prepared is not None else None,
         evidence=prepared.evidence if prepared is not None else None,
     )
+    if isinstance(manifest_item, PdfManifestItem):
+        validate_pdf_source(manifest_item.source)
     return prompt.model_dump(mode="json", exclude_none=True)
 
 
@@ -412,9 +478,17 @@ def renew_worker(
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
+    preflight, canonical_request_id, existing_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="worker.renew",
+    )
     if lease_seconds < 1 or lease_seconds > MAX_LEASE_SECONDS:
-        raise BatchRuntimeError("invalid_lease", f"lease seconds must be between 1 and {MAX_LEASE_SECONDS}")
-    preflight = load_run_view(run_dir)
+        _raise_input_error(
+            existing_event,
+            "invalid_lease",
+            f"lease seconds must be between 1 and {MAX_LEASE_SECONDS}",
+        )
     token_hash = sha256_bytes(lease_token.encode())
     fingerprint = canonical_sha256(
         {
@@ -465,16 +539,33 @@ def renew_worker(
             raise BatchRuntimeError("journal_corrupt", "worker renew request points to another event type")
         return _lease_mutation_result(event.data)
 
+    def replay_validate(view: RunView, event) -> None:
+        if not isinstance(event.data, LeaseMutationData) or event.data.kind != "worker.renewed":
+            raise BatchRuntimeError("journal_corrupt", "worker renew replay points to another event type")
+        manifest_item = next(
+            (item for item in view.manifest.items if item.item_id == event.data.item_id),
+            None,
+        )
+        if manifest_item is None:
+            raise BatchRuntimeError("journal_corrupt", "worker renew replay item is absent from manifest")
+        if isinstance(manifest_item, PdfManifestItem):
+            validate_pdf_source(manifest_item.source)
+
+    def commit_validate(view: RunView) -> None:
+        _validate_worker_pdf_source(view, item_id)
+
     return append_transaction(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
         expected_run_dir_identity=preflight.run_dir_identity,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="worker.renew",
         request_fingerprint=fingerprint,
         occurred_at=now,
         propose=propose,
         reconstruct=reconstruct,
+        replay_validate=replay_validate,
+        commit_validate=commit_validate,
         fault=fault,
     )
 
@@ -505,12 +596,17 @@ def release_worker(
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
+    preflight, canonical_request_id, existing_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="worker.release",
+    )
     if not acknowledge_no_side_effects:
-        raise BatchRuntimeError(
+        _raise_input_error(
+            existing_event,
             "acknowledgement_required",
             "worker release requires --acknowledge-no-side-effects",
         )
-    preflight = load_run_view(run_dir)
     token_hash = sha256_bytes(lease_token.encode())
     fingerprint = canonical_sha256(
         {
@@ -559,7 +655,7 @@ def release_worker(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
         expected_run_dir_identity=preflight.run_dir_identity,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="worker.release",
         request_fingerprint=fingerprint,
         occurred_at=now,
@@ -611,8 +707,12 @@ def finish_worker(
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
+    preflight, canonical_request_id, _existing_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="worker.finish",
+    )
     input_path, raw, result, result_sha256 = _load_worker_result(result_path)
-    preflight = load_run_view(run_dir)
     token_hash = sha256_bytes(lease_token.encode())
     fingerprint = canonical_sha256(
         {
@@ -702,16 +802,33 @@ def finish_worker(
             raise BatchRuntimeError("journal_corrupt", "worker finish request points to another event type")
         return _finish_result(view, event.data)
 
+    def replay_validate(view: RunView, event) -> None:
+        if not isinstance(event.data, FinishedData) or event.data.kind != "worker.finished":
+            raise BatchRuntimeError("journal_corrupt", "worker finish replay points to another event type")
+        manifest_item = next(
+            (item for item in view.manifest.items if item.item_id == event.data.item_id),
+            None,
+        )
+        if manifest_item is None:
+            raise BatchRuntimeError("journal_corrupt", "worker finish replay item is absent from manifest")
+        if isinstance(manifest_item, PdfManifestItem):
+            validate_pdf_source(manifest_item.source)
+
+    def commit_validate(view: RunView) -> None:
+        _validate_worker_pdf_source(view, item_id)
+
     return append_transaction(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
         expected_run_dir_identity=preflight.run_dir_identity,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="worker.finish",
         request_fingerprint=fingerprint,
         occurred_at=now,
         propose=propose,
         reconstruct=reconstruct,
+        replay_validate=replay_validate,
+        commit_validate=commit_validate,
         fault=fault,
     )
 
@@ -724,7 +841,11 @@ def retry_worker(
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
-    preflight = load_run_view(run_dir)
+    preflight, canonical_request_id, _existing_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="worker.retry",
+    )
     fingerprint = canonical_sha256(
         {
             "command": "worker.retry",
@@ -781,7 +902,7 @@ def retry_worker(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
         expected_run_dir_identity=preflight.run_dir_identity,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="worker.retry",
         request_fingerprint=fingerprint,
         occurred_at=now,

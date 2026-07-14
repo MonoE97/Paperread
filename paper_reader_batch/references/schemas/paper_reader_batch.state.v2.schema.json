@@ -254,6 +254,19 @@
           "default": null,
           "title": "Local Prepare Last Claim Id"
         },
+        "local_prepare_last_expires_at": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Prepare Last Expires At"
+        },
         "local_prepare_last_lease_token_sha256": {
           "anyOf": [
             {

@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+import paper_reader_batch.v2_journal as journal_module
 from paper_reader_batch.v2_errors import BatchRuntimeError
 from paper_reader_batch.v2_journal import load_run_view
 from paper_reader_batch.v2_local_prepare import claim_local_prepare
@@ -77,6 +78,28 @@ def test_run_recover_noop_is_structured_zero_mutation(tmp_path: Path) -> None:
     assert (run_dir / "state.json").read_bytes() == state_before
 
 
+def test_run_view_caps_run_lock_secret_read_at_exact_secret_length(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir, _pdf = _run(tmp_path)
+    (run_dir / ".run.lock").write_bytes(b"x" * 33)
+    observed_limits: list[int | None] = []
+    real_read_bytes = journal_module.read_bytes
+
+    def recording_read(path: Path, **kwargs) -> bytes:
+        if path.name == ".run.lock":
+            observed_limits.append(kwargs.get("max_bytes"))
+        return real_read_bytes(path, **kwargs)
+
+    monkeypatch.setattr(journal_module, "read_bytes", recording_read)
+
+    with pytest.raises(BatchRuntimeError):
+        load_run_view(run_dir)
+
+    assert observed_limits == [32]
+
+
 def test_recover_expired_worker_lease_uses_exact_journal_identity(tmp_path: Path) -> None:
     run_dir, _pdf = _run(tmp_path)
     claim_worker(
@@ -95,6 +118,43 @@ def test_recover_expired_worker_lease_uses_exact_journal_identity(tmp_path: Path
     view = load_run_view(run_dir)
     assert view.state.items[0].worker_status == "queued"
     assert view.state.items[0].worker_lease is None
+
+
+def test_recover_replay_changed_missing_paper_reader_root_conflicts_before_read(
+    tmp_path: Path,
+) -> None:
+    run_dir, _pdf = _run(tmp_path)
+    claim_worker(
+        run_dir,
+        worker_id="worker",
+        request_id="33333333-3333-4333-8333-333333333333",
+        lease_seconds=1,
+        now="2026-07-10T00:00:01Z",
+    )
+    request_id = "44444444-4444-4444-8444-444444444444"
+    recover_run(
+        run_dir,
+        request_id=request_id,
+        now="2026-07-10T00:00:02Z",
+    )
+    events_before = {
+        path.name: path.read_bytes() for path in (run_dir / "events").iterdir()
+    }
+    state_before = (run_dir / "state.json").read_bytes()
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        recover_run(
+            run_dir,
+            request_id=request_id,
+            paper_reader_root=tmp_path / "does-not-exist",
+            now="2026-07-10T00:00:02Z",
+        )
+
+    assert exc_info.value.code == "idempotency_conflict"
+    assert {
+        path.name: path.read_bytes() for path in (run_dir / "events").iterdir()
+    } == events_before
+    assert (run_dir / "state.json").read_bytes() == state_before
 
 
 def test_recover_expired_local_lease_without_execution_requeues_exact_attempt(tmp_path: Path) -> None:

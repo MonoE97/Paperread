@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -21,12 +22,15 @@ from paper_reader.raw_schema import require_raw_schema_version
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import ExpectedRunArtifact
 from paper_reader.storage import (
+    HeldTerminalArtifactGuard,
     UnsafeStoragePathError,
     canonical_json_bytes,
     canonical_json_sha256,
     open_anchored_directory,
+    open_terminal_artifact_guard,
     read_anchored_bytes,
     snapshot_directory_fd,
+    tree_snapshot_from_hashes,
     validate_directory_anchor,
 )
 from paper_reader.v2_loader import (
@@ -35,6 +39,8 @@ from paper_reader.v2_loader import (
     RunLoadError,
     _load_v2_run_from_anchor,
 )
+from paper_reader.zotero_candidate import _note_child_view
+from paper_reader.zotero_lifecycle import normalize_parent_snapshot, parent_fingerprint
 
 
 class ZoteroAuthorizationBindingError(LocalPublicationError):
@@ -375,6 +381,70 @@ def _verify_authorization_members(
     return verified
 
 
+def _validate_live_preflight_semantics(
+    authorization: PaperReaderWriteAuthorization,
+    members: dict[str, tuple[Path, bytes]],
+) -> None:
+    parent_bytes = members["zotero_parent_snapshot"][1]
+    children_bytes = members["zotero_children_snapshot"][1]
+    try:
+        parent = json.loads(parent_bytes)
+        children = json.loads(children_bytes)
+        if (
+            not isinstance(parent, dict)
+            or not isinstance(children, list)
+            or not all(isinstance(item, dict) for item in children)
+            or canonical_json_bytes(parent) != parent_bytes
+            or canonical_json_bytes(children) != children_bytes
+        ):
+            raise ValueError("live snapshots are not canonical parent/children JSON")
+        normalized_parent = normalize_parent_snapshot(parent)
+        observed_parent_fingerprint = parent_fingerprint(parent)
+    except (TypeError, ValueError) as exc:
+        raise ZoteroAuthorizationBindingError(
+            "authorization_tampered",
+            f"authorization live snapshots are invalid: {exc}",
+        ) from exc
+
+    matching_note_keys: list[str] = []
+    try:
+        for child in children:
+            view = _note_child_view(child)
+            if view is None:
+                continue
+            note_key, parent_key, note_title = view
+            if parent_key != authorization.target.parent_key:
+                raise ValueError(
+                    "authorization children snapshot contains a note for another parent"
+                )
+            if note_title == authorization.note_title:
+                matching_note_keys.append(note_key)
+    except (LocalPublicationError, TypeError, ValueError) as exc:
+        raise ZoteroAuthorizationBindingError(
+            "authorization_tampered",
+            f"authorization children snapshot is invalid: {exc}",
+        ) from exc
+
+    preflight = authorization.live_preflight
+    title_available = not matching_note_keys
+    if (
+        normalized_parent["key"] != authorization.target.parent_key
+        or observed_parent_fingerprint != authorization.target.parent_fingerprint
+        or authorization.target.note_title != authorization.note_title
+        or preflight.captured_at != authorization.created_at
+        or preflight.parent_key != authorization.target.parent_key
+        or preflight.parent_fingerprint != authorization.target.parent_fingerprint
+        or preflight.requested_note_title != authorization.note_title
+        or preflight.title_available != title_available
+        or preflight.matching_note_keys != tuple(matching_note_keys)
+        or not title_available
+    ):
+        raise ZoteroAuthorizationBindingError(
+            "authorization_tampered",
+            "authorization live preflight does not match its parent/children snapshots",
+        )
+
+
 def _validated_authorization_bytes(
     loaded: LoadedRun,
     authorization_path: Path,
@@ -460,6 +530,7 @@ def _validated_authorization_bytes(
         authorization,
         loaded,
     )
+    _validate_live_preflight_semantics(authorization, members)
     _candidate_path, candidate_bytes = members["candidate_snapshot"]
     require_raw_schema_version(
         candidate_bytes,
@@ -630,6 +701,58 @@ def load_bound_authorization(
     )
 
 
+def open_bound_authorization_guard(
+    loaded: LoadedRun,
+    bound: LoadedAuthorization,
+) -> HeldTerminalArtifactGuard:
+    anchor = loaded.run_directory_anchor
+    if anchor is None:
+        raise ZoteroAuthorizationBindingError(
+            "run_directory_changed",
+            "bound authorization guard requires a locked run anchor",
+        )
+    sidecar_path = bound.authorization_path.with_suffix("")
+    expected_members = {
+        "record.json": (
+            len(bound.authorization_bytes),
+            hashlib.sha256(bound.authorization_bytes).hexdigest(),
+        )
+    }
+    try:
+        for artifact in bound.authorization.artifacts:
+            artifact_path = bound.run_dir / artifact.path
+            relative = artifact_path.relative_to(sidecar_path).as_posix()
+            if relative in expected_members:
+                raise ValueError("duplicate authorization sidecar member")
+            expected_members[relative] = (
+                artifact.size_bytes,
+                artifact.sha256,
+            )
+        if set(expected_members) != set(_AUTHORIZATION_SIDECAR_NAMES):
+            raise ValueError("authorization sidecar membership is incomplete")
+        guard = open_terminal_artifact_guard(
+            anchor,
+            main_path=bound.authorization_path,
+            main_bytes=bound.authorization_bytes,
+            sidecar_path=sidecar_path,
+            sidecar_snapshot=tree_snapshot_from_hashes(expected_members),
+            label="bound authorization",
+        )
+    except ZoteroAuthorizationBindingError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ZoteroAuthorizationBindingError(
+            "authorization_tampered",
+            f"bound authorization cannot be held safely: {exc}",
+        ) from exc
+    try:
+        guard.verify()
+    except BaseException:
+        guard.close()
+        raise
+    return guard
+
+
 __all__ = [
     "InspectedAuthorization",
     "LoadedAuthorization",
@@ -638,5 +761,6 @@ __all__ = [
     "inspect_authorization_target",
     "load_authorization_artifact",
     "load_bound_authorization",
+    "open_bound_authorization_guard",
     "preflight_authorization_schema_versions",
 ]

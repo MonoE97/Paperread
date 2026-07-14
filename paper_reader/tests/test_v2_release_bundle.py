@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import os
 from pathlib import Path
 from types import ModuleType
+
+import pytest
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -129,3 +132,170 @@ def test_validator_accepts_minimal_closed_v2_bundle(tmp_path: Path) -> None:
     _build_bundle(tmp_path, validator)
 
     assert validator.validate_skill(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "forbidden_name"),
+    [
+        ("src/paper_reader/runs.py", "write_run_manifest"),
+        ("src/paper_reader/runs.py", "allocate_run_dir"),
+        ("src/paper_reader/pdf_workflow.py", "PDFOutputPaths"),
+        ("src/paper_reader/pdf_workflow.py", "allocate_pdf_output_paths"),
+        ("src/paper_reader/workflow.py", "_prepare_bundle_from_metadata"),
+        ("src/paper_reader/workflow.py", "prepare_item_bundle"),
+        ("src/paper_reader/workflow.py", "prepare_pdf_bundle"),
+    ],
+)
+def test_active_source_does_not_expose_v1_mutators(
+    relative_path: str,
+    forbidden_name: str,
+) -> None:
+    source = (SKILL_ROOT / relative_path).read_text(encoding="utf-8")
+    functions = {
+        node.name
+        for node in ast.parse(source).body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+
+    assert forbidden_name not in functions
+
+
+def test_release_validator_rejects_hidden_v1_mutators(tmp_path: Path) -> None:
+    validator = _load_validator()
+    _build_bundle(tmp_path, validator)
+    workflow_path = tmp_path / "src/paper_reader/workflow.py"
+    workflow_path.write_text(
+        "def prepare_item_bundle(details, workdir):\n    return {}\n",
+        encoding="utf-8",
+    )
+
+    errors = validator.validate_skill(tmp_path)
+
+    assert "forbidden V1 runtime callable in src/paper_reader/workflow.py: prepare_item_bundle" in errors
+
+
+def test_release_validator_rejects_required_file_symlink_to_external_path(
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator()
+    bundle = tmp_path / "bundle"
+    external = tmp_path / "external.py"
+    _build_bundle(bundle, validator)
+    external.write_text("outside the release bundle\n", encoding="utf-8")
+    linked = bundle / "src/paper_reader/note_hash.py"
+    linked.unlink()
+    linked.symlink_to(external)
+
+    errors = validator.validate_skill(bundle, release_bundle=True)
+
+    assert (
+        "symlink is forbidden in a release bundle: "
+        "src/paper_reader/note_hash.py"
+    ) in errors
+
+
+def test_release_validator_rejects_unexpected_symlink_anywhere(
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator()
+    bundle = tmp_path / "bundle"
+    external = tmp_path / "external.txt"
+    _build_bundle(bundle, validator)
+    external.write_text("outside the release bundle\n", encoding="utf-8")
+    linked = bundle / "assets/external.txt"
+    linked.parent.mkdir(parents=True)
+    linked.symlink_to(external)
+
+    errors = validator.validate_skill(bundle, release_bundle=True)
+
+    assert "symlink is forbidden in a release bundle: assets/external.txt" in errors
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO files are unavailable")
+def test_release_validator_rejects_special_file_anywhere(tmp_path: Path) -> None:
+    validator = _load_validator()
+    bundle = tmp_path / "bundle"
+    _build_bundle(bundle, validator)
+    fifo = bundle / "assets/channel"
+    fifo.parent.mkdir(parents=True)
+    os.mkfifo(fifo)
+
+    errors = validator.validate_skill(bundle, release_bundle=True)
+
+    assert "special file is forbidden in a release bundle: assets/channel" in errors
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory modes are required")
+def test_release_validator_fails_closed_on_unreadable_directory(tmp_path: Path) -> None:
+    validator = _load_validator()
+    bundle = tmp_path / "bundle"
+    _build_bundle(bundle, validator)
+    private = bundle / "assets/private"
+    private.mkdir(parents=True)
+    private.chmod(0)
+    try:
+        errors = validator.validate_skill(bundle, release_bundle=True)
+    finally:
+        private.chmod(0o700)
+
+    assert "cannot inspect release bundle directory: assets/private" in errors
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "reported_path"),
+    [
+        (".venv/pyvenv.cfg", ".venv"),
+        (".pytest_cache/CACHEDIR.TAG", ".pytest_cache"),
+        (
+            "src/paper_reader/__pycache__/workflow.cpython-313.pyc",
+            "src/paper_reader/__pycache__",
+        ),
+        ("runs/2026-07-13/example/run.json", "runs"),
+    ],
+)
+def test_release_validator_rejects_runtime_state_but_normal_validation_allows_it(
+    relative_path: str,
+    reported_path: str,
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator()
+    _build_bundle(tmp_path, validator)
+    runtime_path = tmp_path / relative_path
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.write_text("runtime state\n", encoding="utf-8")
+
+    assert validator.validate_skill(tmp_path) == []
+    errors = validator.validate_skill(tmp_path, release_bundle=True)
+
+    assert errors.count(
+        f"runtime state is forbidden in a release bundle: {reported_path}"
+    ) == 1
+    assert len([error for error in errors if "runtime state is forbidden" in error]) == 1
+
+
+@pytest.mark.parametrize(
+    "runtime_directory",
+    [
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "runs",
+    ],
+)
+def test_normal_validator_prunes_every_runtime_state_subtree(
+    runtime_directory: str,
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator()
+    _build_bundle(tmp_path, validator)
+    forbidden_doc = tmp_path / runtime_directory / "nested" / "README.md"
+    forbidden_doc.parent.mkdir(parents=True, exist_ok=True)
+    forbidden_doc.write_text("runtime-only documentation\n", encoding="utf-8")
+
+    assert validator.validate_skill(tmp_path) == []
+    release_errors = validator.validate_skill(tmp_path, release_bundle=True)
+    assert release_errors == [
+        f"runtime state is forbidden in a release bundle: {runtime_directory}"
+    ]

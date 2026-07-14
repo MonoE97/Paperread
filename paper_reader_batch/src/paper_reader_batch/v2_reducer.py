@@ -18,6 +18,7 @@ from paper_reader_batch.v2_contracts import (
     LocalPrepareCoordinationReservedData,
     PdfManifestItem,
     RecoveredUncertainWrite,
+    RequestAbortedData,
     RetriedData,
     RunInitializedData,
     RunRecoveredData,
@@ -136,6 +137,12 @@ def initial_state(manifest: BatchManifest, event: BatchEvent) -> BatchState:
 
 def _apply_claim(state: BatchState, manifest: BatchManifest, event: BatchEvent, data: ClaimedData) -> BatchState:
     items = list(state.items)
+    pdf_assignment_count = sum(
+        isinstance(_manifest_item(manifest, assignment.item_id), PdfManifestItem)
+        for assignment in data.assignments
+    )
+    if pdf_assignment_count > 1:
+        raise _corrupt("claim event binds more than one PDF source")
     active_claims = sum(
         item.worker_status == "claimed" or item.local_prepare_status == "claimed"
         for item in state.items
@@ -191,7 +198,15 @@ def _apply_claim(state: BatchState, manifest: BatchManifest, event: BatchEvent, 
                 }
             )
         else:
-            if data.kind != "local_prepare.claimed" or item.local_prepare_status not in {"queued", "failed", "blocked"}:
+            unsafe_fresh_attempt = (
+                item.local_prepare_status == "blocked"
+                and item.local_prepare_failure_code == "coordination_uncertain"
+            )
+            if (
+                data.kind != "local_prepare.claimed"
+                or item.local_prepare_status not in {"queued", "failed", "blocked"}
+                or unsafe_fresh_attempt
+            ):
                 raise _corrupt(f"illegal local prepare claim transition: {assignment.item_id}")
             if not isinstance(manifest_item, PdfManifestItem):
                 raise _corrupt(f"local prepare claim targets a non-PDF item: {assignment.item_id}")
@@ -207,6 +222,7 @@ def _apply_claim(state: BatchState, manifest: BatchManifest, event: BatchEvent, 
                     "local_prepare_last_claim_id": assignment.claim_id,
                     "local_prepare_last_attempt_id": assignment.attempt_id,
                     "local_prepare_last_lease_token_sha256": assignment.lease_token_sha256,
+                    "local_prepare_last_expires_at": assignment.expires_at,
                     "local_prepare_coordination_request_id": None,
                     "local_prepare_coordination_fingerprint": None,
                     "local_prepare_coordination_device": None,
@@ -311,6 +327,8 @@ def _apply_lease_mutation(state: BatchState, event: BatchEvent, data: LeaseMutat
             raise _corrupt("renew event has non-authoritative or non-extending lease times")
         renewed = lease.model_copy(update={"issued_at": data.issued_at, "expires_at": data.expires_at})
         update = {f"{lane}_lease": renewed}
+        if lane == "local_prepare":
+            update["local_prepare_last_expires_at"] = data.expires_at
     else:
         if data.issued_at is not None or data.expires_at is not None:
             raise _corrupt("release/expiry event must not carry replacement lease times")
@@ -394,6 +412,19 @@ def _apply_finished(state: BatchState, manifest: BatchManifest, event: BatchEven
     else:
         if data.status not in {"prepared", "failed", "blocked"}:
             raise _corrupt("local prepare finish has invalid status")
+        if data.failure_code == "coordination_uncertain":
+            binding = (
+                item.local_prepare_coordination_request_id,
+                item.local_prepare_coordination_fingerprint,
+                item.local_prepare_coordination_device,
+                item.local_prepare_coordination_inode,
+            )
+            if data.status != "blocked" or not all(
+                value is not None for value in binding
+            ):
+                raise _corrupt(
+                    "coordination-uncertain finish requires one exact coordination reservation"
+                )
         items[index] = item.model_copy(
             update={
                 "local_prepare_status": data.status,
@@ -760,6 +791,10 @@ def apply_event(state: BatchState, manifest: BatchManifest, event: BatchEvent) -
     if _timestamp(event.occurred_at) < _timestamp(state.updated_at):
         raise _corrupt("event timestamp precedes the latest authoritative state")
     data = event.data
+    if isinstance(data, RequestAbortedData):
+        if event.command != "journal.abort":
+            raise _corrupt("request-aborted marker uses a non-internal command")
+        return _with_items(state, list(state.items), event)
     if isinstance(data, ClaimedData):
         return _apply_claim(state, manifest, event, data)
     if isinstance(data, LocalPrepareCoordinationReservedData):
@@ -879,24 +914,57 @@ def apply_event(state: BatchState, manifest: BatchManifest, event: BatchEvent) -
             index = _state_item_index(state, resumed.item_id)
             item = items[index]
             lease = item.local_prepare_lease
-            if item.local_prepare_status != "claimed" or not _same_lease(lease, resumed):
-                raise _corrupt(f"recover references inactive local coordination lease: {resumed.item_id}")
             issued_at = _timestamp(resumed.issued_at)
             expires_at = _timestamp(resumed.expires_at)
             if (
-                lease.expires_at != resumed.previous_expires_at
-                or resumed.issued_at != event.occurred_at
+                resumed.issued_at != event.occurred_at
                 or expires_at <= issued_at
                 or expires_at - issued_at > timedelta(seconds=MAX_TASK_LEASE_SECONDS)
             ):
                 raise _corrupt(f"recover local coordination lease times are invalid: {resumed.item_id}")
-            items[index] = item.model_copy(
-                update={
-                    "local_prepare_lease": lease.model_copy(
-                        update={"issued_at": resumed.issued_at, "expires_at": resumed.expires_at}
+            if item.local_prepare_status == "claimed" and _same_lease(lease, resumed):
+                if lease.expires_at != resumed.previous_expires_at:
+                    raise _corrupt(
+                        f"recover local coordination expiry is not authoritative: {resumed.item_id}"
                     )
+                replacement_lease = lease.model_copy(
+                    update={"issued_at": resumed.issued_at, "expires_at": resumed.expires_at}
+                )
+                update = {"local_prepare_lease": replacement_lease}
+            elif (
+                item.local_prepare_status == "blocked"
+                and item.local_prepare_lease is None
+                and item.local_prepare_failure_code == "coordination_uncertain"
+                and item.local_prepare_result_sha256 is not None
+                and item.local_prepare_attempt_count == resumed.attempt_number
+                and item.local_prepare_last_actor_id == resumed.actor_id
+                and item.local_prepare_last_claim_id == resumed.claim_id
+                and item.local_prepare_last_attempt_id == resumed.attempt_id
+                and item.local_prepare_last_lease_token_sha256
+                == resumed.lease_token_sha256
+                and item.local_prepare_last_expires_at == resumed.previous_expires_at
+            ):
+                replacement_lease = LeaseState(
+                    lane="local_prepare",
+                    actor_id=resumed.actor_id,
+                    claim_id=resumed.claim_id,
+                    attempt_id=resumed.attempt_id,
+                    attempt_number=resumed.attempt_number,
+                    lease_token_sha256=resumed.lease_token_sha256,
+                    issued_at=resumed.issued_at,
+                    expires_at=resumed.expires_at,
+                )
+                update = {
+                    "local_prepare_status": "claimed",
+                    "local_prepare_lease": replacement_lease,
+                    "local_prepare_result_sha256": None,
+                    "local_prepare_failure_code": None,
+                    "local_prepare_failure_message": None,
                 }
-            )
+            else:
+                raise _corrupt(f"recover references inactive local coordination lease: {resumed.item_id}")
+            update["local_prepare_last_expires_at"] = resumed.expires_at
+            items[index] = item.model_copy(update=update)
         return _with_items(state, items, event)
     raise _corrupt(f"event type is not accepted by the Task 5 reducer: {data.kind}")
 

@@ -14,8 +14,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
+import paper_reader.storage as storage_module
 from paper_reader.contracts import PaperReaderCommandResult, PaperReaderWriteAuthorization
 from paper_reader.note import FORBIDDEN_RENDERED_HEADINGS, REQUIRED_SECTIONS
 from paper_reader.public_cli import app
@@ -164,6 +166,51 @@ def _authorize(
     )
 
 
+def _rewrite_authorization_closure(
+    authorized,
+    *,
+    sidecar_updates: dict[str, object] | None = None,
+    authorization_updates: dict[str, object] | None = None,
+) -> None:
+    from paper_reader.storage import canonical_json_bytes
+
+    authorization_path = authorized.authorization_path
+    authorization_dir = authorized.authorization_dir
+    run_path = authorized.run_dir / "run.json"
+    payload = json.loads(authorization_path.read_bytes())
+    role_by_filename = {
+        "parent.json": "zotero_parent_snapshot",
+        "children.json": "zotero_children_snapshot",
+    }
+    live_ref_by_role = {
+        "zotero_parent_snapshot": "parent_snapshot",
+        "zotero_children_snapshot": "children_snapshot",
+    }
+    for filename, value in (sidecar_updates or {}).items():
+        member_bytes = canonical_json_bytes(value)
+        (authorization_dir / filename).write_bytes(member_bytes)
+        role = role_by_filename[filename]
+        ref = next(item for item in payload["artifacts"] if item["role"] == role)
+        ref["sha256"] = hashlib.sha256(member_bytes).hexdigest()
+        ref["size_bytes"] = len(member_bytes)
+        payload["live_preflight"][live_ref_by_role[role]] = dict(ref)
+    payload.update(authorization_updates or {})
+    authorization_bytes = canonical_json_bytes(payload)
+    authorization_path.write_bytes(authorization_bytes)
+    (authorization_dir / "record.json").write_bytes(authorization_bytes)
+
+    run = json.loads(run_path.read_bytes())
+    relative = authorization_path.relative_to(authorized.run_dir).as_posix()
+    ref = next(
+        item
+        for item in run["artifacts"]
+        if item["role"] == "write_authorization" and item["path"] == relative
+    )
+    ref["sha256"] = hashlib.sha256(authorization_bytes).hexdigest()
+    ref["size_bytes"] = len(authorization_bytes)
+    run_path.write_bytes(canonical_json_bytes(run))
+
+
 def _install_authorization_clock(
     module,
     monkeypatch: pytest.MonkeyPatch,
@@ -232,6 +279,89 @@ def test_direct_authorization_binds_exact_envelope_and_returns_token_only_once(
     assert (run_dir / auth_refs[0]["path"]).read_bytes() == authorization_path.read_bytes()
 
 
+def test_authorization_contract_requires_exact_ttl_interval(tmp_path: Path) -> None:
+    candidate_path, provider = _candidate(tmp_path)
+    authorization = _authorize(candidate_path, provider).authorization
+    payload = authorization.model_dump(mode="json")
+    payload.update(
+        {
+            "created_at": "2026-07-10T12:00:00.123456Z",
+            "expires_at": "2026-07-10T12:05:01.123456Z",
+            "ttl_seconds": 300,
+        }
+    )
+
+    with pytest.raises(ValidationError, match="ttl_seconds"):
+        PaperReaderWriteAuthorization.model_validate_json(
+            storage_module.canonical_json_bytes(payload)
+        )
+
+
+def test_authorization_contract_rejects_submicrosecond_timestamps(tmp_path: Path) -> None:
+    candidate_path, provider = _candidate(tmp_path)
+    authorization = _authorize(candidate_path, provider).authorization
+    payload = authorization.model_dump(mode="json")
+    payload.update(
+        {
+            "created_at": "2026-07-10T12:00:00.1234567Z",
+            "expires_at": "2026-07-10T12:05:00.1234567Z",
+            "ttl_seconds": 300,
+        }
+    )
+
+    with pytest.raises(ValidationError, match="microsecond"):
+        PaperReaderWriteAuthorization.model_validate_json(
+            storage_module.canonical_json_bytes(payload)
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["wrong_parent", "occupied_title", "forged_live_preflight"],
+)
+def test_bound_authorization_rebuilds_live_snapshot_semantics(
+    case: str,
+    tmp_path: Path,
+) -> None:
+    from paper_reader.run_lock import locked_v2_run
+    from paper_reader.zotero_authorization_loader import (
+        ZoteroAuthorizationBindingError,
+        load_bound_authorization,
+    )
+
+    candidate_path, provider = _candidate(tmp_path)
+    authorized = _authorize(candidate_path, provider)
+    authorization_updates: dict[str, object] = {}
+    sidecar_updates: dict[str, object] = {}
+    if case == "wrong_parent":
+        wrong_parent = _parent(version=999)
+        wrong_parent["key"] = "WRONG_PARENT"
+        wrong_parent["data"]["key"] = "WRONG_PARENT"  # type: ignore[index]
+        wrong_parent["data"]["title"] = "Different parent"  # type: ignore[index]
+        sidecar_updates["parent.json"] = wrong_parent
+    elif case == "occupied_title":
+        sidecar_updates["children.json"] = [
+            _note("OCCUPIED", authorized.authorization.note_title)
+        ]
+    else:
+        forged = authorized.authorization.live_preflight.model_dump(mode="json")
+        forged["title_available"] = False
+        forged["matching_note_keys"] = ["FORGED"]
+        authorization_updates["live_preflight"] = forged
+    _rewrite_authorization_closure(
+        authorized,
+        sidecar_updates=sidecar_updates,
+        authorization_updates=authorization_updates,
+    )
+
+    with locked_v2_run(authorized.run_dir) as loaded:
+        with pytest.raises(
+            ZoteroAuthorizationBindingError,
+            match="live|snapshot|parent|title",
+        ):
+            load_bound_authorization(loaded, authorized.authorization_path)
+
+
 def test_authorization_main_artifact_uses_required_topology(tmp_path: Path) -> None:
     candidate_path, provider = _candidate(tmp_path)
 
@@ -279,6 +409,550 @@ def test_authorize_rejects_unreferenced_candidate_tree_members_before_provider(
     assert provider.calls == 0
     assert (run_dir / "run.json").read_bytes() == run_before
     assert not (run_dir / "authorizations").exists()
+
+
+def test_authorize_revalidates_original_bound_evidence_before_provider(
+    tmp_path: Path,
+) -> None:
+    candidate_path, _provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    evidence_ref = next(
+        item for item in run["artifacts"] if item["role"] == "evidence_manifest"
+    )
+    evidence = json.loads(
+        (run_dir / evidence_ref["path"]).read_text(encoding="utf-8")
+    )
+    context_ref = next(item for item in evidence["files"] if item["role"] == "context")
+    (run_dir / context_ref["path"]).write_text(
+        "tampered after Zotero candidate build",
+        encoding="utf-8",
+    )
+
+    class ProviderSpy:
+        calls = 0
+
+        def get_parent(self, _item_key: str):
+            self.calls += 1
+            raise AssertionError("tampered evidence reached provider")
+
+        def get_children(self, _parent_key: str):
+            self.calls += 1
+            raise AssertionError("tampered evidence reached provider")
+
+    provider = ProviderSpy()
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider)
+
+    assert getattr(exc_info.value, "code", None) == "evidence_artifact_hash_mismatch"
+    assert provider.calls == 0
+    assert not (run_dir / "authorizations").exists()
+
+
+def test_authorize_revalidates_original_evidence_after_live_refresh(
+    tmp_path: Path,
+) -> None:
+    candidate_path, provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    evidence_ref = next(
+        item for item in run["artifacts"] if item["role"] == "evidence_manifest"
+    )
+    evidence_path = run_dir / evidence_ref["path"]
+
+    class TamperingProvider:
+        def __init__(self) -> None:
+            self.tampered = False
+
+        def get_parent(self, item_key: str):
+            parent = provider.get_parent(item_key)
+            if not self.tampered:
+                evidence_path.write_bytes(b"{}")
+                self.tampered = True
+            return parent
+
+        def get_children(self, parent_key: str):
+            return provider.get_children(parent_key)
+
+    tampering_provider = TamperingProvider()
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, tampering_provider)
+
+    assert tampering_provider.tampered is True
+    assert getattr(exc_info.value, "code", None) == "evidence_artifact_hash_mismatch"
+    assert not (run_dir / "authorizations").exists()
+
+
+def test_authorize_revalidates_original_evidence_after_authorization_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    evidence_ref = next(
+        item for item in run["artifacts"] if item["role"] == "evidence_manifest"
+    )
+    evidence_path = run_dir / evidence_ref["path"]
+    run_before = (run_dir / "run.json").read_bytes()
+    original_cas = module.cas_update_run
+    tampered = False
+
+    def tamper_evidence_after_run_commit(loaded, value, **kwargs):
+        nonlocal tampered
+        result = original_cas(loaded, value, **kwargs)
+        if (
+            loaded.manifest_path == run_dir / "run.json"
+            and any(
+                artifact.role == "write_authorization"
+                for artifact in getattr(value, "artifacts", ())
+            )
+            and not tampered
+        ):
+            evidence_path.write_bytes(b"{}")
+            tampered = True
+        return result
+
+    monkeypatch.setattr(module, "cas_update_run", tamper_evidence_after_run_commit)
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider)
+
+    assert tampered is True
+    assert getattr(exc_info.value, "code", None) == "evidence_artifact_hash_mismatch"
+    committed = json.loads((run_dir / "run.json").read_bytes())
+    assert (run_dir / "run.json").read_bytes() != run_before
+    assert committed["status"] == "candidate_built"
+    assert any(
+        artifact["role"] == "write_authorization"
+        for artifact in committed["artifacts"]
+    )
+
+
+@pytest.mark.parametrize(
+    "drift_kind",
+    ["in_place", "atomic_replace", "run_directory_replace"],
+)
+def test_authorize_never_returns_token_when_bound_run_manifest_drifts(
+    drift_kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    run_path = run_dir / "run.json"
+    detached_run_dir = tmp_path / "detached-run"
+    original_cas = module.cas_update_run
+    drifted = False
+
+    def commit_then_drift_run(loaded, value, **kwargs):
+        nonlocal drifted
+        result = original_cas(loaded, value, **kwargs)
+        if (
+            loaded.manifest_path == run_path
+            and any(
+                artifact.role == "write_authorization"
+                for artifact in getattr(value, "artifacts", ())
+            )
+            and not drifted
+        ):
+            if drift_kind == "in_place":
+                run_path.write_bytes(b'{"corrupt":true}')
+            elif drift_kind == "atomic_replace":
+                replacement = run_dir / ".replacement-run.json"
+                replacement.write_bytes(b'{"corrupt":true}')
+                os.replace(replacement, run_path)
+            else:
+                run_dir.rename(detached_run_dir)
+                run_dir.mkdir()
+                run_path.write_bytes(b'{"corrupt":true}')
+            drifted = True
+        return result
+
+    monkeypatch.setattr(module, "cas_update_run", commit_then_drift_run)
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider)
+
+    assert drifted is True
+    assert getattr(exc_info.value, "code", None) == "authorization_tampered"
+    assert run_path.read_bytes() == b'{"corrupt":true}'
+    if drift_kind == "run_directory_replace":
+        detached = json.loads((detached_run_dir / "run.json").read_text())
+        assert any(
+            artifact["role"] == "write_authorization"
+            for artifact in detached["artifacts"]
+        )
+
+
+@pytest.mark.parametrize(
+    "drift_kind",
+    [
+        "main_in_place",
+        "main_atomic_replace",
+        "sidecar_record_in_place",
+        "sidecar_directory_replace",
+    ],
+)
+def test_authorize_preserves_bound_run_when_immutable_authorization_drifts_after_bind(
+    drift_kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    run_path = run_dir / "run.json"
+    run_before = run_path.read_bytes()
+    original_cas = module.cas_update_run
+    drifted_path: Path | None = None
+    detached_sidecar: Path | None = None
+
+    def commit_then_drift_authorization(loaded, value, **kwargs):
+        nonlocal drifted_path, detached_sidecar
+        result = original_cas(loaded, value, **kwargs)
+        if (
+            loaded.manifest_path == run_path
+            and any(
+                artifact.role == "write_authorization"
+                for artifact in getattr(value, "artifacts", ())
+            )
+            and drifted_path is None
+        ):
+            authorization_ref = next(
+                artifact
+                for artifact in value.artifacts
+                if artifact.role == "write_authorization"
+            )
+            main = run_dir / authorization_ref.path
+            sidecar = main.with_suffix("")
+            if drift_kind == "main_in_place":
+                main.write_bytes(b'{"corrupt":true}')
+                drifted_path = main
+            elif drift_kind == "main_atomic_replace":
+                replacement = main.parent / f".{main.name}.replacement"
+                replacement.write_bytes(b'{"corrupt":true}')
+                os.replace(replacement, main)
+                drifted_path = main
+            elif drift_kind == "sidecar_record_in_place":
+                drifted_path = sidecar / "record.json"
+                drifted_path.write_bytes(b'{"corrupt":true}')
+            else:
+                detached_sidecar = sidecar.with_name(f".{sidecar.name}.detached")
+                sidecar.rename(detached_sidecar)
+                sidecar.mkdir()
+                drifted_path = sidecar / "record.json"
+                drifted_path.write_bytes(b'{"corrupt":true}')
+        return result
+
+    monkeypatch.setattr(
+        module,
+        "cas_update_run",
+        commit_then_drift_authorization,
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider)
+
+    assert drifted_path is not None
+    assert getattr(exc_info.value, "code", None) == "authorization_tampered"
+    assert run_path.read_bytes() != run_before
+    committed = json.loads(run_path.read_bytes())
+    assert any(
+        artifact["role"] == "write_authorization"
+        for artifact in committed["artifacts"]
+    )
+    assert drifted_path.read_bytes() == b'{"corrupt":true}'
+    if detached_sidecar is not None:
+        assert (detached_sidecar / "record.json").is_file()
+
+
+def test_authorize_does_not_bind_when_candidate_tree_drifts_before_run_cas(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    run_before = (run_dir / "run.json").read_bytes()
+    original_cas = module.cas_update_run
+    drifted = False
+
+    def drift_candidate_then_cas(loaded, value, **kwargs):
+        nonlocal drifted
+        if not drifted and any(
+            artifact.role == "write_authorization"
+            for artifact in getattr(value, "artifacts", ())
+        ):
+            candidate_path.write_bytes(b"{}")
+            drifted = True
+        return original_cas(loaded, value, **kwargs)
+
+    monkeypatch.setattr(module, "cas_update_run", drift_candidate_then_cas)
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider)
+
+    assert drifted is True
+    assert getattr(exc_info.value, "code", None) == "authorization_status_update_failed"
+    assert (run_dir / "run.json").read_bytes() == run_before
+    run = json.loads(run_before)
+    assert not any(
+        artifact["role"] == "write_authorization"
+        for artifact in run["artifacts"]
+    )
+
+
+def test_authorization_never_attempts_run_rollback_after_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    run_path = run_dir / "run.json"
+    run_before = run_path.read_bytes()
+    original_cas = module.cas_update_run
+    original_write_bytes = module.atomic_write_bytes
+    artifact_drifted = False
+    rollback_attempted = False
+
+    def commit_then_drift_authorization(loaded, value, **kwargs):
+        nonlocal artifact_drifted
+        result = original_cas(loaded, value, **kwargs)
+        if (
+            loaded.manifest_path == run_path
+            and any(
+                artifact.role == "write_authorization"
+                for artifact in getattr(value, "artifacts", ())
+            )
+            and not artifact_drifted
+        ):
+            authorization_ref = next(
+                artifact
+                for artifact in value.artifacts
+                if artifact.role == "write_authorization"
+            )
+            (run_dir / authorization_ref.path).write_bytes(b'{"corrupt":true}')
+            artifact_drifted = True
+        return result
+
+    def observe_rollback_write(path: Path, content: bytes, **kwargs):
+        nonlocal rollback_attempted
+        if Path(path) == run_path and content == run_before:
+            rollback_attempted = True
+        return original_write_bytes(path, content, **kwargs)
+
+    monkeypatch.setattr(module, "cas_update_run", commit_then_drift_authorization)
+    monkeypatch.setattr(module, "atomic_write_bytes", observe_rollback_write)
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider)
+
+    assert artifact_drifted is True
+    assert rollback_attempted is False
+    assert getattr(exc_info.value, "code", None) == "authorization_tampered"
+    committed = json.loads(run_path.read_bytes())
+    assert any(
+        artifact["role"] == "write_authorization"
+        for artifact in committed["artifacts"]
+    )
+
+
+def test_authorize_revalidates_source_immediately_before_token_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    run_path = run_dir / "run.json"
+    run_before = run_path.read_bytes()
+    candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    source_path = Path(candidate["source"]["attachment"]["resolved_path"])
+    original_verify = module.HeldExactFileGuard.verify
+    drifted = False
+
+    def verify_run_then_drift_source(guard) -> None:
+        nonlocal drifted
+        original_verify(guard)
+        if guard.label == "updated authorization run manifest" and not drifted:
+            source_path.write_bytes(source_path.read_bytes() + b"\nsource drift")
+            drifted = True
+
+    monkeypatch.setattr(
+        module.HeldExactFileGuard,
+        "verify",
+        verify_run_then_drift_source,
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider)
+
+    assert drifted is True
+    assert getattr(exc_info.value, "code", None) == "source_changed"
+    assert run_path.read_bytes() != run_before
+    committed = json.loads(run_path.read_bytes())
+    assert any(
+        artifact["role"] == "write_authorization"
+        for artifact in committed["artifacts"]
+    )
+    assert source_path.read_bytes().endswith(b"\nsource drift")
+
+
+def test_authorize_holds_original_evidence_through_final_source_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    run_path = run_dir / "run.json"
+    run_before = run_path.read_bytes()
+    run = json.loads(run_before)
+    evidence_ref = next(
+        artifact
+        for artifact in run["artifacts"]
+        if artifact["role"] == "evidence_manifest"
+    )
+    evidence_path = run_dir / evidence_ref["path"]
+    original_verify_source = module.verify_local_source
+    original_exchange = storage_module._native_exchangeat
+    drifted = False
+    run_exchanges = 0
+
+    def count_run_exchanges(*args, **kwargs):
+        nonlocal run_exchanges
+        run_exchanges += 1
+        return original_exchange(*args, **kwargs)
+
+    def verify_source_then_drift_evidence(attachment):
+        nonlocal drifted
+        result = original_verify_source(attachment)
+        current = json.loads(run_path.read_text(encoding="utf-8"))
+        if (
+            not drifted
+            and any(
+                artifact["role"] == "write_authorization"
+                for artifact in current["artifacts"]
+            )
+        ):
+            evidence_path.write_bytes(b"{}")
+            drifted = True
+        return result
+
+    monkeypatch.setattr(
+        storage_module,
+        "_native_exchangeat",
+        count_run_exchanges,
+    )
+    monkeypatch.setattr(
+        module,
+        "verify_local_source",
+        verify_source_then_drift_evidence,
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider)
+
+    assert drifted is True
+    assert getattr(exc_info.value, "code", None) == "evidence_artifact_hash_mismatch"
+    assert run_exchanges == 1
+    assert run_path.read_bytes() != run_before
+    committed = json.loads(run_path.read_bytes())
+    assert any(
+        artifact["role"] == "write_authorization"
+        for artifact in committed["artifacts"]
+    )
+
+
+def test_authorize_revalidates_artifact_after_final_source_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    run_path = run_dir / "run.json"
+    run_before = run_path.read_bytes()
+    original_verify_source = module.verify_local_source
+    drifted_path: Path | None = None
+
+    def verify_source_then_drift_authorization(attachment):
+        nonlocal drifted_path
+        result = original_verify_source(attachment)
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+        authorization_refs = [
+            artifact
+            for artifact in run.get("artifacts", ())
+            if artifact.get("role") == "write_authorization"
+        ]
+        if authorization_refs and drifted_path is None:
+            drifted_path = run_dir / authorization_refs[0]["path"]
+            drifted_path.write_bytes(b'{"corrupt":true}')
+        return result
+
+    monkeypatch.setattr(
+        module,
+        "verify_local_source",
+        verify_source_then_drift_authorization,
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider)
+
+    assert drifted_path is not None
+    assert getattr(exc_info.value, "code", None) == "authorization_tampered"
+    assert run_path.read_bytes() != run_before
+    committed = json.loads(run_path.read_bytes())
+    assert any(
+        artifact["role"] == "write_authorization"
+        for artifact in committed["artifacts"]
+    )
+    assert drifted_path.read_bytes() == b'{"corrupt":true}'
+
+
+def test_authorize_revalidates_run_after_final_source_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    run_path = run_dir / "run.json"
+    original_verify_source = module.verify_local_source
+    drifted = False
+
+    def verify_source_then_replace_run(attachment):
+        nonlocal drifted
+        result = original_verify_source(attachment)
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+        has_authorization = any(
+            artifact.get("role") == "write_authorization"
+            for artifact in run.get("artifacts", ())
+        )
+        if has_authorization and not drifted:
+            replacement = run_dir / ".external-run.json"
+            replacement.write_bytes(b'{"external":true}')
+            os.replace(replacement, run_path)
+            drifted = True
+        return result
+
+    monkeypatch.setattr(
+        module,
+        "verify_local_source",
+        verify_source_then_replace_run,
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider)
+
+    assert drifted is True
+    assert getattr(exc_info.value, "code", None) == "authorization_tampered"
+    assert run_path.read_bytes() == b'{"external":true}'
 
 
 @pytest.mark.parametrize(
@@ -673,15 +1347,15 @@ def test_expired_authorization_commit_never_returns_plaintext_token(
 ) -> None:
     module = _module()
     candidate_path, provider = _candidate(tmp_path)
-    original_write = module.atomic_write_json
+    original_cas = module.cas_update_run
 
-    def commit_then_expire(path: Path, value, **kwargs):
-        result = original_write(path, value, **kwargs)
-        if Path(path).name == "run.json":
+    def commit_then_expire(loaded, value, **kwargs):
+        result = original_cas(loaded, value, **kwargs)
+        if loaded.manifest_path.name == "run.json":
             authorization_clock["now"] += timedelta(seconds=2)
         return result
 
-    monkeypatch.setattr(module, "atomic_write_json", commit_then_expire)
+    monkeypatch.setattr(module, "cas_update_run", commit_then_expire)
 
     with pytest.raises(module.ZoteroAuthorizationError) as exc_info:
         module.authorize_zotero_candidate(
@@ -810,17 +1484,17 @@ def test_orphan_authorization_schema_is_rejected_before_parent_lock(
     module = _module()
     candidate_path, provider = _candidate(tmp_path)
     run_dir = candidate_path.parent.parent.parent
-    original_write = module.atomic_write_json
+    original_cas = module.cas_update_run
     failed = False
 
-    def fail_binding_once(path: Path, value, **kwargs):
+    def fail_binding_once(loaded, value, **kwargs):
         nonlocal failed
-        if Path(path).name == "run.json" and not failed:
+        if loaded.manifest_path.name == "run.json" and not failed:
             failed = True
             raise OSError("injected authorization run binding failure")
-        return original_write(path, value, **kwargs)
+        return original_cas(loaded, value, **kwargs)
 
-    monkeypatch.setattr(module, "atomic_write_json", fail_binding_once)
+    monkeypatch.setattr(module, "cas_update_run", fail_binding_once)
     with pytest.raises(Exception) as first_error:
         _authorize(candidate_path, provider, ttl_seconds=1)
     assert getattr(first_error.value, "code", None) == "authorization_status_update_failed"
@@ -829,7 +1503,7 @@ def test_orphan_authorization_schema_is_rejected_before_parent_lock(
         b'{"schema_version":"paper_reader.write-authorization.v1"}'
     )
     run_before = (run_dir / "run.json").read_bytes()
-    monkeypatch.setattr(module, "atomic_write_json", original_write)
+    monkeypatch.setattr(module, "cas_update_run", original_cas)
 
     @contextmanager
     def forbidden_parent_lock(*_args, **_kwargs):
@@ -1111,17 +1785,17 @@ def test_authorization_faults_and_size_gate_do_not_create_false_bound_state(
     candidate_path, provider = _candidate(fault_dir)
     run_dir = candidate_path.parent.parent.parent
     run_before = (run_dir / "run.json").read_bytes()
-    original_write = module.atomic_write_json
+    original_cas = module.cas_update_run
     failed = False
 
-    def fail_once(path: Path, value, **kwargs):
+    def fail_once(loaded, value, **kwargs):
         nonlocal failed
-        if Path(path).name == "run.json" and not failed:
+        if loaded.manifest_path.name == "run.json" and not failed:
             failed = True
             raise OSError("injected authorization run binding failure")
-        return original_write(path, value, **kwargs)
+        return original_cas(loaded, value, **kwargs)
 
-    monkeypatch.setattr(module, "atomic_write_json", fail_once)
+    monkeypatch.setattr(module, "cas_update_run", fail_once)
 
     with pytest.raises(Exception) as fault_error:
         _authorize(candidate_path, provider)
@@ -1147,3 +1821,53 @@ def test_authorization_faults_and_size_gate_do_not_create_false_bound_state(
     bound = [item for item in run["artifacts"] if item["role"] == "write_authorization"]
     assert len(bound) == 1
     assert run_dir / bound[0]["path"] == orphan_mains[0]
+
+
+def test_authorization_orphan_recovery_does_not_bind_sidecar_drift_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    candidate_path, provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    run_before = (run_dir / "run.json").read_bytes()
+    original_cas = module.cas_update_run
+    failed = False
+
+    def fail_binding_once(loaded, value, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("injected authorization run binding failure")
+        return original_cas(loaded, value, **kwargs)
+
+    monkeypatch.setattr(module, "cas_update_run", fail_binding_once)
+    with pytest.raises(Exception) as first_error:
+        _authorize(candidate_path, provider)
+    assert getattr(first_error.value, "code", None) == "authorization_status_update_failed"
+    monkeypatch.setattr(module, "cas_update_run", original_cas)
+
+    orphan_main = next((run_dir / "authorizations").glob("*.json"))
+    orphan_sidecar = orphan_main.with_suffix("")
+    original_updated_run = module._updated_run
+    drifted = False
+
+    def update_then_drift(*args, **kwargs):
+        nonlocal drifted
+        result = original_updated_run(*args, **kwargs)
+        if not drifted:
+            (orphan_sidecar / "record.json").write_bytes(b"{}")
+            drifted = True
+        return result
+
+    monkeypatch.setattr(module, "_updated_run", update_then_drift)
+    with pytest.raises(Exception) as retry_error:
+        _authorize(candidate_path, provider)
+
+    assert drifted is True
+    assert getattr(retry_error.value, "code", None) == "authorization_status_update_failed"
+    assert (run_dir / "run.json").read_bytes() == run_before
+    run = json.loads((run_dir / "run.json").read_bytes())
+    assert not any(
+        item["role"] == "write_authorization" for item in run["artifacts"]
+    )

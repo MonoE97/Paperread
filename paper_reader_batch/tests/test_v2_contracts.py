@@ -23,7 +23,6 @@ from paper_reader_batch.v2_contracts import (
     StateItem,
     WriteResult,
     export_contract_schemas,
-    local_prepare_result_canonical_payload,
     schema_filename,
 )
 
@@ -145,7 +144,8 @@ def test_checked_in_contract_schemas_match_export() -> None:
         assert json.loads(path.read_text(encoding="utf-8")) == schema
 
 
-def test_prepared_local_result_preserves_legacy_v2_bytes_and_accepts_new_identity() -> None:
+def test_prepared_local_result_requires_stable_run_directory_identity() -> None:
+    assert "paper_reader_run_directory" in LocalPrepareResult.model_json_schema()["required"]
     payload = {
         "schema_version": "paper_reader_batch.local-prepare-result.v2",
         "manifest_sha256": "a" * 64,
@@ -188,9 +188,8 @@ def test_prepared_local_result_preserves_legacy_v2_bytes_and_accepts_new_identit
         "error": None,
     }
 
-    legacy = LocalPrepareResult.model_validate(payload)
-    assert legacy.paper_reader_run_directory is None
-    assert local_prepare_result_canonical_payload(legacy) == payload
+    with pytest.raises(ValidationError):
+        LocalPrepareResult.model_validate(payload)
 
     payload["paper_reader_run_directory"] = {"device": 4, "inode": 5}
     parsed = LocalPrepareResult.model_validate(payload)

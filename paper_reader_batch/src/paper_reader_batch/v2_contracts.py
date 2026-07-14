@@ -263,6 +263,7 @@ class StateItem(StrictModel):
     local_prepare_last_claim_id: UuidString | None = None
     local_prepare_last_attempt_id: UuidString | None = None
     local_prepare_last_lease_token_sha256: Sha256 | None = None
+    local_prepare_last_expires_at: Rfc3339Utc | None = None
     local_prepare_coordination_request_id: UuidString | None = None
     local_prepare_coordination_fingerprint: NonEmptyString | None = None
     local_prepare_coordination_device: NonNegativeInt | None = None
@@ -317,6 +318,26 @@ class StateItem(StrictModel):
                 or self.local_prepare_lease.attempt_number != self.local_prepare_attempt_count
             ):
                 raise ValueError("local prepare lease lane/attempt must match local state")
+        local_prepare_last_identity = (
+            self.local_prepare_last_actor_id,
+            self.local_prepare_last_claim_id,
+            self.local_prepare_last_attempt_id,
+            self.local_prepare_last_lease_token_sha256,
+            self.local_prepare_last_expires_at,
+        )
+        if any(value is not None for value in local_prepare_last_identity) != all(
+            value is not None for value in local_prepare_last_identity
+        ):
+            raise ValueError("local prepare last identity must be all present or all absent")
+        if self.local_prepare_lease is not None and (
+            self.local_prepare_lease.actor_id != self.local_prepare_last_actor_id
+            or self.local_prepare_lease.claim_id != self.local_prepare_last_claim_id
+            or self.local_prepare_lease.attempt_id != self.local_prepare_last_attempt_id
+            or self.local_prepare_lease.lease_token_sha256
+            != self.local_prepare_last_lease_token_sha256
+            or self.local_prepare_lease.expires_at != self.local_prepare_last_expires_at
+        ):
+            raise ValueError("local prepare lease must match the last authoritative identity")
         write_active = self.write_status in {"claimed", "started"}
         if write_active != (self.write_lease is not None):
             raise ValueError("write claimed/started state and active lease must be present together")
@@ -634,6 +655,17 @@ class RunRecoveredData(StrictModel):
     reconciliation_write: RecoveredUncertainWrite | None
 
 
+class RequestAbortedData(StrictModel):
+    """Durable no-op journal marker for one rejected provisional request."""
+
+    kind: Literal["request.aborted"] = "request.aborted"
+    aborted_request_id: UuidString
+    aborted_command: NonEmptyString
+    aborted_request_fingerprint: Sha256
+    proposed_event_sha256: Sha256
+    proposed_event_canonical_json: NonEmptyString
+
+
 class WriteClaimedData(StrictModel):
     kind: Literal["write.claimed"] = "write.claimed"
     item_id: ItemId
@@ -744,6 +776,7 @@ EventData: TypeAlias = Annotated[
     | FinishedData
     | RetriedData
     | RunRecoveredData
+    | RequestAbortedData
     | WriteClaimedData
     | WriteLeaseMutationData
     | WriteStartedData
@@ -834,7 +867,7 @@ class LocalPrepareResult(StrictModel):
     status: Literal["prepared", "failed", "blocked"]
     source: PdfSource
     paper_reader_root: SkillRootIdentity
-    paper_reader_run_directory: FileIdentity | None = None
+    paper_reader_run_directory: FileIdentity | None
     paper_reader_run: ArtifactRef | None = None
     evidence: ArtifactRef | None = None
     error: ResultError | None = None
@@ -844,10 +877,13 @@ class LocalPrepareResult(StrictModel):
         if self.status == "prepared":
             if (
                 self.error is not None
+                or self.paper_reader_run_directory is None
                 or self.paper_reader_run is None
                 or self.evidence is None
             ):
-                raise ValueError("prepared result requires run and evidence")
+                raise ValueError(
+                    "prepared result requires stable run directory identity, run, and evidence"
+                )
         else:
             if self.error is None:
                 raise ValueError("failed or blocked local prepare result requires error")
@@ -860,26 +896,6 @@ class LocalPrepareResult(StrictModel):
                     "failed or blocked local prepare result forbids success artifacts"
                 )
         return self
-
-
-def local_prepare_result_canonical_payload(
-    result: LocalPrepareResult,
-) -> dict[str, JsonValue]:
-    """Preserve canonical bytes for V2 results created before stable-dir binding.
-
-    New prepared results always set ``paper_reader_run_directory``. Historical
-    V2 results omitted the field entirely; keeping that absence during
-    canonical validation lets read-only replay remain possible without
-    allowing new mutations to skip the stable identity gate.
-    """
-
-    payload = result.model_dump(mode="json")
-    if (
-        result.paper_reader_run_directory is None
-        and "paper_reader_run_directory" not in result.model_fields_set
-    ):
-        payload.pop("paper_reader_run_directory", None)
-    return payload
 
 
 class WriteResult(StrictModel):

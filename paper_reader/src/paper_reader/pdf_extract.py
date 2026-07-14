@@ -65,6 +65,13 @@ class ExtractedTextLimitError(ValueError):
         self.max_chars = max_chars
 
 
+class PdfPageLimitError(ValueError):
+    def __init__(self, *, actual_pages: int, max_pages: int) -> None:
+        super().__init__(f"PDF exceeds {max_pages} pages")
+        self.actual_pages = actual_pages
+        self.max_pages = max_pages
+
+
 def _normalize_heading_line(line: str) -> str:
     text = NUMBERED_HEADING_RE.sub("", line.strip())
     text = re.sub(r"[:.\s]+$", "", text)
@@ -218,26 +225,42 @@ def extract_pdf(
     max_pages: int | None = None,
     *,
     max_chars: int | None = None,
+    hard_max_pages: int | None = None,
     _verified_pdf_path: Path | None = None,
+    _verified_pdf_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     """Extract text and lightweight metadata from a PDF."""
     resolved = Path(pdf_path).expanduser()
+    if _verified_pdf_path is not None and _verified_pdf_bytes is not None:
+        raise ValueError("verified PDF path and bytes are mutually exclusive")
     read_path = (
         Path(_verified_pdf_path).expanduser()
         if _verified_pdf_path is not None
         else resolved
     )
-    if not read_path.exists():
-        raise FileNotFoundError(f"PDF not found: {resolved}")
-    if not read_path.is_file():
-        raise ValueError(f"PDF path is not a file: {resolved}")
+    if _verified_pdf_bytes is None:
+        if not read_path.exists():
+            raise FileNotFoundError(f"PDF not found: {resolved}")
+        if not read_path.is_file():
+            raise ValueError(f"PDF path is not a file: {resolved}")
     if max_chars is not None and max_chars < 0:
         raise ValueError("max_chars must be non-negative")
+    if hard_max_pages is not None and hard_max_pages < 1:
+        raise ValueError("hard_max_pages must be positive")
 
     warnings: list[str] = []
-    doc = fitz.open(read_path)
+    doc = (
+        fitz.open(stream=_verified_pdf_bytes, filetype="pdf")
+        if _verified_pdf_bytes is not None
+        else fitz.open(read_path)
+    )
     try:
         page_count = doc.page_count
+        if hard_max_pages is not None and page_count > hard_max_pages:
+            raise PdfPageLimitError(
+                actual_pages=page_count,
+                max_pages=hard_max_pages,
+            )
         limit = page_count if max_pages is None else min(max_pages, page_count)
         if max_pages is not None and max_pages < page_count:
             warnings.append(f"truncated_to_{max_pages}_pages")

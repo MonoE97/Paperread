@@ -1,19 +1,25 @@
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 import hmac
-from html import unescape
 from html.parser import HTMLParser
 import json
 from pathlib import Path
 from pathlib import PurePosixPath
 import re
-from typing import Any, Literal
+from typing import Any, Callable, Iterator
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import ValidationError
 
-from paper_reader_batch.v2_artifacts import validate_worker_result_artifacts
+from paper_reader_batch.v2_artifacts import (
+    _OpaqueRecord,
+    _parent_fingerprint as _consumed_parent_fingerprint,
+    _plain,
+    validate_worker_result_artifacts,
+)
 from paper_reader_batch.v2_contracts import (
     WORKER_RESULT_SCHEMA_VERSION,
     WRITE_RESULT_SCHEMA_VERSION,
@@ -36,18 +42,25 @@ from paper_reader_batch.v2_journal import (
     ResultPublication,
     RunView,
     append_transaction,
+    load_request_preflight,
     load_run_view,
+    load_run_view_for_mutation,
 )
 from paper_reader_batch.v2_json import (
+    MAX_JSON_ARTIFACT_BYTES,
+    MAX_OPAQUE_ARTIFACT_BYTES,
     canonical_json_bytes,
     canonical_sha256,
+    held_exact_sibling_files,
     list_directory,
+    locked_file,
     normalized_absolute_path,
-    read_bytes,
-    read_json_bytes,
+    read_bytes as _read_bytes,
+    read_json_bytes as _read_json_bytes,
     sha256_bytes,
+    validate_locked_path,
 )
-from paper_reader_batch.v2_receipts import FaultHook, RequestOutcome
+from paper_reader_batch.v2_receipts import FaultHook, RequestOutcome, validate_request_id
 from paper_reader_batch.v2_worker import derive_lease_token
 
 
@@ -57,128 +70,155 @@ MIN_AUTHORIZATION_REMAINING_SECONDS = 30
 _PORTABLE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$")
 
 
-class _ForeignStrict(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+class _ExternalClosureCollector:
+    def __init__(self, *, code: str) -> None:
+        self.code = code
+        self.files: dict[Path, bytes] = {}
+        self.closed_directories: dict[Path, frozenset[str]] = {}
+        self.frozen = False
+
+    def add(self, path: Path, raw: bytes) -> None:
+        if self.frozen:
+            raise BatchRuntimeError("journal_corrupt", "external closure collector is frozen")
+        normalized = normalized_absolute_path(path)
+        existing = self.files.get(normalized)
+        if existing is not None and existing != raw:
+            raise BatchRuntimeError(self.code, f"external artifact changed while read: {normalized}")
+        self.files[normalized] = raw
+
+    def close_directory(self, directory: Path, names: set[str]) -> None:
+        if self.frozen:
+            raise BatchRuntimeError("journal_corrupt", "external closure collector is frozen")
+        normalized = normalized_absolute_path(directory)
+        expected = frozenset(names)
+        existing = self.closed_directories.get(normalized)
+        if existing is not None and existing != expected:
+            raise BatchRuntimeError(self.code, f"external directory closure changed: {normalized}")
+        self.closed_directories[normalized] = expected
+
+    def freeze(self) -> None:
+        if not self.files:
+            raise BatchRuntimeError("journal_corrupt", "external closure collector captured no files")
+        for directory, names in self.closed_directories.items():
+            captured = {path.name for path in self.files if path.parent == directory}
+            if captured != set(names):
+                raise BatchRuntimeError(
+                    "journal_corrupt",
+                    f"external directory closure was not fully captured: {directory}",
+                )
+        self.frozen = True
+
+    @contextmanager
+    def hold(self) -> Iterator[Callable[[], None]]:
+        if not self.frozen:
+            raise BatchRuntimeError("journal_corrupt", "external closure collector is not frozen")
+        by_parent: dict[Path, dict[str, bytes]] = {}
+        for path, raw in self.files.items():
+            by_parent.setdefault(path.parent, {})[path.name] = raw
+        with ExitStack() as stack:
+            guards = [
+                stack.enter_context(
+                    held_exact_sibling_files(
+                        parent,
+                        expected,
+                        require_private=False,
+                        exact_membership=parent in self.closed_directories,
+                    )
+                )
+                for parent, expected in sorted(by_parent.items(), key=lambda item: str(item[0]))
+            ]
+
+            def verify() -> None:
+                for guard in guards:
+                    guard()
+
+            verify()
+            yield verify
+            verify()
 
 
-class _ForeignArtifactRef(_ForeignStrict):
-    role: str
-    path: str
-    sha256: str
-    size_bytes: int = Field(ge=0)
-    media_type: str | None = None
+_ACTIVE_EXTERNAL_COLLECTOR: ContextVar[_ExternalClosureCollector | None] = ContextVar(
+    "paper_reader_batch_write_external_collector",
+    default=None,
+)
 
 
-class _ForeignZoteroTarget(_ForeignStrict):
-    target_type: Literal["zotero"] = "zotero"
-    parent_key: str
-    parent_fingerprint: str
-    note_title: str
+def read_bytes(path: Path, *args, **kwargs) -> bytes:
+    raw = _read_bytes(path, *args, **kwargs)
+    collector = _ACTIVE_EXTERNAL_COLLECTOR.get()
+    if collector is not None:
+        collector.add(path, raw)
+    return raw
 
 
-class _ForeignGateBlocker(_ForeignStrict):
-    code: str
-    message: str
-    artifact_path: str | None = None
+def read_json_bytes(path: Path, *args, **kwargs) -> tuple[bytes, Any]:
+    raw, payload = _read_json_bytes(path, *args, **kwargs)
+    collector = _ACTIVE_EXTERNAL_COLLECTOR.get()
+    if collector is not None:
+        collector.add(path, raw)
+    return raw, payload
 
 
-class _ForeignGate(_ForeignStrict):
-    status: Literal["not_evaluated", "blocked", "passed", "write_ready"]
-    evaluated_at: str | None = None
-    checks: tuple[str, ...] = ()
-    blockers: tuple[_ForeignGateBlocker, ...] = ()
+@contextmanager
+def _collect_external_closure(*, code: str) -> Iterator[_ExternalClosureCollector]:
+    collector = _ExternalClosureCollector(code=code)
+    token = _ACTIVE_EXTERNAL_COLLECTOR.set(collector)
+    try:
+        yield collector
+    finally:
+        _ACTIVE_EXTERNAL_COLLECTOR.reset(token)
 
 
-class _ForeignLivePreflight(_ForeignStrict):
-    preflight_id: str
-    captured_at: str
-    parent_key: str
-    parent_fingerprint: str
-    requested_note_title: str
-    title_available: bool
-    matching_note_keys: tuple[str, ...]
-    parent_snapshot: _ForeignArtifactRef
-    children_snapshot: _ForeignArtifactRef
+def _active_collector_close(directory: Path, names: set[str]) -> None:
+    collector = _ACTIVE_EXTERNAL_COLLECTOR.get()
+    if collector is not None:
+        collector.close_directory(directory, names)
 
 
-class _ForeignMcpEnvelope(_ForeignStrict):
-    action: Literal["create"] = "create"
-    parentKey: str
-    content: str
-    tags: tuple[str, ...]
+@contextmanager
+def _locked_single_run_closure(
+    view: RunView,
+    *,
+    item_id: str,
+    authorization_sha256: str,
+    collector: _ExternalClosureCollector,
+    validate: Callable[[], None],
+) -> Iterator[Callable[[], None]]:
+    authorization_path = _authorization_path_for_digest(
+        view,
+        item_id=item_id,
+        authorization_sha256=authorization_sha256,
+    )
+    single_run_root = authorization_path.parent.parent
+    with locked_file(
+        single_run_root / ".run.lock",
+        create=False,
+        guard_parent_replacement=False,
+    ) as lock_descriptor, collector.hold() as closure_guard:
+        def verify() -> None:
+            validate_locked_path(single_run_root / ".run.lock", lock_descriptor)
+            closure_guard()
+
+        verify()
+        validate()
+        verify()
+        yield verify
 
 
-class _ForeignAuthorization(_ForeignStrict):
-    schema_version: Literal["paper_reader.write-authorization.v2"]
-    authorization_id: str
-    run_id: str
-    created_at: str
-    expires_at: str
-    ttl_seconds: int = Field(gt=0, le=300)
-    candidate: _ForeignArtifactRef
-    candidate_digest: str
-    target: _ForeignZoteroTarget
-    note_title: str
-    tags: tuple[str, ...]
-    content_html: str
-    content_sha256: str
-    content_length: int = Field(ge=0)
-    minimum_content_length: int = Field(ge=0)
-    required_headings: tuple[str, ...]
-    forbidden_headings: tuple[str, ...]
-    nonce: str
-    token_sha256: str
-    external_claim_id: str
-    write_attempt_id: str
-    mcp_envelope: _ForeignMcpEnvelope
-    artifacts: tuple[_ForeignArtifactRef, ...]
-    live_preflight: _ForeignLivePreflight
-    gate: _ForeignGate
+def _raise_input_error(existing_event, code: str, message: str) -> None:
+    if existing_event is not None:
+        raise BatchRuntimeError(
+            "idempotency_conflict",
+            "request id is already bound to different command input",
+        )
+    raise BatchRuntimeError(code, message)
 
 
-class _ForeignVerificationCheck(_ForeignStrict):
-    name: str
-    passed: bool
-    expected: Any | None = None
-    actual: Any | None = None
-    message: str | None = None
-
-
-class _ForeignVerification(_ForeignStrict):
-    schema_version: Literal["paper_reader.verification.v2"]
-    verification_id: str
-    run_id: str
-    created_at: str
-    authorization: _ForeignArtifactRef
-    authorization_digest: str
-    target: _ForeignZoteroTarget
-    note_key: str
-    verified: bool
-    content_sha256: str
-    content_length: int = Field(ge=0)
-    checks: tuple[_ForeignVerificationCheck, ...]
-    note_snapshot: _ForeignArtifactRef
-    checks_snapshot: _ForeignArtifactRef
-    artifacts: tuple[_ForeignArtifactRef, ...]
-    gate: _ForeignGate
-
-
-class _ForeignReconciliation(_ForeignStrict):
-    schema_version: Literal["paper_reader.reconciliation.v2"]
-    reconciliation_id: str
-    run_id: str
-    created_at: str
-    authorization: _ForeignArtifactRef
-    authorization_digest: str
-    target: _ForeignZoteroTarget
-    outcome: Literal["verified", "not_found", "ambiguous", "blocked"]
-    match_count: int = Field(ge=0)
-    matched_note_keys: tuple[str, ...]
-    children_snapshot: _ForeignArtifactRef
-    verification: _ForeignArtifactRef | None = None
-    retry_confirmation_required: bool
-    artifacts: tuple[_ForeignArtifactRef, ...]
-    gate: _ForeignGate
+def _ref_read_limit(size_bytes: object, *, code: str, json_artifact: bool) -> int:
+    if type(size_bytes) is not int or size_bytes < 0:
+        raise BatchRuntimeError(code, "artifact reference must declare non-negative integer size_bytes")
+    limit = MAX_JSON_ARTIFACT_BYTES if json_artifact else MAX_OPAQUE_ARTIFACT_BYTES
+    return min(size_bytes, limit)
 
 
 class _HeadingParser(HTMLParser):
@@ -191,7 +231,7 @@ class _HeadingParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs) -> None:
         lowered = tag.lower()
-        if lowered in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+        if lowered in {"h1", "h2"}:
             self.level = lowered
             self.parts = []
 
@@ -202,10 +242,10 @@ class _HeadingParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if self.level != tag.lower():
             return
-        text = unescape("".join(self.parts)).strip()
+        text = " ".join("".join(self.parts).split())
         if self.level == "h1" and not self.title:
             self.title = text
-        else:
+        elif self.level == "h2" and text:
             self.headings.append(text)
         self.level = None
         self.parts = []
@@ -215,7 +255,8 @@ def _verification_actuals(
     note_snapshot: dict[str, Any],
     *,
     note_key: str,
-    authorization: _ForeignAuthorization,
+    authorization: _OpaqueRecord,
+    invalid_code: str = "reconciliation_tampered",
 ) -> tuple[dict[str, bool], str, int]:
     data = note_snapshot.get("data")
     if not isinstance(data, dict):
@@ -224,11 +265,7 @@ def _verification_actuals(
     canonical_html = note_html.rstrip("\r\n")
     parser = _HeadingParser()
     parser.feed(note_html)
-    tags = {
-        str(entry.get("tag") or "").strip()
-        for entry in data.get("tags", [])
-        if isinstance(entry, dict) and str(entry.get("tag") or "").strip()
-    }
+    tags = _snapshot_tag_set(data, code=invalid_code)
     headings = set(parser.headings)
     actuals = {
         "note_key": (
@@ -246,6 +283,60 @@ def _verification_actuals(
         "content_sha256": sha256_bytes(canonical_html.encode("utf-8")) == authorization.content_sha256,
     }
     return actuals, sha256_bytes(canonical_html.encode("utf-8")), len(canonical_html)
+
+
+def _snapshot_tag_set(data: dict[str, Any], *, code: str) -> set[str]:
+    raw_tags = data.get("tags")
+    if not isinstance(raw_tags, list):
+        raise BatchRuntimeError(code, "Zotero note snapshot tags must be an array")
+    tags: set[str] = set()
+    for entry in raw_tags:
+        if not isinstance(entry, dict) or not isinstance(entry.get("tag"), str):
+            raise BatchRuntimeError(code, "Zotero note snapshot tags must contain tag objects")
+        tag = entry["tag"].strip()
+        if not tag:
+            raise BatchRuntimeError(code, "Zotero note snapshot tags must be non-empty strings")
+        tags.add(tag)
+    return tags
+
+
+def _reconciliation_exact_match_key(
+    child: object,
+    authorization: _OpaqueRecord,
+) -> str | None:
+    if not isinstance(child, dict):
+        raise BatchRuntimeError("reconciliation_tampered", "reconciliation child is not an object")
+    data = child.get("data")
+    if not isinstance(data, dict) or data.get("itemType") != "note":
+        return None
+    parent_key = str(data.get("parentItem") or "").strip()
+    note_html = str(data.get("note") or "")
+    parser = _HeadingParser()
+    parser.feed(note_html)
+    if (
+        parent_key != authorization.target.parent_key
+        or parser.title != authorization.note_title
+        or sha256_bytes(note_html.rstrip("\r\n").encode("utf-8"))
+        != authorization.content_sha256
+    ):
+        return None
+    top_note_key = str(child.get("key") or "").strip()
+    data_note_key = str(data.get("key") or "").strip()
+    if top_note_key and data_note_key and top_note_key != data_note_key:
+        raise BatchRuntimeError(
+            "reconciliation_tampered",
+            "exact reconciliation match has inconsistent note keys",
+        )
+    note_key = top_note_key or data_note_key
+    if (
+        not note_key
+        or _PORTABLE_IDENTIFIER.fullmatch(note_key) is None
+    ):
+        raise BatchRuntimeError(
+            "reconciliation_tampered",
+            "exact reconciliation match has an invalid or inconsistent note key",
+        )
+    return note_key
 
 
 def _parse_utc(value: str) -> datetime:
@@ -328,26 +419,34 @@ def _candidate_material(view: RunView, item_id: str) -> tuple[WorkerResult, byte
     result = _load_committed_worker_result(view, item_id)
     assert result.candidate is not None
     candidate_path = normalized_absolute_path(Path(result.candidate.path))
-    candidate_raw, candidate = read_json_bytes(candidate_path, code="candidate_unreadable")
+    candidate_raw, candidate = read_json_bytes(
+        candidate_path,
+        code="candidate_unreadable",
+        max_bytes=_ref_read_limit(
+            result.candidate.size_bytes,
+            code="candidate_tampered",
+            json_artifact=True,
+        ),
+    )
     if (
         not isinstance(candidate, dict)
         or candidate.get("schema_version") != "paper_reader.candidate.v2"
         or candidate_raw != canonical_json_bytes(candidate)
         or sha256_bytes(candidate_raw) != result.candidate.sha256
+        or len(candidate_raw) != result.candidate.size_bytes
         or candidate.get("candidate_id") != result.candidate.artifact_id
     ):
         raise BatchRuntimeError("candidate_tampered", "candidate main artifact identity or canonical bytes changed")
-    note_md = read_bytes(candidate_path.parent / "note.md", code="candidate_tampered")
-    note_html = read_bytes(candidate_path.parent / "note.html", code="candidate_tampered")
     artifacts = candidate.get("artifacts")
     if not isinstance(artifacts, list):
         raise BatchRuntimeError("candidate_tampered", "candidate artifacts are not a list")
-    expected_members = {
-        "note_markdown": (candidate_path.parent / "note.md", note_md),
-        "note_html": (candidate_path.parent / "note.html", note_html),
+    expected_paths = {
+        "note_markdown": (candidate_path.parent / "note.md", "text/markdown"),
+        "note_html": (candidate_path.parent / "note.html", "text/html"),
     }
     run_root = candidate_path.parent.parent.parent
-    for role, (path, raw) in expected_members.items():
+    members: dict[str, bytes] = {}
+    for role, (path, media_type) in expected_paths.items():
         refs = [ref for ref in artifacts if isinstance(ref, dict) and ref.get("role") == role]
         if len(refs) != 1:
             raise BatchRuntimeError("candidate_tampered", f"candidate must bind exactly one {role}")
@@ -356,12 +455,25 @@ def _candidate_material(view: RunView, item_id: str) -> tuple[WorkerResult, byte
             expected_path = run_root / str(ref["path"])
         except KeyError as exc:
             raise BatchRuntimeError("candidate_tampered", f"candidate {role} ref is incomplete") from exc
+        if normalized_absolute_path(expected_path) != path or ref.get("media_type") != media_type:
+            raise BatchRuntimeError("candidate_tampered", f"candidate {role} path/media type changed")
+        raw = read_bytes(
+            path,
+            code="candidate_tampered",
+            max_bytes=_ref_read_limit(
+                ref.get("size_bytes"),
+                code="candidate_tampered",
+                json_artifact=False,
+            ),
+        )
         if (
-            normalized_absolute_path(expected_path) != path
-            or ref.get("sha256") != sha256_bytes(raw)
+            ref.get("sha256") != sha256_bytes(raw)
             or ref.get("size_bytes") != len(raw)
         ):
             raise BatchRuntimeError("candidate_tampered", f"candidate {role} bytes changed")
+        members[role] = raw
+    note_md = members["note_markdown"]
+    note_html = members["note_html"]
     return result, candidate_raw, candidate, note_md, note_html
 
 
@@ -373,29 +485,60 @@ def _authorization_present_for_attempt(
 ) -> bool:
     if worker_result.paper_reader_run is None:
         raise BatchRuntimeError("journal_corrupt", "worker result is missing paper_reader run")
-    _raw, run = read_json_bytes(Path(worker_result.paper_reader_run.path), code="candidate_tampered")
+    _raw, run = read_json_bytes(
+        Path(worker_result.paper_reader_run.path),
+        code="candidate_tampered",
+        # run.json is the intentionally mutable single-paper root. The
+        # committed ref binds its stable path/run id, not its later byte size.
+        max_bytes=MAX_JSON_ARTIFACT_BYTES,
+    )
     if not isinstance(run, dict):
         raise BatchRuntimeError("candidate_tampered", "paper_reader run is not an object")
-    run_root = Path(worker_result.paper_reader_run.path).parent
+    run_root = normalized_absolute_path(Path(worker_result.paper_reader_run.path)).parent
     artifacts = run.get("artifacts")
     if not isinstance(artifacts, list):
         raise BatchRuntimeError("candidate_tampered", "paper_reader run artifacts are not a list")
     for ref in artifacts:
         if not isinstance(ref, dict) or ref.get("role") != "write_authorization":
             continue
-        path = normalized_absolute_path(run_root / str(ref.get("path", "")))
-        raw, authorization = read_json_bytes(path, code="authorization_tampered")
+        _validate_ref_payload(ref, code="authorization_tampered")
+        path = _safe_inner_path(run_root, str(ref["path"]), code="authorization_tampered")
+        relative = path.relative_to(run_root)
         if (
-            not isinstance(authorization, dict)
-            or authorization.get("schema_version") != "paper_reader.write-authorization.v2"
-            or raw != canonical_json_bytes(authorization)
+            relative.parent != Path("authorizations")
+            or path.suffix != ".json"
+            or _PORTABLE_IDENTIFIER.fullmatch(path.stem) is None
+            or ref.get("media_type") != "application/json"
+        ):
+            raise BatchRuntimeError(
+                "authorization_tampered",
+                "run-bound authorization path/topology is invalid",
+            )
+        raw, authorization = read_json_bytes(
+            path,
+            code="authorization_tampered",
+            max_bytes=_ref_read_limit(
+                ref.get("size_bytes"),
+                code="authorization_tampered",
+                json_artifact=True,
+            ),
+        )
+        record = _opaque_single_artifact(
+            raw,
+            authorization,
+            schema_version="paper_reader.write-authorization.v2",
+            code="authorization_tampered",
+            label="authorization",
+        )
+        if (
+            record.authorization_id != path.stem
             or ref.get("sha256") != sha256_bytes(raw)
             or ref.get("size_bytes") != len(raw)
         ):
             raise BatchRuntimeError("authorization_tampered", "run-bound authorization changed")
         if (
-            authorization.get("external_claim_id") == claim_id
-            and authorization.get("write_attempt_id") == write_attempt_id
+            record.external_claim_id == claim_id
+            and record.write_attempt_id == write_attempt_id
         ):
             return True
     return False
@@ -415,14 +558,28 @@ def _safe_inner_path(root: Path, value: str, *, code: str) -> Path:
 
 def _ref_bytes(
     run_root: Path,
-    ref: _ForeignArtifactRef,
+    ref: object,
     *,
     code: str,
 ) -> tuple[Path, bytes]:
-    path = _safe_inner_path(run_root, ref.path, code=code)
-    raw = read_bytes(path, code=code)
-    if ref.sha256 != sha256_bytes(raw) or ref.size_bytes != len(raw):
-        raise BatchRuntimeError(code, f"artifact ref digest/size changed: {ref.path}")
+    payload = _plain(ref)
+    _validate_ref_payload(payload, code=code)
+    assert isinstance(payload, dict)
+    path_value = str(payload["path"])
+    path = _safe_inner_path(run_root, path_value, code=code)
+    raw = read_bytes(
+        path,
+        code=code,
+        max_bytes=_ref_read_limit(
+            payload["size_bytes"],
+            code=code,
+            json_artifact=(
+                payload.get("media_type") == "application/json" or path_value.endswith(".json")
+            ),
+        ),
+    )
+    if payload["sha256"] != sha256_bytes(raw) or payload["size_bytes"] != len(raw):
+        raise BatchRuntimeError(code, f"artifact ref digest/size changed: {path_value}")
     return path, raw
 
 
@@ -441,6 +598,261 @@ def _parse_json_bytes(raw: bytes, *, code: str, label: str) -> Any:
         raise BatchRuntimeError(code, f"{label} is invalid JSON") from exc
 
 
+def _opaque_single_artifact(
+    raw: bytes,
+    payload: object,
+    *,
+    schema_version: str,
+    code: str,
+    label: str,
+) -> _OpaqueRecord:
+    if not isinstance(payload, dict) or payload.get("schema_version") != schema_version:
+        raise BatchRuntimeError("unsupported_run_schema", f"{label} schema is not {schema_version}")
+    if raw != canonical_json_bytes(payload):
+        raise BatchRuntimeError(code, f"{label} is not canonical JSON")
+    _validate_consumed_single_fields(payload, schema_version=schema_version, code=code)
+    return _OpaqueRecord(payload)
+
+
+def _required_string(payload: dict[str, Any], field: str, *, code: str) -> str:
+    value = payload.get(field)
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise BatchRuntimeError(code, f"{field} must be a non-empty string")
+    return value
+
+
+def _required_int(
+    payload: dict[str, Any],
+    field: str,
+    *,
+    code: str,
+    minimum: int = 0,
+    maximum: int | None = None,
+) -> int:
+    value = payload.get(field)
+    if type(value) is not int or value < minimum or (maximum is not None and value > maximum):
+        raise BatchRuntimeError(code, f"{field} must be an integer in its allowed range")
+    return value
+
+
+def _required_bool(payload: dict[str, Any], field: str, *, code: str) -> bool:
+    value = payload.get(field)
+    if type(value) is not bool:
+        raise BatchRuntimeError(code, f"{field} must be a boolean")
+    return value
+
+
+def _required_object(payload: dict[str, Any], field: str, *, code: str) -> dict[str, Any]:
+    value = payload.get(field)
+    if not isinstance(value, dict):
+        raise BatchRuntimeError(code, f"{field} must be a JSON object")
+    return value
+
+
+def _required_array(payload: dict[str, Any], field: str, *, code: str) -> list[Any]:
+    value = payload.get(field)
+    if not isinstance(value, list):
+        raise BatchRuntimeError(code, f"{field} must be a JSON array")
+    return value
+
+
+def _string_array(payload: dict[str, Any], field: str, *, code: str) -> list[str]:
+    values = _required_array(payload, field, code=code)
+    if any(not isinstance(value, str) or "\x00" in value for value in values):
+        raise BatchRuntimeError(code, f"{field} must contain only strings")
+    return values
+
+
+def _nonempty_string_array(payload: dict[str, Any], field: str, *, code: str) -> list[str]:
+    values = _string_array(payload, field, code=code)
+    if any(not value for value in values):
+        raise BatchRuntimeError(code, f"{field} must contain only non-empty strings")
+    return values
+
+
+def _validate_ref_payload(value: object, *, code: str) -> None:
+    if not isinstance(value, dict):
+        raise BatchRuntimeError(code, "artifact reference must be a JSON object")
+    _required_string(value, "role", code=code)
+    _required_string(value, "path", code=code)
+    digest = _required_string(value, "sha256", code=code)
+    _require_sha256(digest, label="artifact reference hash", code=code)
+    _required_int(value, "size_bytes", code=code)
+    media_type = value.get("media_type")
+    if media_type is not None and (not isinstance(media_type, str) or not media_type):
+        raise BatchRuntimeError(code, "artifact reference media_type must be a string or null")
+
+
+def _validate_target_payload(value: object, *, code: str) -> None:
+    if not isinstance(value, dict) or value.get("target_type") != "zotero":
+        raise BatchRuntimeError(code, "target must be a Zotero target object")
+    _required_string(value, "parent_key", code=code)
+    _require_sha256(
+        _required_string(value, "parent_fingerprint", code=code),
+        label="parent fingerprint",
+        code=code,
+    )
+    _required_string(value, "note_title", code=code)
+
+
+def _validate_gate_payload(value: object, *, code: str) -> None:
+    if not isinstance(value, dict):
+        raise BatchRuntimeError(code, "gate must be a JSON object")
+    if value.get("status") not in {"not_evaluated", "blocked", "passed", "write_ready"}:
+        raise BatchRuntimeError(code, "gate status is invalid")
+    _required_array(value, "blockers", code=code)
+
+
+def _validate_authorization_payload(payload: dict[str, Any], *, code: str) -> None:
+    for field in (
+        "authorization_id",
+        "run_id",
+        "created_at",
+        "expires_at",
+        "candidate_digest",
+        "note_title",
+        "content_html",
+        "content_sha256",
+        "nonce",
+        "token_sha256",
+        "external_claim_id",
+        "write_attempt_id",
+    ):
+        _required_string(payload, field, code=code)
+    _required_int(payload, "ttl_seconds", code=code, minimum=1, maximum=300)
+    _required_int(payload, "content_length", code=code)
+    _required_int(payload, "minimum_content_length", code=code)
+    _string_array(payload, "tags", code=code)
+    _string_array(payload, "required_headings", code=code)
+    _string_array(payload, "forbidden_headings", code=code)
+    _validate_ref_payload(payload.get("candidate"), code=code)
+    _validate_target_payload(payload.get("target"), code=code)
+    artifacts = _required_array(payload, "artifacts", code=code)
+    for ref in artifacts:
+        _validate_ref_payload(ref, code=code)
+    envelope = _required_object(payload, "mcp_envelope", code=code)
+    if envelope.get("action") != "create":
+        raise BatchRuntimeError(code, "MCP envelope action must be create")
+    _required_string(envelope, "parentKey", code=code)
+    _required_string(envelope, "content", code=code)
+    _string_array(envelope, "tags", code=code)
+    live = _required_object(payload, "live_preflight", code=code)
+    for field in (
+        "parent_key",
+        "parent_fingerprint",
+        "requested_note_title",
+    ):
+        _required_string(live, field, code=code)
+    _required_bool(live, "title_available", code=code)
+    _nonempty_string_array(live, "matching_note_keys", code=code)
+    _validate_ref_payload(live.get("parent_snapshot"), code=code)
+    _validate_ref_payload(live.get("children_snapshot"), code=code)
+    _validate_gate_payload(payload.get("gate"), code=code)
+
+
+def _validate_verification_payload(payload: dict[str, Any], *, code: str) -> None:
+    for field in (
+        "verification_id",
+        "run_id",
+        "authorization_digest",
+        "note_key",
+        "content_sha256",
+    ):
+        _required_string(payload, field, code=code)
+    _required_bool(payload, "verified", code=code)
+    _required_int(payload, "content_length", code=code)
+    _validate_ref_payload(payload.get("authorization"), code=code)
+    _validate_target_payload(payload.get("target"), code=code)
+    _validate_ref_payload(payload.get("note_snapshot"), code=code)
+    _validate_ref_payload(payload.get("checks_snapshot"), code=code)
+    checks = _required_array(payload, "checks", code=code)
+    for check in checks:
+        if not isinstance(check, dict):
+            raise BatchRuntimeError(code, "verification checks must be JSON objects")
+        _required_string(check, "name", code=code)
+        _required_bool(check, "passed", code=code)
+    artifacts = _required_array(payload, "artifacts", code=code)
+    for ref in artifacts:
+        _validate_ref_payload(ref, code=code)
+    _validate_gate_payload(payload.get("gate"), code=code)
+
+
+def _validate_reconciliation_payload(payload: dict[str, Any], *, code: str) -> None:
+    for field in (
+        "run_id",
+        "authorization_digest",
+    ):
+        _required_string(payload, field, code=code)
+    if payload.get("outcome") not in {"verified", "not_found", "ambiguous", "blocked"}:
+        raise BatchRuntimeError(code, "reconciliation outcome is invalid")
+    _required_int(payload, "match_count", code=code)
+    _required_bool(payload, "retry_confirmation_required", code=code)
+    _nonempty_string_array(payload, "matched_note_keys", code=code)
+    _validate_ref_payload(payload.get("authorization"), code=code)
+    _validate_target_payload(payload.get("target"), code=code)
+    _validate_ref_payload(payload.get("children_snapshot"), code=code)
+    verification = payload.get("verification")
+    if verification is not None:
+        _validate_ref_payload(verification, code=code)
+    artifacts = _required_array(payload, "artifacts", code=code)
+    for ref in artifacts:
+        _validate_ref_payload(ref, code=code)
+    _validate_gate_payload(payload.get("gate"), code=code)
+
+
+def _validate_consumed_single_fields(
+    payload: dict[str, Any],
+    *,
+    schema_version: str,
+    code: str,
+) -> None:
+    if schema_version == "paper_reader.write-authorization.v2":
+        _validate_authorization_payload(payload, code=code)
+    elif schema_version == "paper_reader.verification.v2":
+        _validate_verification_payload(payload, code=code)
+    elif schema_version == "paper_reader.reconciliation.v2":
+        _validate_reconciliation_payload(payload, code=code)
+
+
+def _authorization_fingerprint_material(
+    view: RunView,
+    *,
+    item_id: str,
+    authorization_path: Path,
+) -> tuple[Path, bytes]:
+    worker_result = _load_committed_worker_result(view, item_id)
+    if worker_result.paper_reader_run is None:
+        raise BatchRuntimeError("journal_corrupt", "worker result lacks its paper_reader run")
+    run_root = normalized_absolute_path(Path(worker_result.paper_reader_run.path)).parent
+    path = normalized_absolute_path(authorization_path)
+    try:
+        relative = path.relative_to(run_root)
+    except ValueError as exc:
+        raise BatchRuntimeError("authorization_tampered", "authorization is outside the candidate run") from exc
+    if (
+        len(relative.parts) != 2
+        or relative.parts[0] != "authorizations"
+        or path.suffix != ".json"
+        or _PORTABLE_IDENTIFIER.fullmatch(path.stem) is None
+    ):
+        raise BatchRuntimeError("authorization_tampered", "authorization path/topology is not deterministic")
+    raw, payload = read_json_bytes(
+        path,
+        code="authorization_tampered",
+        max_bytes=MAX_JSON_ARTIFACT_BYTES,
+    )
+    authorization = _opaque_single_artifact(
+        raw,
+        payload,
+        schema_version="paper_reader.write-authorization.v2",
+        code="authorization_tampered",
+        label="authorization",
+    )
+    if authorization.authorization_id != path.stem:
+        raise BatchRuntimeError("authorization_tampered", "authorization id differs from its path")
+    return path, raw
+
+
 def _load_authorization(
     view: RunView,
     *,
@@ -448,7 +860,7 @@ def _load_authorization(
     authorization_path: Path,
     claim_id: str,
     write_attempt_id: str,
-) -> tuple[Path, bytes, _ForeignAuthorization, dict[str, Any]]:
+) -> tuple[Path, bytes, _OpaqueRecord, dict[str, Any]]:
     worker_result, candidate_raw, candidate, _note_md, note_html = _candidate_material(view, item_id)
     if worker_result.paper_reader_run is None or worker_result.candidate is None:
         raise BatchRuntimeError("journal_corrupt", "worker result lacks run/candidate artifacts")
@@ -459,25 +871,31 @@ def _load_authorization(
         relative = path.relative_to(paper_run_root)
     except ValueError as exc:
         raise BatchRuntimeError("authorization_tampered", "authorization is outside the candidate run") from exc
-    raw, payload = read_json_bytes(path, code="authorization_tampered")
-    if not isinstance(payload, dict) or payload.get("schema_version") != "paper_reader.write-authorization.v2":
-        raise BatchRuntimeError("unsupported_run_schema", "authorization schema is not paper_reader.write-authorization.v2")
-    try:
-        authorization = _ForeignAuthorization.model_validate_json(raw)
-    except ValidationError as exc:
-        raise BatchRuntimeError("authorization_tampered", "authorization failed strict validation") from exc
-    if raw != canonical_json_bytes(authorization):
-        raise BatchRuntimeError("authorization_tampered", "authorization is not canonical JSON")
     if (
-        relative.parts != ("authorizations", f"{authorization.authorization_id}.json")
-        or path.name != f"{authorization.authorization_id}.json"
+        len(relative.parts) != 2
+        or relative.parts[0] != "authorizations"
+        or path.suffix != ".json"
+        or _PORTABLE_IDENTIFIER.fullmatch(path.stem) is None
+    ):
+        raise BatchRuntimeError("authorization_tampered", "authorization path/topology is not deterministic")
+    raw, payload = read_json_bytes(path, code="authorization_tampered")
+    authorization = _opaque_single_artifact(
+        raw,
+        payload,
+        schema_version="paper_reader.write-authorization.v2",
+        code="authorization_tampered",
+        label="authorization",
+    )
+    if (
+        authorization.authorization_id != path.stem
+        or relative.parts != ("authorizations", f"{authorization.authorization_id}.json")
     ):
         raise BatchRuntimeError("authorization_tampered", "authorization path/topology is not deterministic")
     sidecar = path.with_suffix("")
     expected_names = {"candidate.json", "children.json", "content.html", "parent.json", "record.json"}
     if set(list_directory(sidecar)) != expected_names:
         raise BatchRuntimeError("authorization_tampered", "authorization sidecar is not the fixed five-file closure")
-    by_role: dict[str, _ForeignArtifactRef] = {}
+    by_role: dict[str, _OpaqueRecord] = {}
     for ref in authorization.artifacts:
         if ref.role in by_role:
             raise BatchRuntimeError("authorization_tampered", "authorization repeats an artifact role")
@@ -497,8 +915,13 @@ def _load_authorization(
         if member_path != sidecar / name or ref.media_type != media_type:
             raise BatchRuntimeError("authorization_tampered", f"authorization {role} path/media type changed")
         sidecar_bytes[name] = member_raw
-    if read_bytes(sidecar / "record.json", code="authorization_tampered") != raw:
+    if read_bytes(
+        sidecar / "record.json",
+        code="authorization_tampered",
+        max_bytes=len(raw),
+    ) != raw:
         raise BatchRuntimeError("authorization_tampered", "authorization recovery record differs from main artifact")
+    _active_collector_close(sidecar, expected_names)
     candidate_ref = by_role["candidate_snapshot"]
     if authorization.candidate != candidate_ref or sidecar_bytes["candidate.json"] != candidate_raw:
         raise BatchRuntimeError("authorization_tampered", "authorization candidate snapshot differs from batch candidate")
@@ -510,7 +933,7 @@ def _load_authorization(
         authorization.run_id != candidate.get("run_id")
         or authorization.candidate_digest != worker_result.candidate.sha256
         or authorization.candidate_digest != sha256_bytes(candidate_raw)
-        or authorization.target.model_dump(mode="json") != candidate_target
+        or _plain(authorization.target) != candidate_target
         or authorization.note_title != candidate.get("note_title")
         or list(authorization.tags) != candidate.get("tags")
         or authorization.content_html.encode("utf-8") != note_html
@@ -521,7 +944,7 @@ def _load_authorization(
         or authorization.minimum_content_length > authorization.content_length
         or authorization.external_claim_id != claim_id
         or authorization.write_attempt_id != write_attempt_id
-        or authorization.mcp_envelope.model_dump(mode="json")
+        or _plain(authorization.mcp_envelope)
         != {
             "action": "create",
             "parentKey": authorization.target.parent_key,
@@ -566,25 +989,18 @@ def _load_authorization(
         or not isinstance(children_payload, list)
     ):
         raise BatchRuntimeError("authorization_tampered", "authorization live snapshots are not canonical")
-    parent_data = parent_payload.get("data")
-    if not isinstance(parent_data, dict):
-        raise BatchRuntimeError("authorization_tampered", "authorization parent snapshot is malformed")
-    parent_key = str(parent_payload.get("key") or parent_data.get("key") or "").strip()
-    parent_title = str(parent_data.get("title") or "").strip()
-    parent_doi = str(parent_data.get("DOI") or "").strip()
-    parent_version = parent_payload.get("version", parent_data.get("version"))
+    try:
+        parent_key, _title, _doi, _version, parent_digest = _consumed_parent_fingerprint(
+            parent_payload
+        )
+    except BatchRuntimeError as exc:
+        raise BatchRuntimeError(
+            "authorization_tampered",
+            "authorization parent snapshot is malformed",
+        ) from exc
     if (
         parent_key != authorization.target.parent_key
-        or type(parent_version) is not int
-        or canonical_sha256(
-            {
-                "key": parent_key,
-                "title": parent_title.casefold(),
-                "DOI": parent_doi.casefold(),
-                "version": parent_version,
-            }
-        )
-        != authorization.target.parent_fingerprint
+        or parent_digest != authorization.target.parent_fingerprint
     ):
         raise BatchRuntimeError("authorization_tampered", "authorization parent fingerprint changed")
     for child in children_payload:
@@ -600,7 +1016,11 @@ def _load_authorization(
         child_parser.feed(str(child_data.get("note") or ""))
         if child_parser.title == authorization.note_title:
             raise BatchRuntimeError("authorization_tampered", "authorization title was not available in live snapshot")
-    paper_run_raw, paper_run = read_json_bytes(paper_run_path, code="authorization_tampered")
+    paper_run_raw, paper_run = read_json_bytes(
+        paper_run_path,
+        code="authorization_tampered",
+        max_bytes=MAX_JSON_ARTIFACT_BYTES,
+    )
     if not isinstance(paper_run, dict) or paper_run_raw != canonical_json_bytes(paper_run):
         raise BatchRuntimeError("authorization_tampered", "paper_reader run is not canonical")
     run_refs = [
@@ -639,7 +1059,11 @@ def _authorization_path_for_digest(
         raise BatchRuntimeError("journal_corrupt", "worker result is missing paper_reader run")
     paper_run_path = normalized_absolute_path(Path(worker_result.paper_reader_run.path))
     run_root = paper_run_path.parent
-    _raw, run = read_json_bytes(paper_run_path, code="authorization_tampered")
+    _raw, run = read_json_bytes(
+        paper_run_path,
+        code="authorization_tampered",
+        max_bytes=MAX_JSON_ARTIFACT_BYTES,
+    )
     if not isinstance(run, dict) or not isinstance(run.get("artifacts"), list):
         raise BatchRuntimeError("authorization_tampered", "paper_reader run artifacts are invalid")
     matches: list[Path] = []
@@ -650,10 +1074,48 @@ def _authorization_path_for_digest(
             or ref.get("sha256") != authorization_sha256
         ):
             continue
+        _validate_ref_payload(ref, code="authorization_tampered")
         path = _safe_inner_path(run_root, str(ref.get("path", "")), code="authorization_tampered")
-        raw = read_bytes(path, code="authorization_tampered")
+        relative = path.relative_to(run_root)
+        if (
+            len(relative.parts) != 2
+            or relative.parts[0] != "authorizations"
+            or path.suffix != ".json"
+            or _PORTABLE_IDENTIFIER.fullmatch(path.stem) is None
+            or ref.get("media_type") != "application/json"
+        ):
+            raise BatchRuntimeError(
+                "authorization_tampered",
+                "run-bound authorization path/topology is invalid",
+            )
+        raw = read_bytes(
+            path,
+            code="authorization_tampered",
+            max_bytes=_ref_read_limit(
+                ref.get("size_bytes"),
+                code="authorization_tampered",
+                json_artifact=True,
+            ),
+        )
         if len(raw) != ref.get("size_bytes") or sha256_bytes(raw) != authorization_sha256:
             raise BatchRuntimeError("authorization_tampered", "run-bound authorization bytes changed")
+        payload = _parse_json_bytes(
+            raw,
+            code="authorization_tampered",
+            label="run-bound authorization",
+        )
+        authorization = _opaque_single_artifact(
+            raw,
+            payload,
+            schema_version="paper_reader.write-authorization.v2",
+            code="authorization_tampered",
+            label="run-bound authorization",
+        )
+        if authorization.authorization_id != path.stem:
+            raise BatchRuntimeError(
+                "authorization_tampered",
+                "run-bound authorization id differs from its deterministic path",
+            )
         matches.append(path)
     if len(matches) != 1:
         raise BatchRuntimeError(
@@ -669,29 +1131,44 @@ def _load_verification(
     item_id: str,
     verification_ref,
     authorization_raw: bytes,
-    authorization: _ForeignAuthorization,
-) -> tuple[Path, bytes, _ForeignVerification]:
-    path = normalized_absolute_path(Path(verification_ref.path))
-    raw, payload = read_json_bytes(path, code="verification_tampered")
-    if not isinstance(payload, dict) or payload.get("schema_version") != "paper_reader.verification.v2":
-        raise BatchRuntimeError("unsupported_run_schema", "verification schema is not paper_reader.verification.v2")
-    try:
-        verification = _ForeignVerification.model_validate_json(raw)
-    except ValidationError as exc:
-        raise BatchRuntimeError("verification_tampered", "verification failed strict validation") from exc
-    if (
-        raw != canonical_json_bytes(verification)
-        or sha256_bytes(raw) != verification_ref.sha256
-        or len(raw) != verification_ref.size_bytes
-        or verification_ref.schema_version != "paper_reader.verification.v2"
-        or verification_ref.artifact_id != verification.verification_id
-    ):
-        raise BatchRuntimeError("verification_tampered", "verification outer ref or canonical bytes changed")
+    authorization: _OpaqueRecord,
+) -> tuple[Path, bytes, _OpaqueRecord]:
     worker_result = _load_committed_worker_result(view, item_id)
     if worker_result.paper_reader_run is None:
         raise BatchRuntimeError("journal_corrupt", "worker result is missing paper_reader run")
     paper_run_path = normalized_absolute_path(Path(worker_result.paper_reader_run.path))
     paper_run_root = paper_run_path.parent
+    path = normalized_absolute_path(Path(verification_ref.path))
+    expected_parent = paper_run_root / "verifications" / authorization.authorization_id
+    if (
+        path.parent != expected_parent
+        or path.suffix != ".json"
+        or _PORTABLE_IDENTIFIER.fullmatch(path.stem) is None
+    ):
+        raise BatchRuntimeError("verification_tampered", "verification path/topology is not deterministic")
+    raw, payload = read_json_bytes(
+        path,
+        code="verification_tampered",
+        max_bytes=_ref_read_limit(
+            verification_ref.size_bytes,
+            code="verification_tampered",
+            json_artifact=True,
+        ),
+    )
+    verification = _opaque_single_artifact(
+        raw,
+        payload,
+        schema_version="paper_reader.verification.v2",
+        code="verification_tampered",
+        label="verification",
+    )
+    if (
+        sha256_bytes(raw) != verification_ref.sha256
+        or len(raw) != verification_ref.size_bytes
+        or verification_ref.schema_version != "paper_reader.verification.v2"
+        or verification_ref.artifact_id != verification.verification_id
+    ):
+        raise BatchRuntimeError("verification_tampered", "verification outer ref or canonical bytes changed")
     expected_path = (
         paper_run_root
         / "verifications"
@@ -703,7 +1180,7 @@ def _load_verification(
     sidecar = path.with_suffix("")
     if set(list_directory(sidecar)) != {"authorization.json", "checks.json", "note.json", "record.json"}:
         raise BatchRuntimeError("verification_tampered", "verification sidecar is not the fixed four-file closure")
-    by_role: dict[str, _ForeignArtifactRef] = {}
+    by_role: dict[str, _OpaqueRecord] = {}
     for ref in verification.artifacts:
         if ref.role in by_role:
             raise BatchRuntimeError("verification_tampered", "verification repeats an artifact role")
@@ -723,13 +1200,22 @@ def _load_verification(
             raise BatchRuntimeError("verification_tampered", f"verification {role} path/media type changed")
         members[name] = member_raw
     if (
-        read_bytes(sidecar / "record.json", code="verification_tampered") != raw
+        read_bytes(
+            sidecar / "record.json",
+            code="verification_tampered",
+            max_bytes=len(raw),
+        )
+        != raw
         or members["authorization.json"] != authorization_raw
         or verification.authorization != by_role["authorization_snapshot"]
         or verification.note_snapshot != by_role["zotero_note_readback"]
         or verification.checks_snapshot != by_role["verification_checks"]
     ):
         raise BatchRuntimeError("verification_tampered", "verification sidecar bindings changed")
+    _active_collector_close(
+        sidecar,
+        {"authorization.json", "checks.json", "note.json", "record.json"},
+    )
     note_snapshot = _parse_json_bytes(
         members["note.json"],
         code="verification_tampered",
@@ -768,7 +1254,7 @@ def _load_verification(
         or checks_snapshot.get("authorization_digest") != sha256_bytes(authorization_raw)
         or checks_snapshot.get("note_key") != verification.note_key
         or checks_snapshot.get("checks")
-        != [check.model_dump(mode="json") for check in verification.checks]
+        != [_plain(check) for check in verification.checks]
     ):
         raise BatchRuntimeError("verification_failed", "verification does not contain the complete passed check set")
     data = note_snapshot.get("data")
@@ -778,11 +1264,7 @@ def _load_verification(
     canonical_html = note_html.rstrip("\r\n")
     parser = _HeadingParser()
     parser.feed(note_html)
-    tags = {
-        str(entry.get("tag") or "").strip()
-        for entry in data.get("tags", [])
-        if isinstance(entry, dict) and str(entry.get("tag") or "").strip()
-    }
+    tags = _snapshot_tag_set(data, code="verification_failed")
     missing_headings = [heading for heading in authorization.required_headings if heading not in parser.headings]
     forbidden_headings = [heading for heading in authorization.forbidden_headings if heading in parser.headings]
     if (
@@ -807,7 +1289,11 @@ def _load_verification(
         or verification.content_sha256 != authorization.content_sha256
     ):
         raise BatchRuntimeError("verification_failed", "verification readback fails strong authorization checks")
-    paper_run_raw, paper_run = read_json_bytes(paper_run_path, code="verification_tampered")
+    paper_run_raw, paper_run = read_json_bytes(
+        paper_run_path,
+        code="verification_tampered",
+        max_bytes=MAX_JSON_ARTIFACT_BYTES,
+    )
     if not isinstance(paper_run, dict) or paper_run_raw != canonical_json_bytes(paper_run):
         raise BatchRuntimeError("verification_tampered", "paper_reader run is not canonical")
     relative = path.relative_to(paper_run_root).as_posix()
@@ -855,14 +1341,19 @@ def claim_write(
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
+    preflight, canonical_request_id, existing_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="write.claim",
+    )
     if not writer_id.strip():
-        raise BatchRuntimeError("invalid_writer", "writer id must not be empty")
+        _raise_input_error(existing_event, "invalid_writer", "writer id must not be empty")
     if type(lease_seconds) is not int or not 1 <= lease_seconds <= MAX_WRITE_LEASE_SECONDS:
-        raise BatchRuntimeError(
+        _raise_input_error(
+            existing_event,
             "invalid_lease",
             f"write lease seconds must be between 1 and {MAX_WRITE_LEASE_SECONDS}",
         )
-    preflight = load_run_view(run_dir)
     fingerprint = canonical_sha256(
         {
             "command": "write.claim",
@@ -915,7 +1406,7 @@ def claim_write(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
         expected_run_dir_identity=preflight.run_dir_identity,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="write.claim",
         request_fingerprint=fingerprint,
         occurred_at=now,
@@ -1004,12 +1495,17 @@ def renew_write(
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
+    preflight, canonical_request_id, existing_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="write.renew",
+    )
     if type(lease_seconds) is not int or not 1 <= lease_seconds <= MAX_WRITE_LEASE_SECONDS:
-        raise BatchRuntimeError(
+        _raise_input_error(
+            existing_event,
             "invalid_lease",
             f"write lease seconds must be between 1 and {MAX_WRITE_LEASE_SECONDS}",
         )
-    preflight = load_run_view(run_dir)
     token_sha256 = sha256_bytes(lease_token.encode())
     fingerprint = canonical_sha256(
         {
@@ -1063,7 +1559,7 @@ def renew_write(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
         expected_run_dir_identity=preflight.run_dir_identity,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="write.renew",
         request_fingerprint=fingerprint,
         occurred_at=now,
@@ -1085,7 +1581,11 @@ def release_write(
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
-    preflight = load_run_view(run_dir)
+    preflight, canonical_request_id, _existing_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="write.release",
+    )
     token_sha256 = sha256_bytes(lease_token.encode())
     fingerprint = canonical_sha256(
         {
@@ -1135,7 +1635,7 @@ def release_write(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
         expected_run_dir_identity=preflight.run_dir_identity,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="write.release",
         request_fingerprint=fingerprint,
         occurred_at=now,
@@ -1148,7 +1648,7 @@ def release_write(
 def _begin_result(
     view: RunView,
     data: WriteStartedData,
-    authorization: _ForeignAuthorization,
+    authorization: _OpaqueRecord,
 ) -> dict[str, Any]:
     return {
         "run_dir": str(view.run_dir),
@@ -1162,7 +1662,7 @@ def _begin_result(
         "authorization_nonce_sha256": data.authorization_nonce_sha256,
         "external_claim_id": data.external_claim_id,
         "started_at": data.started_at,
-        "mcp_envelope": authorization.mcp_envelope.model_dump(mode="json"),
+        "mcp_envelope": _plain(authorization.mcp_envelope),
         "delivery_rule": "send_only_when_command_result.replayed_is_false",
     }
 
@@ -1170,7 +1670,7 @@ def _begin_result(
 def validate_write_started_artifacts(
     view: RunView,
     data: WriteStartedData,
-) -> _ForeignAuthorization:
+) -> _OpaqueRecord:
     item = next((entry for entry in view.state.items if entry.item_id == data.item_id), None)
     if item is None:
         raise BatchRuntimeError("unknown_item", f"unknown item id: {data.item_id}")
@@ -1229,16 +1729,27 @@ def begin_write(
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
-    preflight = load_run_view(run_dir)
-    normalized_authorization_path, authorization_raw, _authorization, _candidate = _load_authorization(
-        preflight,
-        item_id=item_id,
-        authorization_path=authorization_path,
-        claim_id=claim_id,
-        write_attempt_id=write_attempt_id,
+    preflight, canonical_request_id, existing_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="write.begin",
     )
+    if existing_event is None:
+        normalized_authorization_path, authorization_raw = _authorization_fingerprint_material(
+            preflight,
+            item_id=item_id,
+            authorization_path=authorization_path,
+        )
+        authorization_sha256 = sha256_bytes(authorization_raw)
+    else:
+        if not isinstance(existing_event.data, WriteStartedData):
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "write begin request is bound to an unexpected event payload",
+            )
+        normalized_authorization_path = normalized_absolute_path(authorization_path)
+        authorization_sha256 = existing_event.data.authorization_sha256
     token_sha256 = sha256_bytes(lease_token.encode())
-    authorization_sha256 = sha256_bytes(authorization_raw)
     fingerprint = canonical_sha256(
         {
             "command": "write.begin",
@@ -1254,8 +1765,17 @@ def begin_write(
             "now_override": now,
         }
     )
+    if existing_event is not None and existing_event.request_fingerprint != fingerprint:
+        raise BatchRuntimeError(
+            "idempotency_conflict",
+            "request id is already bound to different write begin input",
+        )
+
+    proposed_data: WriteStartedData | None = None
+    proposed_collector: _ExternalClosureCollector | None = None
 
     def propose(view: RunView, transaction_time: str) -> ProposedTransition:
+        nonlocal proposed_data, proposed_collector
         item, lease = _active_write_lease(
             view,
             item_id=item_id,
@@ -1266,37 +1786,111 @@ def begin_write(
             now=transaction_time,
             allowed_statuses={"claimed"},
         )
-        _path, current_raw, authorization, _candidate_payload = _load_authorization(
+        with _collect_external_closure(code="authorization_tampered") as collector:
+            _path, current_raw, authorization, _candidate_payload = _load_authorization(
+                view,
+                item_id=item_id,
+                authorization_path=normalized_authorization_path,
+                claim_id=claim_id,
+                write_attempt_id=write_attempt_id,
+            )
+            if sha256_bytes(current_raw) != authorization_sha256:
+                raise BatchRuntimeError("authorization_tampered", "authorization changed before write begin")
+            if _parse_utc(authorization.expires_at) - _parse_utc(transaction_time) < timedelta(
+                seconds=MIN_AUTHORIZATION_REMAINING_SECONDS
+            ):
+                raise BatchRuntimeError(
+                    "authorization_expiring",
+                    f"authorization must retain at least {MIN_AUTHORIZATION_REMAINING_SECONDS} seconds",
+                )
+            data = WriteStartedData(
+                item_id=item_id,
+                writer_id=writer_id,
+                claim_id=claim_id,
+                write_attempt_id=write_attempt_id,
+                attempt_number=lease.attempt_number,
+                lease_token_sha256=token_sha256,
+                candidate_sha256=item.candidate_sha256,
+                authorization_sha256=authorization_sha256,
+                authorization_nonce_sha256=sha256_bytes(authorization.nonce.encode()),
+                external_claim_id=claim_id,
+                started_at=transaction_time,
+            )
+            validate_write_started_artifacts(view, data)
+        collector.freeze()
+        proposed_data = data
+        proposed_collector = collector
+        return ProposedTransition(data=data, result=_begin_result(view, data, authorization))
+
+    def commit_validate(view: RunView) -> None:
+        if proposed_data is None or proposed_collector is None:
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "write begin proposal lost its validated event data",
+            )
+        validate_write_started_artifacts(view, proposed_data)
+
+    def final_freshness_validate(view: RunView, effective_now: str) -> None:
+        if proposed_data is None:
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "write begin proposal lost its validated event data",
+            )
+        _active_write_lease(
             view,
             item_id=item_id,
-            authorization_path=normalized_authorization_path,
+            writer_id=writer_id,
             claim_id=claim_id,
+            lease_token=lease_token,
             write_attempt_id=write_attempt_id,
+            now=effective_now,
+            allowed_statuses={"claimed"},
         )
-        if sha256_bytes(current_raw) != authorization_sha256:
-            raise BatchRuntimeError("authorization_tampered", "authorization changed before write begin")
-        if _parse_utc(authorization.expires_at) - _parse_utc(transaction_time) < timedelta(
+        authorization = validate_write_started_artifacts(view, proposed_data)
+        if _parse_utc(authorization.expires_at) - _parse_utc(effective_now) < timedelta(
             seconds=MIN_AUTHORIZATION_REMAINING_SECONDS
         ):
             raise BatchRuntimeError(
                 "authorization_expiring",
                 f"authorization must retain at least {MIN_AUTHORIZATION_REMAINING_SECONDS} seconds",
             )
-        data = WriteStartedData(
+
+    @contextmanager
+    def commit_guard(
+        view: RunView,
+        event=None,
+    ) -> Iterator[Callable[[], None]]:
+        nonlocal proposed_data, proposed_collector
+        if event is None:
+            if proposed_data is None or proposed_collector is None:
+                raise BatchRuntimeError(
+                    "journal_corrupt",
+                    "write begin proposal lost its validated event data",
+                )
+            data = proposed_data
+            collector = proposed_collector
+            semantic_validate = lambda: commit_validate(view)
+        else:
+            if not isinstance(event.data, WriteStartedData):
+                raise BatchRuntimeError(
+                    "journal_corrupt",
+                    "pending write begin request points to another event type",
+                )
+            data = event.data
+            with _collect_external_closure(code="authorization_tampered") as collector:
+                validate_write_started_artifacts(view, data)
+            collector.freeze()
+            proposed_data = data
+            proposed_collector = collector
+            semantic_validate = lambda: validate_write_started_artifacts(view, data)
+        with _locked_single_run_closure(
+            view,
             item_id=item_id,
-            writer_id=writer_id,
-            claim_id=claim_id,
-            write_attempt_id=write_attempt_id,
-            attempt_number=lease.attempt_number,
-            lease_token_sha256=token_sha256,
-            candidate_sha256=item.candidate_sha256,
-            authorization_sha256=authorization_sha256,
-            authorization_nonce_sha256=sha256_bytes(authorization.nonce.encode()),
-            external_claim_id=claim_id,
-            started_at=transaction_time,
-        )
-        validate_write_started_artifacts(view, data)
-        return ProposedTransition(data=data, result=_begin_result(view, data, authorization))
+            authorization_sha256=data.authorization_sha256,
+            collector=collector,
+            validate=semantic_validate,
+        ) as validate:
+            yield validate
 
     def reconstruct(view: RunView, event) -> dict[str, Any]:
         if not isinstance(event.data, WriteStartedData):
@@ -1316,12 +1910,15 @@ def begin_write(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
         expected_run_dir_identity=preflight.run_dir_identity,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="write.begin",
         request_fingerprint=fingerprint,
         occurred_at=now,
         propose=propose,
         reconstruct=reconstruct,
+        commit_validate=commit_validate,
+        commit_guard=commit_guard,
+        final_freshness_validate=final_freshness_validate,
         fault=fault,
     )
 
@@ -1475,8 +2072,23 @@ def commit_write(
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
-    input_path, raw, result, result_sha256 = _load_write_result(result_path)
-    preflight = load_run_view(run_dir)
+    preflight, canonical_request_id, existing_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="write.commit",
+    )
+    input_path = normalized_absolute_path(result_path)
+    raw: bytes | None = None
+    result: WriteResult | None = None
+    if existing_event is None:
+        input_path, raw, result, result_sha256 = _load_write_result(input_path)
+    else:
+        if not isinstance(existing_event.data, WriteWrittenData):
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "write commit request is bound to an unexpected event payload",
+            )
+        result_sha256 = existing_event.data.result_sha256
     token_sha256 = sha256_bytes(lease_token.encode())
     fingerprint = canonical_sha256(
         {
@@ -1493,8 +2105,18 @@ def commit_write(
             "now_override": now,
         }
     )
+    if existing_event is not None and existing_event.request_fingerprint != fingerprint:
+        raise BatchRuntimeError(
+            "idempotency_conflict",
+            "request id is already bound to different write commit input",
+        )
+
+    proposed_data: WriteWrittenData | None = None
+    proposed_collector: _ExternalClosureCollector | None = None
 
     def propose(view: RunView, transaction_time: str) -> ProposedTransition:
+        nonlocal proposed_data, proposed_collector
+        assert raw is not None and result is not None
         item, lease = _active_write_lease(
             view,
             item_id=item_id,
@@ -1529,12 +2151,66 @@ def commit_write(
             parent_key=result.parent_key,
             canonical_html_sha256=result.canonical_html_sha256,
         )
-        validate_write_result_payload(view, data, raw)
+        with _collect_external_closure(code="verification_tampered") as collector:
+            collector.add(input_path, raw)
+            validate_write_result_payload(view, data, raw)
+        collector.freeze()
+        proposed_data = data
+        proposed_collector = collector
         publication = ResultPublication(
             path=view.run_dir / "results" / "write" / f"{result_sha256}.json",
             content=raw,
         )
         return ProposedTransition(data=data, result=_commit_result(view, data), publication=publication)
+
+    def commit_validate(view: RunView) -> None:
+        if proposed_data is None or proposed_collector is None or raw is None:
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "write commit proposal lost its validated result binding",
+            )
+        validate_write_result_payload(view, proposed_data, raw)
+
+    @contextmanager
+    def commit_guard(
+        view: RunView,
+        event=None,
+    ) -> Iterator[Callable[[], None]]:
+        if event is None:
+            if proposed_data is None or proposed_collector is None or raw is None:
+                raise BatchRuntimeError(
+                    "journal_corrupt",
+                    "write commit proposal lost its validated event data",
+                )
+            data = proposed_data
+            result_raw = raw
+            collector = proposed_collector
+            semantic_validate = lambda: commit_validate(view)
+        else:
+            if not isinstance(event.data, WriteWrittenData):
+                raise BatchRuntimeError(
+                    "journal_corrupt",
+                    "pending write commit request points to another event type",
+                )
+            data = event.data
+            durable_path = view.run_dir / "results" / "write" / f"{data.result_sha256}.json"
+            with _collect_external_closure(code="verification_tampered") as collector:
+                result_raw = read_bytes(
+                    durable_path,
+                    code="journal_corrupt",
+                    max_bytes=MAX_JSON_ARTIFACT_BYTES,
+                )
+                validate_write_result_payload(view, data, result_raw)
+            collector.freeze()
+            semantic_validate = lambda: validate_write_result_payload(view, data, result_raw)
+        with _locked_single_run_closure(
+            view,
+            item_id=item_id,
+            authorization_sha256=data.authorization_sha256,
+            collector=collector,
+            validate=semantic_validate,
+        ) as validate:
+            yield validate
 
     def reconstruct(view: RunView, event) -> dict[str, Any]:
         if not isinstance(event.data, WriteWrittenData):
@@ -1545,12 +2221,14 @@ def commit_write(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
         expected_run_dir_identity=preflight.run_dir_identity,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="write.commit",
         request_fingerprint=fingerprint,
         occurred_at=now,
         propose=propose,
         reconstruct=reconstruct,
+        commit_validate=commit_validate,
+        commit_guard=commit_guard,
         fault=fault,
     )
 
@@ -1583,10 +2261,14 @@ def mark_write_uncertain(
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
+    preflight, canonical_request_id, existing_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="write.mark-uncertain",
+    )
     normalized_reason = reason.strip()
     if not normalized_reason:
-        raise BatchRuntimeError("invalid_reason", "uncertain reason must not be empty")
-    preflight = load_run_view(run_dir)
+        _raise_input_error(existing_event, "invalid_reason", "uncertain reason must not be empty")
     token_sha256 = sha256_bytes(lease_token.encode())
     fingerprint = canonical_sha256(
         {
@@ -1639,7 +2321,7 @@ def mark_write_uncertain(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
         expected_run_dir_identity=preflight.run_dir_identity,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="write.mark-uncertain",
         request_fingerprint=fingerprint,
         occurred_at=now,
@@ -1677,32 +2359,39 @@ def _load_reconciliation_readback(
     item_id: str,
     readback_path: Path,
     authorization_raw: bytes,
-    authorization: _ForeignAuthorization,
-) -> tuple[Path, bytes, _ForeignReconciliation, _ForeignVerification | None]:
-    path = normalized_absolute_path(readback_path)
-    raw, payload = read_json_bytes(path, code="reconciliation_tampered")
-    if not isinstance(payload, dict) or payload.get("schema_version") != "paper_reader.reconciliation.v2":
-        raise BatchRuntimeError("unsupported_run_schema", "readback schema is not paper_reader.reconciliation.v2")
-    try:
-        reconciliation = _ForeignReconciliation.model_validate_json(raw)
-    except ValidationError as exc:
-        raise BatchRuntimeError("reconciliation_tampered", "reconciliation failed strict validation") from exc
-    if raw != canonical_json_bytes(reconciliation):
-        raise BatchRuntimeError("reconciliation_tampered", "reconciliation is not canonical JSON")
+    authorization: _OpaqueRecord,
+) -> tuple[Path, bytes, _OpaqueRecord, _OpaqueRecord | None]:
     worker_result = _load_committed_worker_result(view, item_id)
     if worker_result.paper_reader_run is None:
         raise BatchRuntimeError("journal_corrupt", "worker result is missing paper_reader run")
     paper_run_path = normalized_absolute_path(Path(worker_result.paper_reader_run.path))
     paper_run_root = paper_run_path.parent
+    path = normalized_absolute_path(readback_path)
     expected_path = paper_run_root / "reconciliations" / f"{authorization.authorization_id}.json"
     if path != expected_path:
         raise BatchRuntimeError("reconciliation_tampered", "reconciliation path/topology is not deterministic")
+    raw, payload = read_json_bytes(path, code="reconciliation_tampered")
+    reconciliation = _opaque_single_artifact(
+        raw,
+        payload,
+        schema_version="paper_reader.reconciliation.v2",
+        code="reconciliation_tampered",
+        label="reconciliation",
+    )
     sidecar = path.with_suffix("")
     expected_names = {"authorization.json", "children.json", "record.json"}
     expected_refs = {
         "authorization_snapshot": ("authorization.json", "application/json"),
         "zotero_children_snapshot": ("children.json", "application/json"),
     }
+    if (
+        reconciliation.outcome in {"verified", "blocked"}
+        and (reconciliation.match_count != 1 or reconciliation.verification is None)
+    ):
+        raise BatchRuntimeError(
+            "reconciliation_tampered",
+            "unique verified/blocked reconciliation requires an embedded strong verification",
+        )
     if reconciliation.verification is not None:
         expected_names |= {"checks.json", "note.json", "verification.json"}
         expected_refs |= {
@@ -1712,7 +2401,7 @@ def _load_reconciliation_readback(
         }
     if set(list_directory(sidecar)) != expected_names:
         raise BatchRuntimeError("reconciliation_tampered", "reconciliation sidecar closure changed")
-    by_role: dict[str, _ForeignArtifactRef] = {}
+    by_role: dict[str, _OpaqueRecord] = {}
     for ref in reconciliation.artifacts:
         if ref.role in by_role:
             raise BatchRuntimeError("reconciliation_tampered", "reconciliation repeats an artifact role")
@@ -1727,7 +2416,12 @@ def _load_reconciliation_readback(
             raise BatchRuntimeError("reconciliation_tampered", f"reconciliation {role} path/media type changed")
         members[name] = member_raw
     if (
-        read_bytes(sidecar / "record.json", code="reconciliation_tampered") != raw
+        read_bytes(
+            sidecar / "record.json",
+            code="reconciliation_tampered",
+            max_bytes=len(raw),
+        )
+        != raw
         or members["authorization.json"] != authorization_raw
         or reconciliation.authorization != by_role["authorization_snapshot"]
         or reconciliation.children_snapshot != by_role["zotero_children_snapshot"]
@@ -1738,6 +2432,7 @@ def _load_reconciliation_readback(
         or len(set(reconciliation.matched_note_keys)) != reconciliation.match_count
     ):
         raise BatchRuntimeError("reconciliation_tampered", "reconciliation identity/bindings changed")
+    _active_collector_close(sidecar, expected_names)
     children = _parse_json_bytes(
         members["children.json"],
         code="reconciliation_tampered",
@@ -1747,26 +2442,12 @@ def _load_reconciliation_readback(
         raise BatchRuntimeError("reconciliation_tampered", "reconciliation children snapshot is not canonical list")
     exact_matches: list[str] = []
     for child in children:
-        if not isinstance(child, dict):
-            raise BatchRuntimeError("reconciliation_tampered", "reconciliation child is not an object")
-        data = child.get("data")
-        if not isinstance(data, dict) or data.get("itemType") != "note":
-            continue
-        note_key = str(child.get("key") or data.get("key") or "").strip()
-        parent_key = str(data.get("parentItem") or "").strip()
-        note_html = str(data.get("note") or "")
-        parser = _HeadingParser()
-        parser.feed(note_html)
-        if (
-            _PORTABLE_IDENTIFIER.fullmatch(note_key) is not None
-            and parent_key == authorization.target.parent_key
-            and parser.title == authorization.note_title
-            and sha256_bytes(note_html.rstrip("\r\n").encode("utf-8")) == authorization.content_sha256
-        ):
+        note_key = _reconciliation_exact_match_key(child, authorization)
+        if note_key is not None:
             exact_matches.append(note_key)
     if tuple(exact_matches) != reconciliation.matched_note_keys:
         raise BatchRuntimeError("reconciliation_tampered", "reconciliation exact-match locator result changed")
-    verification: _ForeignVerification | None = None
+    verification: _OpaqueRecord | None = None
     if reconciliation.outcome == "not_found":
         valid_outcome = (
             reconciliation.match_count == 0
@@ -1795,10 +2476,18 @@ def _load_reconciliation_readback(
                 code="reconciliation_tampered",
                 label="embedded verification",
             )
-            try:
-                verification = _ForeignVerification.model_validate_json(members["verification.json"])
-            except ValidationError as exc:
-                raise BatchRuntimeError("reconciliation_tampered", "embedded verification is invalid") from exc
+            verification_payload = _parse_json_bytes(
+                members["verification.json"],
+                code="reconciliation_tampered",
+                label="embedded verification",
+            )
+            verification = _opaque_single_artifact(
+                members["verification.json"],
+                verification_payload,
+                schema_version="paper_reader.verification.v2",
+                code="reconciliation_tampered",
+                label="embedded verification",
+            )
             note_snapshot = _parse_json_bytes(
                 members["note.json"],
                 code="reconciliation_tampered",
@@ -1829,7 +2518,7 @@ def _load_reconciliation_readback(
             )
             strong_pass = all(actuals.values())
             embedded_valid = (
-                canonical_json_bytes(verification) == members["verification.json"]
+                canonical_json_bytes(_plain(verification)) == members["verification.json"]
                 and canonical_json_bytes(note_snapshot) == members["note.json"]
                 and canonical_json_bytes(checks_snapshot) == members["checks.json"]
                 and reconciliation.verification == by_role["reconciliation_verification"]
@@ -1841,12 +2530,15 @@ def _load_reconciliation_readback(
                 and verification.target == authorization.target
                 and verification.note_snapshot == by_role["zotero_note_readback"]
                 and verification.checks_snapshot == by_role["verification_checks"]
-                and set(verification.artifacts)
-                == {
-                    by_role["authorization_snapshot"],
-                    by_role["zotero_note_readback"],
-                    by_role["verification_checks"],
-                }
+                and len(verification.artifacts) == 3
+                and all(
+                    expected in verification.artifacts
+                    for expected in (
+                        by_role["authorization_snapshot"],
+                        by_role["zotero_note_readback"],
+                        by_role["verification_checks"],
+                    )
+                )
                 and len(checks_by_name) == len(verification.checks)
                 and set(checks_by_name) == expected_check_names
                 and all(checks_by_name[name].passed == passed for name, passed in actuals.items())
@@ -1855,7 +2547,7 @@ def _load_reconciliation_readback(
                 and checks_snapshot.get("authorization_digest") == sha256_bytes(authorization_raw)
                 and checks_snapshot.get("note_key") == verification.note_key
                 and checks_snapshot.get("checks")
-                == [check.model_dump(mode="json") for check in verification.checks]
+                == [_plain(check) for check in verification.checks]
                 and verification.content_sha256 == actual_sha256
                 and verification.content_length == actual_length
                 and verification.verified == strong_pass
@@ -1871,7 +2563,11 @@ def _load_reconciliation_readback(
             )
     if not valid_outcome:
         raise BatchRuntimeError("reconciliation_tampered", "reconciliation outcome/match invariants changed")
-    paper_run_raw, paper_run = read_json_bytes(paper_run_path, code="reconciliation_tampered")
+    paper_run_raw, paper_run = read_json_bytes(
+        paper_run_path,
+        code="reconciliation_tampered",
+        max_bytes=MAX_JSON_ARTIFACT_BYTES,
+    )
     if not isinstance(paper_run, dict) or paper_run_raw != canonical_json_bytes(paper_run):
         raise BatchRuntimeError("reconciliation_tampered", "paper_reader run is not canonical")
     relative = path.relative_to(paper_run_root).as_posix()
@@ -1973,7 +2669,15 @@ def validate_reconciliation_result_payload(
             readback.verification.path,
             code="reconciliation_tampered",
         )
-        verification_raw = read_bytes(verification_path, code="reconciliation_tampered")
+        verification_raw = read_bytes(
+            verification_path,
+            code="reconciliation_tampered",
+            max_bytes=_ref_read_limit(
+                readback.verification.size_bytes,
+                code="reconciliation_tampered",
+                json_artifact=True,
+            ),
+        )
         expected_verification = ArtifactRef(
             path=str(verification_path),
             size_bytes=len(verification_raw),
@@ -2015,7 +2719,129 @@ def reconcile_write(
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
-    preflight = load_run_view(run_dir)
+    preflight, canonical_request_id, replay_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="write.reconcile",
+    )
+    normalized_readback_path = normalized_absolute_path(readback_path)
+    if replay_event is not None:
+        if not isinstance(replay_event.data, WriteReconciledData):
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "write reconciliation request is bound to an unexpected event payload",
+            )
+        durable_path = (
+            preflight.run_dir
+            / "results"
+            / "reconcile"
+            / f"{replay_event.data.reconciliation_sha256}.json"
+        )
+        durable_raw, durable_payload = read_json_bytes(
+            durable_path,
+            code="journal_corrupt",
+            max_bytes=MAX_JSON_ARTIFACT_BYTES,
+        )
+        try:
+            durable_result = ReconciliationResult.model_validate(durable_payload)
+        except ValidationError as exc:
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "committed reconciliation result failed strict validation",
+            ) from exc
+        if (
+            durable_raw != canonical_json_bytes(durable_result)
+            or sha256_bytes(durable_raw) != replay_event.data.reconciliation_sha256
+        ):
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "committed reconciliation result digest or canonical bytes changed",
+            )
+        input_readback_sha256 = durable_result.readback_sha256
+    else:
+        input_readback_sha256 = ""
+    fingerprint = canonical_sha256(
+        {
+            "command": "write.reconcile",
+            "run_dir": str(preflight.run_dir),
+            "manifest_sha256": preflight.manifest_sha256,
+            "item_id": item_id,
+            "readback_path": str(normalized_readback_path),
+            "readback_sha256": input_readback_sha256,
+            "now_override": now,
+        }
+    )
+
+    def reconstruct(view: RunView, event) -> dict[str, Any]:
+        if not isinstance(event.data, WriteReconciledData):
+            raise BatchRuntimeError("journal_corrupt", "write reconcile request points to another event type")
+        return _reconciliation_result(view, event.data)
+
+    if replay_event is not None:
+        if replay_event.request_fingerprint != fingerprint:
+            raise BatchRuntimeError(
+                "idempotency_conflict",
+                "request id is already bound to different reconciliation input",
+            )
+
+        def replay_only_proposal(_view: RunView, _transaction_time: str) -> ProposedTransition:
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "exact write reconciliation replay unexpectedly lost its journal event",
+            )
+
+        @contextmanager
+        def replay_commit_guard(
+            view: RunView,
+            event=None,
+        ) -> Iterator[Callable[[], None]]:
+            if event is None or not isinstance(event.data, WriteReconciledData):
+                raise BatchRuntimeError(
+                    "journal_corrupt",
+                    "pending write reconcile request points to another event type",
+                )
+            data = event.data
+            durable_path = (
+                view.run_dir
+                / "results"
+                / "reconcile"
+                / f"{data.reconciliation_sha256}.json"
+            )
+            with _collect_external_closure(code="reconciliation_tampered") as collector:
+                result_raw = read_bytes(
+                    durable_path,
+                    code="journal_corrupt",
+                    max_bytes=MAX_JSON_ARTIFACT_BYTES,
+                )
+                validate_reconciliation_result_payload(view, data, result_raw)
+            collector.freeze()
+            with _locked_single_run_closure(
+                view,
+                item_id=item_id,
+                authorization_sha256=data.authorization_sha256,
+                collector=collector,
+                validate=lambda: validate_reconciliation_result_payload(
+                    view,
+                    data,
+                    result_raw,
+                ),
+            ) as validate:
+                yield validate
+
+        return append_transaction(
+            run_dir,
+            expected_manifest_sha256=preflight.manifest_sha256,
+            expected_run_dir_identity=preflight.run_dir_identity,
+            request_id=canonical_request_id,
+            command="write.reconcile",
+            request_fingerprint=fingerprint,
+            occurred_at=now,
+            propose=replay_only_proposal,
+            reconstruct=reconstruct,
+            commit_guard=replay_commit_guard,
+            fault=fault,
+        )
+
     item = _uncertain_item(preflight, item_id)
     authorization_path = _authorization_path_for_digest(
         preflight,
@@ -2036,6 +2862,7 @@ def reconcile_write(
         authorization_raw=authorization_raw,
         authorization=authorization,
     )
+    input_readback_sha256 = sha256_bytes(readback_raw)
     fingerprint = canonical_sha256(
         {
             "command": "write.reconcile",
@@ -2043,12 +2870,17 @@ def reconcile_write(
             "manifest_sha256": preflight.manifest_sha256,
             "item_id": item_id,
             "readback_path": str(normalized_readback_path),
-            "readback_sha256": sha256_bytes(readback_raw),
+            "readback_sha256": input_readback_sha256,
             "now_override": now,
         }
     )
 
+    proposed_data: WriteReconciledData | None = None
+    proposed_result_raw: bytes | None = None
+    proposed_collector: _ExternalClosureCollector | None = None
+
     def propose(view: RunView, _transaction_time: str) -> ProposedTransition:
+        nonlocal proposed_data, proposed_result_raw, proposed_collector
         current = _uncertain_item(view, item_id)
         current_auth_path = _authorization_path_for_digest(
             view,
@@ -2082,7 +2914,15 @@ def reconcile_write(
                 current_readback.verification.path,
                 code="reconciliation_tampered",
             )
-            verification_raw = read_bytes(verification_path, code="reconciliation_tampered")
+            verification_raw = read_bytes(
+                verification_path,
+                code="reconciliation_tampered",
+                max_bytes=_ref_read_limit(
+                    current_readback.verification.size_bytes,
+                    code="reconciliation_tampered",
+                    json_artifact=True,
+                ),
+            )
             expected_verification = ArtifactRef(
                 path=str(verification_path),
                 size_bytes=len(verification_raw),
@@ -2128,7 +2968,12 @@ def reconcile_write(
             reconciliation_sha256=result_sha256,
             outcome=current_readback.outcome,
         )
-        validate_reconciliation_result_payload(view, data, result_raw)
+        with _collect_external_closure(code="reconciliation_tampered") as collector:
+            validate_reconciliation_result_payload(view, data, result_raw)
+        collector.freeze()
+        proposed_data = data
+        proposed_result_raw = result_raw
+        proposed_collector = collector
         publication = ResultPublication(
             path=view.run_dir / "results" / "reconcile" / f"{result_sha256}.json",
             content=result_raw,
@@ -2139,21 +2984,84 @@ def reconcile_write(
             publication=publication,
         )
 
-    def reconstruct(view: RunView, event) -> dict[str, Any]:
-        if not isinstance(event.data, WriteReconciledData):
-            raise BatchRuntimeError("journal_corrupt", "write reconcile request points to another event type")
-        return _reconciliation_result(view, event.data)
+    def commit_validate(view: RunView) -> None:
+        if (
+            proposed_data is None
+            or proposed_result_raw is None
+            or proposed_collector is None
+        ):
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                "write reconciliation proposal lost its validated result binding",
+            )
+        validate_reconciliation_result_payload(view, proposed_data, proposed_result_raw)
+
+    @contextmanager
+    def commit_guard(
+        view: RunView,
+        event=None,
+    ) -> Iterator[Callable[[], None]]:
+        if event is None:
+            if (
+                proposed_data is None
+                or proposed_collector is None
+                or proposed_result_raw is None
+            ):
+                raise BatchRuntimeError(
+                    "journal_corrupt",
+                    "write reconciliation proposal lost its validated event data",
+                )
+            data = proposed_data
+            result_raw = proposed_result_raw
+            collector = proposed_collector
+            semantic_validate = lambda: commit_validate(view)
+        else:
+            if not isinstance(event.data, WriteReconciledData):
+                raise BatchRuntimeError(
+                    "journal_corrupt",
+                    "pending write reconcile request points to another event type",
+                )
+            data = event.data
+            durable_path = (
+                view.run_dir
+                / "results"
+                / "reconcile"
+                / f"{data.reconciliation_sha256}.json"
+            )
+            with _collect_external_closure(code="reconciliation_tampered") as collector:
+                result_raw = read_bytes(
+                    durable_path,
+                    code="journal_corrupt",
+                    max_bytes=MAX_JSON_ARTIFACT_BYTES,
+                )
+                validate_reconciliation_result_payload(view, data, result_raw)
+            collector.freeze()
+            semantic_validate = lambda: validate_reconciliation_result_payload(
+                view,
+                data,
+                result_raw,
+            )
+        with _locked_single_run_closure(
+            view,
+            item_id=item_id,
+            authorization_sha256=data.authorization_sha256,
+            collector=collector,
+            validate=semantic_validate,
+        ) as validate:
+            yield validate
 
     return append_transaction(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
         expected_run_dir_identity=preflight.run_dir_identity,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="write.reconcile",
         request_fingerprint=fingerprint,
         occurred_at=now,
         propose=propose,
         reconstruct=reconstruct,
+        commit_validate=commit_validate,
+        commit_guard=commit_guard,
         fault=fault,
     )
 
@@ -2185,12 +3093,17 @@ def retry_write(
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
+    preflight, canonical_request_id, existing_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="write.retry",
+    )
     if acknowledge_no_match is not True:
-        raise BatchRuntimeError(
+        _raise_input_error(
+            existing_event,
             "acknowledgement_required",
             "write retry requires --acknowledge-no-match",
         )
-    preflight = load_run_view(run_dir)
     fingerprint = canonical_sha256(
         {
             "command": "write.retry",
@@ -2250,7 +3163,7 @@ def retry_write(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
         expected_run_dir_identity=preflight.run_dir_identity,
-        request_id=request_id,
+        request_id=canonical_request_id,
         command="write.retry",
         request_fingerprint=fingerprint,
         occurred_at=now,

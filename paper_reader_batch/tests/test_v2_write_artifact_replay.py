@@ -76,7 +76,7 @@ def test_committed_write_replay_rejects_later_verification_tamper_without_rewrit
         request_id=REQUEST_WRITE_COMMIT,
         now="2026-07-10T00:00:08Z",
     )
-    run_report(ready.run_dir, generated_at="2026-07-10T00:01:00Z")
+    run_report(ready.run_dir)
     reports_before = _report_bytes(ready.run_dir)
 
     (verification_path.with_suffix("") / "note.json").write_bytes(b"{}")
@@ -85,7 +85,7 @@ def test_committed_write_replay_rejects_later_verification_tamper_without_rewrit
         load_run_view(ready.run_dir)
     assert load_error.value.code == "journal_corrupt"
     with pytest.raises(BatchRuntimeError) as report_error:
-        run_report(ready.run_dir, generated_at="2026-07-10T00:02:00Z")
+        run_report(ready.run_dir)
     assert report_error.value.code == "journal_corrupt"
     assert _report_bytes(ready.run_dir) == reports_before
 
@@ -135,7 +135,7 @@ def test_reconciled_write_replay_rejects_later_children_tamper_without_rewriting
         request_id=REQUEST_WRITE_RECONCILE,
         now="2026-07-10T00:00:10Z",
     )
-    run_report(ready.run_dir, generated_at="2026-07-10T00:01:00Z")
+    run_report(ready.run_dir)
     reports_before = _report_bytes(ready.run_dir)
 
     (reconciliation_path.with_suffix("") / "children.json").write_bytes(b"[]")
@@ -144,6 +144,6 @@ def test_reconciled_write_replay_rejects_later_children_tamper_without_rewriting
         load_run_view(ready.run_dir)
     assert load_error.value.code == "journal_corrupt"
     with pytest.raises(BatchRuntimeError) as report_error:
-        run_report(ready.run_dir, generated_at="2026-07-10T00:02:00Z")
+        run_report(ready.run_dir)
     assert report_error.value.code == "journal_corrupt"
     assert _report_bytes(ready.run_dir) == reports_before

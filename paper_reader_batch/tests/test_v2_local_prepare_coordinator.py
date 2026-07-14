@@ -15,16 +15,27 @@ import time
 
 import pytest
 
+import paper_reader_batch.v2_local_prepare as local_prepare_module
 from paper_reader_batch.v2_errors import BatchRuntimeError
 from paper_reader_batch.v2_journal import load_run_view
-from paper_reader_batch.v2_json import canonical_json_bytes, canonical_sha256
+from paper_reader_batch.v2_json import (
+    canonical_json_bytes,
+    canonical_sha256,
+    open_directory_fd,
+)
 from paper_reader_batch.v2_local_prepare import (
+    _CHILD_LAUNCHER,
     MAX_CHILD_TIMEOUT_SECONDS,
     _ChildCommandResult,
     _ChildInvocation,
     _ChildProtocolError,
+    _CoordinationRecord,
+    _coordination_hmac,
     _default_child_runner,
+    _load_signed_model,
     _parse_child_envelope,
+    _read_held_started_marker,
+    _signed_model_bytes,
     _validate_initialized_child,
     claim_local_prepare,
     local_prepare_attempt_has_execution_side_effects,
@@ -37,6 +48,71 @@ from paper_reader_batch.v2_run import initialize_run
 
 PAPER_READER_ROOT = Path(__file__).resolve().parents[2] / "paper_reader"
 FIXTURE_PDF = PAPER_READER_ROOT / "tests" / "fixtures" / "minimal.pdf"
+
+
+def test_held_started_marker_rejects_bytes_beyond_exact_payload(tmp_path: Path) -> None:
+    request_dir = tmp_path / "request"
+    request_dir.mkdir()
+    started_path = request_dir / "init.started"
+    stdout_path = request_dir / "init.stdout"
+    expected = b'{"started":true}'
+    started_path.write_bytes(expected + b"x")
+    metadata = request_dir.stat()
+    invocation = _ChildInvocation(
+        started_path=started_path,
+        stdout_path=stdout_path,
+        started_payload=expected,
+        request_dir_device=metadata.st_dev,
+        request_dir_inode=metadata.st_ino,
+        run_lock_descriptors=(),
+    )
+
+    with open_directory_fd(request_dir, create=False) as (descriptor, _bound):
+        with pytest.raises(_ChildProtocolError) as exc_info:
+            _read_held_started_marker(descriptor, invocation)
+
+    assert exc_info.value.code == "coordination_uncertain"
+
+
+def test_isolated_child_launcher_bounds_started_marker_read() -> None:
+    assert "marker_limit = len(started_payload)" in _CHILD_LAUNCHER
+    assert "marker_limit - marker_size + 1" in _CHILD_LAUNCHER
+    assert "os.read(marker_fd, 1024 * 1024)" not in _CHILD_LAUNCHER
+
+
+def test_isolated_child_launcher_never_pathname_unlinks_marker_staging() -> None:
+    assert "os.unlink(" not in _CHILD_LAUNCHER
+    assert "def rename_no_replace(" in _CHILD_LAUNCHER
+    assert "secrets.token_hex(16)" in _CHILD_LAUNCHER
+    assert "os.O_EXCL" in _CHILD_LAUNCHER
+
+
+def test_isolated_child_launcher_does_not_reuse_predictable_stale_writing_path(
+    tmp_path: Path,
+) -> None:
+    started_path = tmp_path / "init.started"
+    stale_writing = tmp_path / "init.started.writing"
+    stale_writing.write_bytes(b"external stale entry")
+    metadata = tmp_path.stat()
+    invocation = _ChildInvocation(
+        started_path=started_path,
+        stdout_path=tmp_path / "init.stdout",
+        started_payload=b'{"started":true}',
+        request_dir_device=metadata.st_dev,
+        request_dir_inode=metadata.st_ino,
+        run_lock_descriptors=(),
+    )
+
+    handle = _default_child_runner(
+        (sys.executable, "-c", "raise SystemExit(0)"),
+        tmp_path,
+        30,
+        invocation,
+    )
+
+    assert handle.wait() is None
+    assert started_path.read_bytes() == invocation.started_payload
+    assert stale_writing.read_bytes() == b"external stale entry"
 
 
 def _batch_run(tmp_path: Path) -> tuple[Path, Path, dict]:
@@ -94,6 +170,59 @@ def _run_tree(root: Path) -> dict[str, tuple[bytes, int]]:
     }
 
 
+def _reserved_coordination_record(
+    tmp_path: Path,
+    *,
+    request_id: str,
+) -> tuple[Path, Path, dict, Path, bytes]:
+    run_dir, source, assignment = _batch_run(tmp_path)
+
+    def stop_after_reservation(stage: str) -> None:
+        if stage == "after_init_invocation_reserved":
+            raise RuntimeError("fixture coordinator stopped after invocation reservation")
+
+    with pytest.raises(RuntimeError, match="fixture coordinator stopped"):
+        run_local_prepare(
+            **_run_kwargs(run_dir, assignment, request_id),
+            fault=stop_after_reservation,
+        )
+    record_path = (
+        run_dir
+        / "results"
+        / "local-prepare"
+        / ".coordination"
+        / request_id
+        / "record.json"
+    )
+    return run_dir, source, assignment, record_path, load_run_view(run_dir).lease_secret
+
+
+def _write_legacy_coordination_record(
+    record_path: Path,
+    secret: bytes,
+    *,
+    init_invoked: bool,
+    omit: frozenset[str] = frozenset(
+        {"init_execution_released", "prepare_execution_released"}
+    ),
+    canonical: bool = True,
+    valid_hmac: bool = True,
+) -> None:
+    payload = json.loads(record_path.read_text(encoding="utf-8"))
+    payload["init_invoked"] = init_invoked
+    for field in omit:
+        payload.pop(field)
+    unsigned = dict(payload)
+    unsigned.pop("hmac_sha256")
+    payload["hmac_sha256"] = _coordination_hmac(secret, unsigned)
+    if not valid_hmac:
+        payload["hmac_sha256"] = "0" * 64
+    raw = canonical_json_bytes(payload)
+    if not canonical:
+        raw = json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
+    record_path.write_bytes(raw)
+
+
 def _crash_coordinator(
     run_dir: str,
     assignment: dict,
@@ -112,6 +241,27 @@ def _crash_coordinator(
 
 def _plain_coordinator(run_dir: str, assignment: dict, request_id: str) -> None:
     run_local_prepare(**_run_kwargs(Path(run_dir), assignment, request_id))
+
+
+def _crash_after_missing_marker_handoff(
+    run_dir: str,
+    assignment: dict,
+    request_id: str,
+) -> None:
+    def runner(_argv, _cwd, _timeout_seconds, invocation):
+        invocation.mark_started()
+        invocation.started_path.unlink()
+        return 0
+
+    def crash(stage: str) -> None:
+        if stage == "after_init_child":
+            os._exit(91)
+
+    run_local_prepare(
+        **_run_kwargs(Path(run_dir), assignment, request_id),
+        runner=runner,
+        fault=crash,
+    )
 
 
 def _plain_coordinator_with_timeout(
@@ -261,6 +411,59 @@ def test_source_is_revalidated_after_reservation_immediately_before_child_spawn(
     assert not (source.parent / "paper_analysis").exists()
 
 
+def test_source_is_revalidated_after_skill_root_scan_before_child_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir, source, assignment = _batch_run(tmp_path)
+    root = _fake_paper_reader_root(tmp_path)
+    original_root_identity = local_prepare_module.paper_reader_root_identity
+    armed = False
+    mutated = False
+    calls: list[tuple[str, ...]] = []
+
+    def arm_after_reservation(stage: str) -> None:
+        nonlocal armed
+        if stage == "after_init_invocation_reserved":
+            armed = True
+
+    def drift_during_root_scan(path: Path):
+        nonlocal mutated
+        identity = original_root_identity(path)
+        if armed and not mutated:
+            mutated = True
+            source.write_bytes(source.read_bytes() + b"drift during root scan")
+        return identity
+
+    def forbidden_runner(argv, _cwd, _timeout_seconds, _invocation):
+        calls.append(argv)
+        raise AssertionError("drifted source must not reach the child runner")
+
+    monkeypatch.setattr(
+        local_prepare_module,
+        "paper_reader_root_identity",
+        drift_during_root_scan,
+    )
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        run_local_prepare(
+            **{
+                **_run_kwargs(
+                    run_dir,
+                    assignment,
+                    "28282828-2828-4828-8828-282828282828",
+                ),
+                "paper_reader_root": root,
+            },
+            runner=forbidden_runner,
+            fault=arm_after_reservation,
+        )
+
+    assert exc_info.value.code == "source_drift"
+    assert mutated is True
+    assert calls == []
+
+
 def test_skill_root_is_revalidated_after_reservation_immediately_before_child_spawn(tmp_path: Path) -> None:
     run_dir, source, assignment = _batch_run(tmp_path)
     root = _fake_paper_reader_root(tmp_path)
@@ -290,6 +493,72 @@ def test_skill_root_is_revalidated_after_reservation_immediately_before_child_sp
     assert exc_info.value.code == "paper_reader_root_drift"
     assert calls == []
     assert not (source.parent / "paper_analysis").exists()
+
+
+def test_skill_root_is_revalidated_after_reserve_proposal_before_journal_commit(
+    tmp_path: Path,
+) -> None:
+    run_dir, _source, assignment = _batch_run(tmp_path)
+    root = _fake_paper_reader_root(tmp_path)
+    events_before = sorted(path.name for path in (run_dir / "events").iterdir())
+    state_before = (run_dir / "state.json").read_bytes()
+
+    def drift(stage: str) -> None:
+        if stage == "after_pre_recovery_validation":
+            (root / "src" / "paper_reader" / "public_cli.py").write_text(
+                "app = object()\n# drift before reservation commit\n",
+                encoding="utf-8",
+            )
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        run_local_prepare(
+            **{
+                **_run_kwargs(
+                    run_dir,
+                    assignment,
+                    "26262626-2626-4626-8626-262626262626",
+                ),
+                "paper_reader_root": root,
+            },
+            fault=drift,
+        )
+
+    assert exc_info.value.code == "paper_reader_root_drift"
+    assert sorted(path.name for path in (run_dir / "events").iterdir()) == events_before
+    assert (run_dir / "state.json").read_bytes() == state_before
+
+
+def test_coordination_directory_is_rebound_after_reserve_proposal_before_commit(
+    tmp_path: Path,
+) -> None:
+    run_dir, _source, assignment = _batch_run(tmp_path)
+    request_id = "27272727-2727-4727-8727-272727272727"
+    request_dir = (
+        run_dir
+        / "results"
+        / "local-prepare"
+        / ".coordination"
+        / request_id
+    )
+    moved_dir = request_dir.with_name(f"{request_id}.moved")
+    events_before = sorted(path.name for path in (run_dir / "events").iterdir())
+    state_before = (run_dir / "state.json").read_bytes()
+
+    def replace_request_directory(stage: str) -> None:
+        if stage == "after_pre_recovery_validation":
+            request_dir.rename(moved_dir)
+            request_dir.mkdir()
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        run_local_prepare(
+            **_run_kwargs(run_dir, assignment, request_id),
+            fault=replace_request_directory,
+        )
+
+    assert exc_info.value.code == "coordination_corrupt"
+    assert moved_dir.is_dir()
+    assert sorted(path.name for path in (run_dir / "events").iterdir()) == events_before
+    assert (run_dir / "state.json").read_bytes() == state_before
 
 
 def test_run_uses_exact_grouped_argv_and_replays_failed_child_without_reexecution(
@@ -715,6 +984,250 @@ def test_crash_after_invocation_reservation_before_spawn_is_safely_recoverable(
     assert not (source.parent / "paper_analysis_v2").exists()
 
 
+def test_execution_release_fault_occurs_only_after_runner_commits_started_marker(
+    tmp_path: Path,
+) -> None:
+    run_dir, _source, assignment = _batch_run(tmp_path)
+    request_id = "67676767-6767-4767-8767-676767676767"
+    calls: list[tuple[str, ...]] = []
+
+    def failed_child(argv, _cwd, _timeout_seconds, invocation):
+        calls.append(argv)
+        invocation.mark_started()
+        invocation.write_stdout(
+            canonical_json_bytes(
+                {
+                    "schema_version": "paper_reader.command-result.v2",
+                    "command": "run init-local",
+                    "ok": False,
+                    "code": "fixture_failure",
+                    "created_at": "2026-07-11T00:00:02Z",
+                    "message": "fixture child failed after durable start",
+                    "data": {},
+                }
+            )
+            + b"\n"
+        )
+        return 1
+
+    def stop_after_release(stage: str) -> None:
+        if stage == "after_init_execution_released":
+            raise RuntimeError("fixture coordinator stopped after execution release")
+
+    with pytest.raises(RuntimeError, match="stopped after execution release"):
+        run_local_prepare(
+            **_run_kwargs(run_dir, assignment, request_id),
+            runner=failed_child,
+            fault=stop_after_release,
+        )
+
+    request_dir = (
+        run_dir
+        / "results"
+        / "local-prepare"
+        / ".coordination"
+        / request_id
+    )
+    record = json.loads((request_dir / "record.json").read_text(encoding="utf-8"))
+    assert len(calls) == 1
+    assert (request_dir / "init.started").is_file()
+    assert (request_dir / "init.stdout").is_file()
+    assert record["init_execution_released"] is True
+
+    def forbidden_runner(*_args):
+        raise AssertionError("durably started child must not run twice")
+
+    resumed = run_local_prepare(
+        **_run_kwargs(run_dir, assignment, request_id),
+        runner=forbidden_runner,
+    )
+
+    assert resumed.result["status"] == "failed"
+    assert len(calls) == 1
+    result = json.loads(Path(resumed.result["result_path"]).read_text(encoding="utf-8"))
+    assert result["error"]["code"] == "fixture_failure"
+
+
+def _tree_snapshot(root: Path) -> dict[str, tuple[int, int, int, bytes | None]]:
+    snapshot: dict[str, tuple[int, int, int, bytes | None]] = {}
+    for path in sorted(root.rglob("*")):
+        metadata = path.lstat()
+        snapshot[path.relative_to(root).as_posix()] = (
+            metadata.st_mode,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            path.read_bytes() if path.is_file() else None,
+        )
+    return snapshot
+
+
+@pytest.mark.parametrize("init_invoked", [False, True], ids=["reserved", "invoked"])
+def test_legacy_coordination_record_is_rejected_without_mutation(
+    tmp_path: Path,
+    init_invoked: bool,
+) -> None:
+    request_id = (
+        "45454545-4545-4545-8545-454545454545"
+        if not init_invoked
+        else "46464646-4646-4646-8646-464646464646"
+    )
+    run_dir, source, assignment, record_path, secret = _reserved_coordination_record(
+        tmp_path,
+        request_id=request_id,
+    )
+    _write_legacy_coordination_record(
+        record_path,
+        secret,
+        init_invoked=init_invoked,
+    )
+    before = _tree_snapshot(run_dir)
+
+    with pytest.raises(BatchRuntimeError) as load_error:
+        _load_signed_model(record_path, _CoordinationRecord, secret)
+    assert load_error.value.code == "coordination_corrupt"
+    assert _tree_snapshot(run_dir) == before
+
+    calls: list[tuple[str, ...]] = []
+
+    def forbidden_runner(argv, _cwd, _timeout_seconds, _invocation):
+        calls.append(argv)
+        raise AssertionError("invalid coordination shape must not dispatch")
+
+    with pytest.raises(BatchRuntimeError) as run_error:
+        run_local_prepare(
+            **_run_kwargs(run_dir, assignment, request_id),
+            runner=forbidden_runner,
+        )
+
+    assert run_error.value.code == "coordination_corrupt"
+    assert calls == []
+    assert not (source.parent / "paper_analysis").exists()
+    assert _tree_snapshot(run_dir) == before
+
+
+@pytest.mark.parametrize(
+    ("omit", "canonical", "valid_hmac"),
+    [
+        (frozenset({"init_execution_released"}), True, True),
+        (frozenset({"prepare_execution_released"}), True, True),
+        (
+            frozenset({"init_execution_released", "prepare_execution_released"}),
+            False,
+            True,
+        ),
+        (
+            frozenset({"init_execution_released", "prepare_execution_released"}),
+            True,
+            False,
+        ),
+    ],
+    ids=[
+        "only-init-release-missing",
+        "only-prepare-release-missing",
+        "noncanonical",
+        "invalid-hmac",
+    ],
+)
+def test_legacy_coordination_loader_rejects_inexact_payloads(
+    tmp_path: Path,
+    omit: frozenset[str],
+    canonical: bool,
+    valid_hmac: bool,
+) -> None:
+    request_id = "47474747-4747-4747-8747-474747474747"
+    _run_dir, _source, _assignment, record_path, secret = _reserved_coordination_record(
+        tmp_path,
+        request_id=request_id,
+    )
+    _write_legacy_coordination_record(
+        record_path,
+        secret,
+        init_invoked=False,
+        omit=omit,
+        canonical=canonical,
+        valid_hmac=valid_hmac,
+    )
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        _load_signed_model(record_path, _CoordinationRecord, secret)
+
+    assert exc_info.value.code == "coordination_corrupt"
+
+
+def test_signed_model_bytes_normalizes_defaults_before_signing(tmp_path: Path) -> None:
+    request_id = "48484848-4848-4848-8848-484848484848"
+    _run_dir, _source, _assignment, record_path, secret = _reserved_coordination_record(
+        tmp_path,
+        request_id=request_id,
+    )
+    payload = json.loads(record_path.read_text(encoding="utf-8"))
+    payload.pop("hmac_sha256")
+    payload.pop("init_execution_released")
+    payload.pop("prepare_execution_released")
+
+    expected, raw = _signed_model_bytes(_CoordinationRecord, payload, secret)
+    roundtrip_root = tmp_path / "roundtrip"
+    roundtrip_root.mkdir()
+    roundtrip_path = roundtrip_root / "record.json"
+    roundtrip_path.write_bytes(raw)
+    actual, actual_raw = _load_signed_model(
+        roundtrip_path,
+        _CoordinationRecord,
+        secret,
+    )
+
+    assert actual == expected
+    assert actual_raw == raw
+    assert actual.init_execution_released is False
+    assert actual.prepare_execution_released is False
+
+
+def test_missing_marker_after_execution_handoff_is_durably_uncertain(tmp_path: Path) -> None:
+    run_dir, source, assignment = _batch_run(tmp_path)
+    request_id = "34343434-3434-4434-8434-343434343434"
+    context = multiprocessing.get_context("spawn")
+    process = context.Process(
+        target=_crash_after_missing_marker_handoff,
+        args=(str(run_dir), assignment, request_id),
+    )
+    process.start()
+    process.join(timeout=30)
+
+    assert process.exitcode == 91
+    request_dir = (
+        run_dir
+        / "results"
+        / "local-prepare"
+        / ".coordination"
+        / request_id
+    )
+    assert not (request_dir / "init.started").exists()
+    view = load_run_view(run_dir)
+    assert local_prepare_attempt_has_execution_side_effects(
+        view,
+        item_id=assignment["item_id"],
+        claim_id=assignment["claim_id"],
+        attempt_id=assignment["attempt_id"],
+    ) is True
+
+    calls: list[tuple[str, ...]] = []
+
+    def runner(argv, _cwd, _timeout_seconds, _invocation):
+        calls.append(argv)
+        raise AssertionError("an execution-released attempt must not be dispatched again")
+
+    resumed = run_local_prepare(
+        **_run_kwargs(run_dir, assignment, request_id),
+        runner=runner,
+    )
+
+    assert resumed.result["status"] == "blocked"
+    result = json.loads(Path(resumed.result["result_path"]).read_text(encoding="utf-8"))
+    assert result["error"]["code"] == "coordination_uncertain"
+    assert calls == []
+    assert not (source.parent / "paper_analysis").exists()
+
+
 def test_started_child_without_stdout_is_never_reexecuted_after_coordinator_death(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1008,6 +1521,125 @@ def test_started_handle_uses_cli_envelope_instead_of_supervisor_exit_status(
     assert parsed.code == "fixture_failure"
 
 
+def test_isolated_executor_rejects_started_marker_path_replacement_after_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader_batch.v2_local_prepare as local_prepare_module
+
+    fault_stage = "executor_replace_marker_after_open"
+    injection_point = "        marker_metadata = os.fstat(marker_fd)\n"
+    faulted_launcher = local_prepare_module._CHILD_LAUNCHER.replace(
+        injection_point,
+        injection_point
+        + (
+            f'        if fault_stage == "{fault_stage}":\n'
+            "            marker_name = os.path.basename(started_path)\n"
+            "            detached_name = marker_name + '.detached'\n"
+            "            os.rename(\n"
+            "                marker_name,\n"
+            "                detached_name,\n"
+            "                src_dir_fd=directory_fd,\n"
+            "                dst_dir_fd=directory_fd,\n"
+            "            )\n"
+            "            replacement_fd = os.open(\n"
+            "                marker_name,\n"
+            "                os.O_WRONLY | os.O_CREAT | os.O_EXCL,\n"
+            "                0o600,\n"
+            "                dir_fd=directory_fd,\n"
+            "            )\n"
+            "            os.write(replacement_fd, started_payload)\n"
+            "            os.fsync(replacement_fd)\n"
+            "            os.close(replacement_fd)\n"
+            "            os.fsync(directory_fd)\n"
+        ),
+        1,
+    )
+    assert faulted_launcher != local_prepare_module._CHILD_LAUNCHER
+    monkeypatch.setattr(local_prepare_module, "_CHILD_LAUNCHER", faulted_launcher)
+
+    metadata = tmp_path.stat()
+    invocation = _ChildInvocation(
+        started_path=tmp_path / "init.started",
+        stdout_path=tmp_path / "init.stdout",
+        started_payload=b'{"started":true}',
+        request_dir_device=metadata.st_dev,
+        request_dir_inode=metadata.st_ino,
+        run_lock_descriptors=(),
+        launcher_fault_stage=fault_stage,
+    )
+    target_path = tmp_path / "target-ran"
+
+    handle = _default_child_runner(
+        (
+            sys.executable,
+            "-c",
+            "from pathlib import Path; Path(r'"
+            + str(target_path)
+            + "').write_text('ran', encoding='utf-8')",
+        ),
+        tmp_path,
+        30,
+        invocation,
+    )
+    handle.wait()
+
+    assert not target_path.exists()
+    assert invocation.started_path.read_bytes() == invocation.started_payload
+    assert (tmp_path / "init.started.detached").read_bytes() == invocation.started_payload
+
+
+def test_isolated_executor_rejects_started_marker_unlink_after_named_identity_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader_batch.v2_local_prepare as local_prepare_module
+
+    fault_stage = "executor_unlink_marker_after_named_identity_check"
+    injection_point = '        marker_raw = b"".join(marker_chunks)\n'
+    faulted_launcher = local_prepare_module._CHILD_LAUNCHER.replace(
+        injection_point,
+        (
+            f'        if fault_stage == "{fault_stage}":\n'
+            "            os.unlink(os.path.basename(started_path), dir_fd=directory_fd)\n"
+            "            os.fsync(directory_fd)\n"
+        )
+        + injection_point,
+        1,
+    )
+    assert faulted_launcher != local_prepare_module._CHILD_LAUNCHER
+    monkeypatch.setattr(local_prepare_module, "_CHILD_LAUNCHER", faulted_launcher)
+
+    metadata = tmp_path.stat()
+    invocation = _ChildInvocation(
+        started_path=tmp_path / "init.started",
+        stdout_path=tmp_path / "init.stdout",
+        started_payload=b'{"started":true}',
+        request_dir_device=metadata.st_dev,
+        request_dir_inode=metadata.st_ino,
+        run_lock_descriptors=(),
+        launcher_fault_stage=fault_stage,
+    )
+    target_path = tmp_path / "target-ran"
+
+    handle = _default_child_runner(
+        (
+            sys.executable,
+            "-c",
+            "from pathlib import Path; Path(r'"
+            + str(target_path)
+            + "').write_text('ran', encoding='utf-8')",
+        ),
+        tmp_path,
+        30,
+        invocation,
+    )
+    handle.wait()
+
+    assert not target_path.exists()
+    assert not invocation.started_path.exists()
+
+
 def test_started_ack_resets_target_deadline_after_slow_marker_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1158,6 +1790,58 @@ def test_commit_without_started_ack_or_marker_cancels_entire_launcher_group(
     assert committed.is_set()
     assert killed_process_groups == [MissingMarkerLauncher.pid]
     assert invocation.started_path.exists() is False
+
+
+def test_child_runner_closes_all_pipe_fds_when_launcher_spawn_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader_batch.v2_local_prepare as local_prepare_module
+
+    metadata = tmp_path.stat()
+    invocation = _ChildInvocation(
+        started_path=tmp_path / "init.started",
+        stdout_path=tmp_path / "init.stdout",
+        started_payload=b'{"started":true}',
+        request_dir_device=metadata.st_dev,
+        request_dir_inode=metadata.st_ino,
+        run_lock_descriptors=(),
+    )
+    real_pipe = local_prepare_module.os.pipe
+    pipe_fds: list[int] = []
+
+    def tracked_pipe() -> tuple[int, int]:
+        descriptors = real_pipe()
+        pipe_fds.extend(descriptors)
+        return descriptors
+
+    def failed_popen(*_args, **_kwargs):
+        raise OSError("fixture launcher spawn failure")
+
+    monkeypatch.setattr(local_prepare_module.os, "pipe", tracked_pipe)
+    monkeypatch.setattr(local_prepare_module.subprocess, "Popen", failed_popen)
+    request_dir_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    still_open: list[int] = []
+    try:
+        with pytest.raises(_ChildProtocolError, match="could not start"):
+            local_prepare_module._default_child_runner_anchored(
+                (sys.executable, "-c", "raise SystemExit(0)"),
+                tmp_path,
+                30,
+                invocation,
+                request_dir_fd,
+            )
+        for descriptor in pipe_fds:
+            try:
+                os.fstat(descriptor)
+            except OSError:
+                continue
+            still_open.append(descriptor)
+        assert still_open == []
+    finally:
+        os.close(request_dir_fd)
+        for descriptor in still_open:
+            os.close(descriptor)
 
 
 def test_missing_started_ack_reads_marker_from_held_request_directory(

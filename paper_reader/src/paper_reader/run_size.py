@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 
@@ -20,6 +20,7 @@ def projected_run_size(
     *,
     staging_dir: Path | None = None,
     replacements: Mapping[Path, bytes] | None = None,
+    retained_replacement_paths: Iterable[Path] = (),
 ) -> int:
     root = Path(run_dir).resolve(strict=True)
     staging = Path(staging_dir).resolve(strict=True) if staging_dir is not None else None
@@ -27,6 +28,13 @@ def projected_run_size(
         Path(path).resolve(strict=False): content
         for path, content in (replacements or {}).items()
     }
+    retained = {
+        Path(path).resolve(strict=False) for path in retained_replacement_paths
+    }
+    if not retained.issubset(replacement_bytes):
+        raise ValueError(
+            "retained replacement paths must also have replacement content"
+        )
     total = 0
     for path in root.rglob("*"):
         if path.is_symlink() or not path.is_file():
@@ -34,7 +42,7 @@ def projected_run_size(
         resolved = path.resolve(strict=True)
         if staging is not None and _inside(resolved, staging):
             continue
-        if resolved in replacement_bytes:
+        if resolved in replacement_bytes and resolved not in retained:
             continue
         total += path.stat().st_size
     if staging is not None:
@@ -53,11 +61,13 @@ def enforce_projected_run_size(
     max_bytes: int,
     staging_dir: Path | None = None,
     replacements: Mapping[Path, bytes] | None = None,
+    retained_replacement_paths: Iterable[Path] = (),
 ) -> int:
     actual = projected_run_size(
         run_dir,
         staging_dir=staging_dir,
         replacements=replacements,
+        retained_replacement_paths=retained_replacement_paths,
     )
     if actual > max_bytes:
         raise RunSizeLimitError(actual_bytes=actual, max_bytes=max_bytes)

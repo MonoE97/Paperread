@@ -7,6 +7,8 @@ from paper_reader_batch.v2_contracts import (
     EventCommandResultSnapshot,
     FinishedData,
     LeaseMutationData,
+    ResumedLocalPrepareLease,
+    RunRecoveredData,
     StateItem,
 )
 from paper_reader_batch.v2_errors import BatchRuntimeError
@@ -138,6 +140,28 @@ def _claim_event(view, assignment: ClaimAssignment, *, occurred_at: str) -> Batc
     )
 
 
+def _local_claim_event(view, assignment: ClaimAssignment, *, occurred_at: str) -> BatchEvent:
+    return BatchEvent(
+        schema_version="paper_reader_batch.event.v2",
+        sequence=view.state.next_sequence,
+        event_id="33333333-3333-4333-8333-333333333333",
+        occurred_at=occurred_at,
+        request_id="44444444-4444-4444-8444-444444444444",
+        command="local-prepare.claim",
+        request_fingerprint="5" * 64,
+        manifest_sha256=view.manifest_sha256,
+        previous_event_sha256=view.state.latest_event_sha256,
+        data=ClaimedData(kind="local_prepare.claimed", assignments=[assignment]),
+        command_result=EventCommandResultSnapshot(
+            schema_version="paper_reader_batch.command-result.v2",
+            command="local-prepare.claim",
+            request_id="44444444-4444-4444-8444-444444444444",
+            semantic_result_sha256="6" * 64,
+        ),
+        event_sha256="7" * 64,
+    )
+
+
 def _assignment(view, item_index: int, *, issued_at: str, expires_at: str) -> ClaimAssignment:
     item = view.manifest.items[item_index]
     return ClaimAssignment(
@@ -177,6 +201,165 @@ def test_reducer_rejects_claim_that_exceeds_manifest_capacity(tmp_path) -> None:
 
     with pytest.raises(BatchRuntimeError) as exc_info:
         apply_event(view.state, view.manifest, event)
+    assert exc_info.value.code == "journal_corrupt"
+
+
+@pytest.mark.parametrize("lane", ["worker", "local_prepare"])
+def test_reducer_rejects_claim_event_with_multiple_pdf_assignments(
+    tmp_path,
+    lane: str,
+) -> None:
+    run_dir = _run(tmp_path, concurrency=2, pdf_count=2)
+    view = load_run_view(run_dir)
+    first = _assignment(
+        view,
+        0,
+        issued_at="2026-07-10T00:00:01Z",
+        expires_at="2026-07-10T00:15:01Z",
+    ).model_copy(update={"lane": lane})
+    second = _assignment(
+        view,
+        1,
+        issued_at="2026-07-10T00:00:01Z",
+        expires_at="2026-07-10T00:15:01Z",
+    ).model_copy(
+        update={
+            "lane": lane,
+            "claim_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "attempt_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "lease_token_sha256": "c" * 64,
+        }
+    )
+    event = _claim_event(view, first, occurred_at="2026-07-10T00:00:01Z")
+    command = "worker.claim" if lane == "worker" else "local-prepare.claim"
+    event = BatchEvent.model_validate(
+        {
+            **event.model_dump(mode="json"),
+            "command": command,
+            "data": ClaimedData(
+                kind="worker.claimed" if lane == "worker" else "local_prepare.claimed",
+                assignments=[first, second],
+            ).model_dump(mode="json"),
+            "command_result": {
+                **event.command_result.model_dump(mode="json"),
+                "command": command,
+            },
+        }
+    )
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        apply_event(view.state, view.manifest, event)
+
+    assert exc_info.value.code == "journal_corrupt"
+
+
+def test_reducer_rejects_new_local_attempt_after_coordination_uncertain(tmp_path) -> None:
+    run_dir = _run(tmp_path, concurrency=1, pdf_count=1)
+    view = load_run_view(run_dir)
+    initial = view.state.items[0]
+    uncertain = StateItem.model_validate(
+        initial.model_copy(
+            update={
+                "local_prepare_status": "blocked",
+                "local_prepare_attempt_count": 1,
+                "local_prepare_result_sha256": "1" * 64,
+                "local_prepare_last_actor_id": "preparer",
+                "local_prepare_last_claim_id": "88888888-8888-4888-8888-888888888888",
+                "local_prepare_last_attempt_id": "99999999-9999-4999-8999-999999999999",
+                "local_prepare_last_lease_token_sha256": "a" * 64,
+                "local_prepare_last_expires_at": "2026-07-10T00:15:00Z",
+                "local_prepare_failure_code": "coordination_uncertain",
+                "local_prepare_failure_message": "the original attempt may have executed",
+            }
+        ).model_dump(mode="json")
+    )
+    state = type(view.state).model_validate(
+        view.state.model_copy(update={"items": [uncertain]}).model_dump(mode="json")
+    )
+    manifest_item = view.manifest.items[0]
+    assignment = ClaimAssignment(
+        item_id=manifest_item.item_id,
+        lane="local_prepare",
+        actor_id="attempt-2",
+        claim_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        attempt_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        attempt_number=2,
+        lease_token_sha256="c" * 64,
+        issued_at="2026-07-10T00:00:01Z",
+        expires_at="2026-07-10T00:15:01Z",
+        source=manifest_item.source,
+    )
+    event = _local_claim_event(view, assignment, occurred_at="2026-07-10T00:00:01Z")
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        apply_event(state, view.manifest, event)
+
+    assert exc_info.value.code == "journal_corrupt"
+
+
+def test_reducer_rejects_blocked_uncertain_resume_with_stale_previous_expiry(tmp_path) -> None:
+    run_dir = _run(tmp_path, concurrency=1, pdf_count=1)
+    assignment = claim_local_prepare(
+        run_dir,
+        worker_id="preparer",
+        request_id="33333333-3333-4333-8333-333333333333",
+        now="2026-07-10T00:00:01Z",
+    ).result["assignments"][0]
+    view = load_run_view(run_dir)
+    claimed_item = view.state.items[0]
+    blocked_item = StateItem.model_validate(
+        claimed_item.model_copy(
+            update={
+                "local_prepare_status": "blocked",
+                "local_prepare_lease": None,
+                "local_prepare_result_sha256": "1" * 64,
+                "local_prepare_failure_code": "coordination_uncertain",
+                "local_prepare_failure_message": "the original attempt may have executed",
+            }
+        ).model_dump(mode="json")
+    )
+    blocked_state = type(view.state).model_validate(
+        view.state.model_copy(update={"items": [blocked_item]}).model_dump(mode="json")
+    )
+    event = BatchEvent(
+        schema_version="paper_reader_batch.event.v2",
+        sequence=blocked_state.next_sequence,
+        event_id="44444444-4444-4444-8444-444444444444",
+        occurred_at="2026-07-10T00:15:01Z",
+        request_id="55555555-5555-4555-8555-555555555555",
+        command="run.recover",
+        request_fingerprint="6" * 64,
+        manifest_sha256=view.manifest_sha256,
+        previous_event_sha256=blocked_state.latest_event_sha256,
+        data=RunRecoveredData(
+            resumed_local_prepare_leases=[
+                ResumedLocalPrepareLease(
+                    item_id=assignment["item_id"],
+                    actor_id=assignment["worker_id"],
+                    claim_id=assignment["claim_id"],
+                    attempt_id=assignment["attempt_id"],
+                    attempt_number=assignment["attempt_number"],
+                    lease_token_sha256=claimed_item.local_prepare_lease.lease_token_sha256,
+                    previous_expires_at="2026-07-10T00:00:05Z",
+                    issued_at="2026-07-10T00:15:01Z",
+                    expires_at="2026-07-10T00:30:01Z",
+                )
+            ],
+            snapshot_repaired=False,
+            reconciliation_write=None,
+        ),
+        command_result=EventCommandResultSnapshot(
+            schema_version="paper_reader_batch.command-result.v2",
+            command="run.recover",
+            request_id="55555555-5555-4555-8555-555555555555",
+            semantic_result_sha256="7" * 64,
+        ),
+        event_sha256="8" * 64,
+    )
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        apply_event(blocked_state, view.manifest, event)
+
     assert exc_info.value.code == "journal_corrupt"
 
 
@@ -233,6 +416,7 @@ def test_pdf_worker_success_supersedes_failed_local_prepare_state(
                 "local_prepare_last_claim_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                 "local_prepare_last_attempt_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 "local_prepare_last_lease_token_sha256": "c" * 64,
+                "local_prepare_last_expires_at": "2026-07-10T00:15:00Z",
                 "local_prepare_coordination_request_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
                 "local_prepare_coordination_fingerprint": "failed-coordination",
                 "local_prepare_coordination_device": 1,

@@ -86,6 +86,55 @@ def test_fetch_item_children_notes_paginates_until_short_page() -> None:
     assert notes[-1]["title"] == "[Codex Summary] Paper - 2026-06-22 (v100)"
 
 
+def test_fetch_item_children_notes_fails_closed_on_repeated_page() -> None:
+    page = [
+        {
+            "key": "N1",
+            "data": {
+                "itemType": "note",
+                "parentItem": "P1",
+                "note": "<h1>Repeated</h1>",
+                "tags": [],
+            },
+        }
+    ]
+    calls: list[str] = []
+
+    def fake_fetch_json(url: str) -> object:
+        calls.append(url)
+        return page
+
+    with pytest.raises(ValueError) as exc_info:
+        fetch_item_children_notes(
+            "P1",
+            fetch_json=fake_fetch_json,
+            page_size=1,
+            max_pages=3,
+            max_children=3,
+        )
+
+    assert getattr(exc_info.value, "code", None) == "zotero_children_pagination_stalled"
+    assert len(calls) == 2
+
+
+def test_fetch_item_children_notes_bounds_all_children_before_filtering_notes() -> None:
+    page = [
+        {"key": "A1", "data": {"itemType": "attachment"}},
+        {"key": "A2", "data": {"itemType": "attachment"}},
+    ]
+
+    with pytest.raises(ValueError) as exc_info:
+        fetch_item_children_notes(
+            "P1",
+            fetch_json=lambda _url: page,
+            page_size=2,
+            max_pages=2,
+            max_children=1,
+        )
+
+    assert getattr(exc_info.value, "code", None) == "zotero_children_member_limit_exceeded"
+
+
 def test_refresh_details_with_live_notes_records_provenance() -> None:
     details = {"key": "P1", "title": "Paper", "notes": ["old"]}
     live_notes = [

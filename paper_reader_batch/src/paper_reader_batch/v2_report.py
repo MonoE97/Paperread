@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from html import escape
 from pathlib import Path
@@ -8,11 +9,6 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from paper_reader_batch.v2_artifacts import (
-    ForeignArtifactRef,
-    ForeignCandidate,
-    ForeignSummary,
-)
 from paper_reader_batch.v2_contracts import (
     LOCAL_PREPARE_RESULT_SCHEMA_VERSION,
     RECONCILIATION_SCHEMA_VERSION,
@@ -28,23 +24,30 @@ from paper_reader_batch.v2_contracts import (
     StateItem,
     WorkerResult,
     WriteResult,
-    local_prepare_result_canonical_payload,
 )
 from paper_reader_batch.v2_errors import BatchRuntimeError
 from paper_reader_batch.v2_json import (
+    MAX_JSON_ARTIFACT_BYTES,
+    MAX_OPAQUE_ARTIFACT_BYTES,
+    active_transition_targets,
     canonical_json_bytes,
     canonical_sha256,
+    completed_transition_matches,
     entry_exists,
+    held_exact_sibling_files,
     locked_file,
     normalized_absolute_path,
     publish_bytes_no_replace,
     read_bytes,
+    read_committed_transitions,
+    read_active_transition_owner,
     read_locked_bytes,
+    read_pending_swap,
     replace_bytes_atomic,
     sha256_bytes,
-    utc_now,
     validate_locked_path,
 )
+from paper_reader_batch.v2_reducer import apply_event, initial_state
 
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
@@ -53,6 +56,7 @@ _CONCLUSION_SECTION_HEADING = re.compile(r"^##\s+0\.\s*阅读结论\s*#*\s*$")
 _SECOND_LEVEL_HEADING = re.compile(r"^##(?:\s|$)")
 _FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
 _ZERO_SHA256 = "0" * 64
+_REPORT_REPLACE_TARGETS = frozenset({"state.json", "batch-report.json", "batch-report.md"})
 
 
 def _invalid(message: str, cause: Exception | None = None) -> BatchRuntimeError:
@@ -62,20 +66,31 @@ def _invalid(message: str, cause: Exception | None = None) -> BatchRuntimeError:
     return error
 
 
+def _ref_read_limit(size_bytes: object, *, json_artifact: bool) -> int:
+    if type(size_bytes) is not int or size_bytes < 0:
+        raise _invalid("artifact reference must declare non-negative integer size_bytes")
+    limit = MAX_JSON_ARTIFACT_BYTES if json_artifact else MAX_OPAQUE_ARTIFACT_BYTES
+    return min(size_bytes, limit)
+
+
 def _read_outer_model(
     ref: ArtifactRef,
-    model_type: type[_ModelT],
+    model_type: type[_ModelT] | None = None,
     *,
     schema_version: str,
     basename: str,
     id_field: str,
-) -> tuple[Path, bytes, _ModelT]:
+) -> tuple[Path, bytes, _ModelT | dict[str, object]]:
     if ref.schema_version != schema_version:
         raise _invalid(f"artifact ref schema must be exactly {schema_version}")
     path = normalized_absolute_path(Path(ref.path))
     if path.name != basename:
         raise _invalid(f"artifact ref must target {basename}")
-    raw = read_bytes(path, code="report_source_invalid")
+    raw = read_bytes(
+        path,
+        code="report_source_invalid",
+        max_bytes=_ref_read_limit(ref.size_bytes, json_artifact=True),
+    )
     if len(raw) != ref.size_bytes or sha256_bytes(raw) != ref.sha256:
         raise _invalid(f"artifact ref bytes differ from bound size/hash: {path}")
     try:
@@ -87,14 +102,18 @@ def _read_outer_model(
         raise _invalid(f"artifact ref is not strict JSON: {path}", exc)
     if not isinstance(payload, dict) or payload.get("schema_version") != schema_version:
         raise _invalid(f"artifact envelope schema must be exactly {schema_version}: {path}")
-    try:
-        # JSON arrays are the canonical wire representation of strict tuple
-        # fields in the single-paper contracts. Validate from the wire bytes,
-        # not from an intermediate Python list.
-        model = model_type.model_validate_json(raw)
-    except ValidationError as exc:
-        raise _invalid(f"artifact envelope fails strict validation: {path}", exc)
-    if raw != canonical_json_bytes(model) or getattr(model, id_field) != ref.artifact_id:
+    if model_type is None:
+        model: _ModelT | dict[str, object] = payload
+        payload_for_hash = payload
+        artifact_id = payload.get(id_field)
+    else:
+        try:
+            model = model_type.model_validate_json(raw)
+        except ValidationError as exc:
+            raise _invalid(f"artifact envelope fails strict validation: {path}", exc)
+        payload_for_hash = model.model_dump(mode="json")
+        artifact_id = getattr(model, id_field)
+    if raw != canonical_json_bytes(payload_for_hash) or artifact_id != ref.artifact_id:
         raise _invalid(f"artifact envelope is noncanonical or has a mismatched id: {path}")
     return path, raw, model
 
@@ -102,22 +121,32 @@ def _read_outer_model(
 def _read_candidate_inner(
     run_dir: Path,
     candidate_dir: Path,
-    candidate: ForeignCandidate,
+    candidate: dict[str, object],
     *,
     role: str,
     basename: str,
     media_type: str,
-) -> tuple[Path, bytes, ForeignArtifactRef]:
-    matches = [ref for ref in candidate.artifacts if ref.role == role]
+) -> tuple[Path, bytes, dict[str, object]]:
+    artifacts = candidate.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise _invalid("candidate artifacts must be a JSON array")
+    matches = [ref for ref in artifacts if isinstance(ref, dict) and ref.get("role") == role]
     if len(matches) != 1:
         raise _invalid(f"candidate must bind exactly one {role} artifact")
     ref = matches[0]
     expected_path = candidate_dir / basename
     expected_relative = expected_path.relative_to(run_dir).as_posix()
-    if ref.path != expected_relative or ref.media_type != media_type:
+    if ref.get("path") != expected_relative or ref.get("media_type") != media_type:
         raise _invalid(f"candidate {role} ref does not use its fixed path/media type")
-    raw = read_bytes(expected_path, code="report_source_invalid")
-    if len(raw) != ref.size_bytes or sha256_bytes(raw) != ref.sha256:
+    raw = read_bytes(
+        expected_path,
+        code="report_source_invalid",
+        max_bytes=_ref_read_limit(
+            ref.get("size_bytes"),
+            json_artifact=(media_type == "application/json"),
+        ),
+    )
+    if len(raw) != ref.get("size_bytes") or sha256_bytes(raw) != ref.get("sha256"):
         raise _invalid(f"candidate {role} bytes differ from the immutable ref")
     return expected_path, raw, ref
 
@@ -232,13 +261,17 @@ def _extract_markdown_takeaway(markdown: str) -> tuple[str, str] | None:
 def _takeaway_from_candidate(candidate_ref: ArtifactRef) -> dict[str, str]:
     candidate_path, _candidate_raw, candidate = _read_outer_model(
         candidate_ref,
-        ForeignCandidate,
         schema_version="paper_reader.candidate.v2",
         basename="candidate.json",
         id_field="candidate_id",
     )
     candidate_dir = candidate_path.parent
-    if candidate_dir.name != candidate.candidate_id or candidate_dir.parent.name != "candidates":
+    candidate_id = candidate.get("candidate_id")
+    if (
+        not isinstance(candidate_id, str)
+        or candidate_dir.name != candidate_id
+        or candidate_dir.parent.name != "candidates"
+    ):
         raise _invalid("candidate ref is outside its fixed run/candidates/<candidate_id> directory")
     run_dir = candidate_dir.parent.parent
     note_path, note_raw, _note_ref = _read_candidate_inner(
@@ -272,17 +305,30 @@ def _takeaway_from_candidate(candidate_ref: ArtifactRef) -> dict[str, str]:
         }
 
     try:
-        summary = ForeignSummary.model_validate_json(summary_raw)
-    except ValidationError as exc:
-        raise _invalid("candidate summary fallback fails strict validation", exc)
-    if summary_raw != canonical_json_bytes(summary):
+        summary = json.loads(
+            summary_raw,
+            parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        raise _invalid("candidate summary fallback is invalid JSON", exc)
+    if (
+        not isinstance(summary, dict)
+        or summary.get("schema_version") != "paper_reader.summary.v2"
+        or summary_raw != canonical_json_bytes(summary)
+    ):
         raise _invalid("candidate summary fallback is not canonical JSON")
-    tldr = summary.tldr.strip() if summary.tldr is not None else ""
+    tldr_value = summary.get("tldr")
+    one_sentence_value = summary.get("one_sentence_summary")
+    if tldr_value is not None and not isinstance(tldr_value, str):
+        raise _invalid("candidate summary tldr fallback must be a string or null")
+    if not isinstance(one_sentence_value, str):
+        raise _invalid("candidate summary one_sentence_summary fallback must be a string")
+    tldr = tldr_value.strip() if isinstance(tldr_value, str) else ""
     if tldr:
         takeaway = tldr
         source_type = "structured_tldr_fallback"
     else:
-        takeaway = summary.one_sentence_summary.strip()
+        takeaway = one_sentence_value.strip()
         source_type = "structured_one_sentence_summary_fallback"
     if not takeaway:
         raise _invalid("candidate has no 30 秒结论, tldr, or one_sentence_summary")
@@ -303,7 +349,11 @@ def _load_result(
     schema_version: str,
 ) -> _ModelT:
     path = run_dir / "results" / lane / f"{digest}.json"
-    raw = read_bytes(path, code="journal_corrupt")
+    raw = read_bytes(
+        path,
+        code="journal_corrupt",
+        max_bytes=MAX_JSON_ARTIFACT_BYTES,
+    )
     if sha256_bytes(raw) != digest:
         raise BatchRuntimeError("journal_corrupt", f"{lane} result digest differs from state ref")
     try:
@@ -322,12 +372,7 @@ def _load_result(
         result = model_type.model_validate(payload)
     except ValidationError as exc:
         raise BatchRuntimeError("journal_corrupt", f"{lane} result fails strict validation") from exc
-    canonical_result = (
-        local_prepare_result_canonical_payload(result)
-        if isinstance(result, LocalPrepareResult)
-        else result
-    )
-    if raw != canonical_json_bytes(canonical_result):
+    if raw != canonical_json_bytes(result):
         raise BatchRuntimeError("journal_corrupt", f"{lane} result is not canonical JSON")
     return result
 
@@ -570,22 +615,281 @@ def _render_markdown(report: BatchReport, *, batch_title: str) -> bytes:
     return "\n".join(lines).encode("utf-8")
 
 
-def _replace_or_publish(path: Path, content: bytes) -> None:
+def _replace_or_publish(path: Path, content: bytes, *, transition_id: str) -> None:
+    max_bytes = (
+        MAX_JSON_ARTIFACT_BYTES
+        if path.suffix.casefold() == ".json"
+        else MAX_OPAQUE_ARTIFACT_BYTES
+    )
+    if len(content) > max_bytes:
+        raise BatchRuntimeError(
+            "report_output_invalid",
+            f"generated report exceeds its {max_bytes}-byte output limit: {path}",
+        )
     if entry_exists(path):
-        current = read_bytes(path, code="report_output_invalid")
+        current = read_bytes(
+            path,
+            code="report_output_invalid",
+            max_bytes=max_bytes,
+        )
         if current == content:
             return
-        replace_bytes_atomic(path, content, expected_current=current)
+        replace_bytes_atomic(
+            path,
+            content,
+            expected_current=current,
+            transition_id=transition_id,
+            allowed_transition_targets=_REPORT_REPLACE_TARGETS,
+        )
     else:
         publish_bytes_no_replace(path, content)
 
 
-def run_report(run_dir: Path, *, generated_at: str | None = None) -> dict[str, Any]:
+def _build_report_artifacts(view, *, generated_at: str) -> tuple[BatchReport, bytes, bytes]:
+    report = _build_report(view, generated_at=generated_at)
+    report_core = report.model_dump(
+        mode="json",
+        exclude={"report_generation_id", "report_markdown_sha256"},
+    )
+    generation_id = canonical_sha256(
+        {
+            "report": report_core,
+            "latest_event_sha256": view.state.latest_event_sha256,
+        }
+    )
+    report = report.model_copy(update={"report_generation_id": generation_id})
+    markdown_bytes = _render_markdown(report, batch_title=view.manifest.batch_title)
+    report = BatchReport.model_validate(
+        report.model_copy(
+            update={"report_markdown_sha256": sha256_bytes(markdown_bytes)}
+        ).model_dump(mode="json")
+    )
+    return report, canonical_json_bytes(report), markdown_bytes
+
+
+def _recover_report_swaps(view) -> None:
+    json_path = view.run_dir / "batch-report.json"
+    markdown_path = view.run_dir / "batch-report.md"
+    prefix_views = []
+    prefix_state = initial_state(view.manifest, view.events[0])
+    prefix_events = [view.events[0]]
+    prefix_views.append(replace(view, state=prefix_state, events=list(prefix_events)))
+    for event in view.events[1:]:
+        prefix_state = apply_event(prefix_state, view.manifest, event)
+        prefix_events.append(event)
+        prefix_views.append(replace(view, state=prefix_state, events=list(prefix_events)))
+
+    active = active_transition_targets(
+        view.run_dir,
+        replace_targets=_REPORT_REPLACE_TARGETS,
+    )
+    for path, limit in (
+        (markdown_path, MAX_OPAQUE_ARTIFACT_BYTES),
+        (json_path, MAX_JSON_ARTIFACT_BYTES),
+    ):
+        if path.name not in active:
+            continue
+        owner_raw = read_active_transition_owner(
+            path,
+            replace_targets=_REPORT_REPLACE_TARGETS,
+        )
+        if owner_raw is None:
+            raise BatchRuntimeError("unsafe_storage", "report transition payload has no active owner")
+        owner = json.loads(owner_raw)
+        pending = read_pending_swap(
+            path,
+            max_bytes=limit,
+            replace_targets=_REPORT_REPLACE_TARGETS,
+        )
+        committed = read_committed_transitions(
+            path,
+            max_bytes=limit,
+            replace_targets=_REPORT_REPLACE_TARGETS,
+        )
+        if pending is not None:
+            previous_raw, desired_raw = pending
+        elif committed:
+            desired_raw, previous_raw, _transition_name = committed[0]
+        else:
+            previous_raw = read_bytes(path, code="report_output_invalid", max_bytes=limit)
+            candidates: list[bytes] = []
+            for prefix_view in prefix_views:
+                _model, expected_json, expected_markdown = _build_report_artifacts(
+                    prefix_view,
+                    generated_at=prefix_view.events[-1].occurred_at,
+                )
+                candidates.append(expected_json if path.suffix == ".json" else expected_markdown)
+            desired_matches = [
+                raw
+                for raw in candidates
+                if sha256_bytes(raw) == owner["new_sha256"] and len(raw) == owner["new_size"]
+            ]
+            if len(desired_matches) != 1:
+                raise BatchRuntimeError(
+                    "storage_recovery_required",
+                    "owner-only report transition cannot be reconstructed from durable journal time",
+                )
+            desired_raw = desired_matches[0]
+        if (
+            sha256_bytes(previous_raw) != owner["old_sha256"]
+            or len(previous_raw) != owner["old_size"]
+            or sha256_bytes(desired_raw) != owner["new_sha256"]
+            or len(desired_raw) != owner["new_size"]
+        ):
+            raise BatchRuntimeError("unsafe_storage", "active report transition differs from its owner mapping")
+        replace_bytes_atomic(
+            path,
+            desired_raw,
+            expected_current=previous_raw,
+            transition_id=owner["transition_id"],
+            allowed_transition_targets=_REPORT_REPLACE_TARGETS,
+        )
+
+    json_exists = entry_exists(json_path)
+    markdown_exists = entry_exists(markdown_path)
+    if not json_exists and not markdown_exists:
+        return
+    if json_exists and not markdown_exists:
+        raise BatchRuntimeError(
+            "unsafe_storage",
+            "report JSON commit marker exists without its Markdown payload",
+        )
+
+    json_public = (
+        read_bytes(json_path, code="report_output_invalid", max_bytes=MAX_JSON_ARTIFACT_BYTES)
+        if json_exists
+        else None
+    )
+    markdown_public = read_bytes(
+        markdown_path,
+        code="report_output_invalid",
+        max_bytes=MAX_OPAQUE_ARTIFACT_BYTES,
+    )
+    json_pending = (
+        read_pending_swap(
+            json_path,
+            max_bytes=MAX_JSON_ARTIFACT_BYTES,
+            replace_targets=_REPORT_REPLACE_TARGETS,
+        )
+        if json_exists
+        else None
+    )
+    markdown_pending = read_pending_swap(
+        markdown_path,
+        max_bytes=MAX_OPAQUE_ARTIFACT_BYTES,
+        replace_targets=_REPORT_REPLACE_TARGETS,
+    )
+    json_variants = [raw for raw in (json_public, json_pending[1] if json_pending else None) if raw is not None]
+    markdown_variants = [markdown_public]
+    if markdown_pending is not None and markdown_pending[1] not in markdown_variants:
+        markdown_variants.append(markdown_pending[1])
+
+    valid_json: dict[bytes, tuple[bytes, BatchReport]] = {}
+    for json_raw in json_variants:
+        try:
+            report = BatchReport.model_validate_json(json_raw)
+        except ValidationError:
+            continue
+        if canonical_json_bytes(report) != json_raw:
+            continue
+        for prefix_view in reversed(prefix_views):
+            try:
+                _model, expected_json, expected_markdown = _build_report_artifacts(
+                    prefix_view,
+                    generated_at=report.generated_at,
+                )
+            except BatchRuntimeError:
+                continue
+            if expected_json == json_raw:
+                valid_json[json_raw] = (expected_markdown, report)
+                break
+
+    valid_markdown: dict[bytes, tuple[bytes, BatchReport]] = {}
+    generated_line = re.compile(r"^- Generated: (?P<generated>[^\r\n]+)$", re.MULTILINE)
+    for markdown_raw in markdown_variants:
+        try:
+            markdown_text = markdown_raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        match = generated_line.search(markdown_text)
+        if match is None:
+            continue
+        for prefix_view in reversed(prefix_views):
+            try:
+                expected_model, expected_json, expected_markdown = _build_report_artifacts(
+                    prefix_view,
+                    generated_at=match.group("generated"),
+                )
+            except BatchRuntimeError:
+                continue
+            if markdown_raw == expected_markdown:
+                valid_markdown[markdown_raw] = (expected_json, expected_model)
+                break
+    if set(json_variants) - set(valid_json) or set(markdown_variants) - set(valid_markdown):
+        raise BatchRuntimeError(
+            "unsafe_storage",
+            "report transition contains bytes not bound to a current-journal report",
+        )
+
+    desired_json: bytes
+    desired_markdown: bytes
+    desired_report: BatchReport
+    if json_pending is not None:
+        desired_json = json_pending[1]
+        desired_markdown, desired_report = valid_json[desired_json]
+        if markdown_pending is not None and markdown_pending[1] != desired_markdown:
+            raise BatchRuntimeError("unsafe_storage", "report transitions target different generations")
+        if markdown_public != desired_markdown and markdown_pending is None:
+            raise BatchRuntimeError("unsafe_storage", "JSON transition started before Markdown became durable")
+    elif markdown_pending is not None:
+        desired_markdown = markdown_pending[1]
+        desired_json, desired_report = valid_markdown[desired_markdown]
+    else:
+        assert markdown_public is not None
+        desired_json, desired_report = valid_markdown[markdown_public]
+        desired_markdown = markdown_public
+        if json_public == desired_json:
+            return
+        if json_public is not None:
+            previous_markdown, _previous_report = valid_json[json_public]
+            if not completed_transition_matches(
+                markdown_path,
+                transition_id=f"report:{desired_report.report_generation_id}:markdown",
+                previous_data=previous_markdown,
+                data=markdown_public,
+                replace_targets=_REPORT_REPLACE_TARGETS,
+            ):
+                raise BatchRuntimeError(
+                    "unsafe_storage",
+                    "mismatched report pair has no completed Markdown transition provenance",
+                )
+
+    generation_id = desired_report.report_generation_id
+    _replace_or_publish(
+        markdown_path,
+        desired_markdown,
+        transition_id=f"report:{generation_id}:markdown",
+    )
+    _replace_or_publish(
+        json_path,
+        desired_json,
+        transition_id=f"report:{generation_id}:json",
+    )
+    if (
+        read_bytes(json_path, code="report_output_invalid", max_bytes=MAX_JSON_ARTIFACT_BYTES)
+        != desired_json
+        or read_bytes(markdown_path, code="report_output_invalid", max_bytes=MAX_OPAQUE_ARTIFACT_BYTES)
+        != desired_markdown
+    ):
+        raise BatchRuntimeError("storage_path_changed", "recovered report pair changed after publication")
+
+
+def run_report(run_dir: Path) -> dict[str, Any]:
     """Replay V2 truth and publish Markdown before its JSON commit marker."""
 
     from paper_reader_batch.v2_journal import load_run_view
 
-    preflight = load_run_view(run_dir)
+    preflight = load_run_view(run_dir, ignore_report_swaps=True)
     lock_path = preflight.run_dir / ".run.lock"
     inherited_descriptors: list[int] = []
     with locked_file(
@@ -600,7 +904,9 @@ def run_report(run_dir: Path, *, generated_at: str | None = None) -> dict[str, A
             held_lease_secret=lease_secret,
             lock_descriptor=descriptor,
             lock_ancestor_descriptors=tuple(inherited_descriptors),
+            ignore_report_swaps=True,
         )
+        _recover_report_swaps(view)
         if (
             view.pending_event is not None
             or view.incomplete_event_writes
@@ -611,32 +917,97 @@ def run_report(run_dir: Path, *, generated_at: str | None = None) -> dict[str, A
                 "recovery_required",
                 "report generation requires a fully committed journal; run recover first",
             )
-        report = _build_report(view, generated_at=generated_at or utc_now())
-        report_core = report.model_dump(
-            mode="json",
-            exclude={"report_generation_id", "report_markdown_sha256"},
+        report, report_bytes, markdown_bytes = _build_report_artifacts(
+            view,
+            # Report identity is derived only from replayed journal truth. The
+            # durable event time lets owner-only recovery reconstruct exact
+            # bytes without a second reservation protocol.
+            generated_at=view.events[-1].occurred_at,
         )
-        generation_id = canonical_sha256(
-            {
-                "report": report_core,
-                "latest_event_sha256": view.state.latest_event_sha256,
-            }
-        )
-        report = report.model_copy(update={"report_generation_id": generation_id})
-        markdown_bytes = _render_markdown(report, batch_title=view.manifest.batch_title)
-        report = BatchReport.model_validate(
-            report.model_copy(
-                update={"report_markdown_sha256": sha256_bytes(markdown_bytes)}
-            ).model_dump(mode="json")
-        )
-        report_bytes = canonical_json_bytes(report)
         json_path = view.run_dir / "batch-report.json"
         markdown_path = view.run_dir / "batch-report.md"
+        previous_markdown = (
+            read_bytes(
+                markdown_path,
+                code="report_output_invalid",
+                max_bytes=MAX_OPAQUE_ARTIFACT_BYTES,
+            )
+            if entry_exists(markdown_path)
+            else None
+        )
+        previous_json = (
+            read_bytes(
+                json_path,
+                code="report_output_invalid",
+                max_bytes=MAX_JSON_ARTIFACT_BYTES,
+            )
+            if entry_exists(json_path)
+            else None
+        )
         validate_locked_path(lock_path, descriptor)
-        _replace_or_publish(markdown_path, markdown_bytes)
-        validate_locked_path(lock_path, descriptor)
-        _replace_or_publish(json_path, report_bytes)
-        validate_locked_path(lock_path, descriptor)
+        _replace_or_publish(
+            markdown_path,
+            markdown_bytes,
+            transition_id=f"report:{report.report_generation_id}:markdown",
+        )
+        with held_exact_sibling_files(
+            view.run_dir,
+            {markdown_path.name: markdown_bytes},
+        ) as markdown_guard:
+            validate_locked_path(lock_path, descriptor)
+            markdown_guard()
+            _replace_or_publish(
+                json_path,
+                report_bytes,
+                transition_id=f"report:{report.report_generation_id}:json",
+            )
+            validate_locked_path(lock_path, descriptor)
+            markdown_guard()
+            with held_exact_sibling_files(
+                view.run_dir,
+                {
+                    markdown_path.name: markdown_bytes,
+                    json_path.name: report_bytes,
+                },
+            ) as pair_guard:
+                pair_guard()
+                markdown_guard()
+                if (
+                    previous_markdown is not None
+                    and previous_markdown != markdown_bytes
+                    and not completed_transition_matches(
+                        markdown_path,
+                        transition_id=(
+                            f"report:{report.report_generation_id}:markdown"
+                        ),
+                        previous_data=previous_markdown,
+                        data=markdown_bytes,
+                        replace_targets=_REPORT_REPLACE_TARGETS,
+                    )
+                ):
+                    raise BatchRuntimeError(
+                        "storage_path_changed",
+                        "report Markdown lacks current transition provenance",
+                    )
+                if (
+                    previous_json is not None
+                    and previous_json != report_bytes
+                    and not completed_transition_matches(
+                        json_path,
+                        transition_id=f"report:{report.report_generation_id}:json",
+                        previous_data=previous_json,
+                        data=report_bytes,
+                        replace_targets=_REPORT_REPLACE_TARGETS,
+                    )
+                ):
+                    raise BatchRuntimeError(
+                        "storage_path_changed",
+                        "report JSON lacks current transition provenance",
+                    )
+                validate_locked_path(lock_path, descriptor)
+                pair_guard()
+                markdown_guard()
+                validate_locked_path(lock_path, descriptor)
 
     return {
         "run_dir": str(preflight.run_dir),

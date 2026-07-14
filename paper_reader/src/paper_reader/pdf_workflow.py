@@ -1,37 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import fitz
-
-
-@dataclass(frozen=True)
-class PDFOutputPaths:
-    analysis_dir: Path
-    final_note_path: Path
-    version_suffix: str
-
-
-def allocate_pdf_output_paths(pdf_path: Path) -> PDFOutputPaths:
-    """Return non-overwriting analysis and final-note paths next to a PDF."""
-    resolved = Path(pdf_path).expanduser()
-    parent = resolved.parent
-    stem = resolved.stem
-    version = 1
-    while True:
-        suffix = "" if version == 1 else f"_v{version}"
-        analysis_dir = parent / f"{stem}_analysis{suffix}"
-        final_note_path = parent / f"{stem}_note{suffix}.md"
-        if not analysis_dir.exists() and not final_note_path.exists():
-            return PDFOutputPaths(
-                analysis_dir=analysis_dir,
-                final_note_path=final_note_path,
-                version_suffix=suffix,
-            )
-        version += 1
-
 
 def _clean_override(value: str | None) -> str:
     return str(value).strip() if value is not None else ""

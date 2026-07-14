@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from dataclasses import dataclass
 from datetime import date
 from html import unescape
@@ -36,6 +37,7 @@ from paper_reader.storage import (
     new_random_id,
     new_uuid,
     open_anchored_directory,
+    open_resolved_source_guard,
     remove_anchored_tree,
     rfc3339_utc,
     tree_snapshot_from_bytes,
@@ -159,23 +161,86 @@ def parent_fingerprint(parent: dict[str, Any]) -> str:
     )
 
 
-def _read_bundle(path: Path) -> tuple[bytes, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+def _bundle_file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _bundle_size_limit_error(size_bytes: int, max_bytes: int) -> ZoteroLifecycleError:
+    return ZoteroLifecycleError(
+        "run_size_limit_exceeded",
+        f"saved Zotero discovery bundle size {size_bytes} exceeds the run limit {max_bytes}",
+        data={"run_size_bytes": size_bytes, "max_bytes": max_bytes},
+    )
+
+
+def _read_stable_bundle_bytes(path: Path, *, max_bytes: int) -> bytes:
+    """Read one stable, single-link regular discovery file through no-follow descriptors."""
+    requested = Path(path).expanduser()
+    parent_fd = -1
+    descriptor = -1
     try:
-        bundle_path = Path(path).expanduser()
-        bundle_size = bundle_path.stat().st_size
-        if bundle_size > V2_RESOURCE_POLICY.run_max_bytes:
+        parent_path = requested.parent.resolve(strict=True)
+        parent_fd = os.open(
+            parent_path,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        named_before = os.stat(requested.name, dir_fd=parent_fd, follow_symlinks=False)
+        descriptor = os.open(
+            requested.name,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=parent_fd,
+        )
+        opened_before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened_before.st_mode)
+            or opened_before.st_nlink != 1
+            or _bundle_file_identity(named_before) != _bundle_file_identity(opened_before)
+        ):
             raise ZoteroLifecycleError(
-                "run_size_limit_exceeded",
-                (
-                    f"saved Zotero discovery bundle size {bundle_size} exceeds "
-                    f"the run limit {V2_RESOURCE_POLICY.run_max_bytes}"
-                ),
-                data={
-                    "run_size_bytes": bundle_size,
-                    "max_bytes": V2_RESOURCE_POLICY.run_max_bytes,
-                },
+                "discovery_bundle_unreadable",
+                "saved Zotero discovery bundle must be a stable single-link regular file",
             )
-        raw_bytes = bundle_path.read_bytes()
+        if opened_before.st_size > max_bytes:
+            raise _bundle_size_limit_error(opened_before.st_size, max_bytes)
+
+        chunks: list[bytes] = []
+        size_bytes = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, max_bytes - size_bytes + 1))
+            if not chunk:
+                break
+            size_bytes += len(chunk)
+            if size_bytes > max_bytes:
+                raise _bundle_size_limit_error(size_bytes, max_bytes)
+            chunks.append(chunk)
+
+        opened_after = os.fstat(descriptor)
+        named_after = os.stat(requested.name, dir_fd=parent_fd, follow_symlinks=False)
+        expected_identity = _bundle_file_identity(opened_before)
+        if (
+            _bundle_file_identity(opened_after) != expected_identity
+            or _bundle_file_identity(named_after) != expected_identity
+            or size_bytes != opened_after.st_size
+        ):
+            raise ZoteroLifecycleError(
+                "discovery_bundle_changed",
+                "saved Zotero discovery bundle changed while it was being read",
+            )
+        return b"".join(chunks)
     except ZoteroLifecycleError:
         raise
     except OSError as exc:
@@ -183,6 +248,18 @@ def _read_bundle(path: Path) -> tuple[bytes, dict[str, Any], dict[str, Any], lis
             "discovery_bundle_unreadable",
             f"saved Zotero discovery bundle is unreadable: {path}: {exc}",
         ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+
+def _read_bundle(path: Path) -> tuple[bytes, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    raw_bytes = _read_stable_bundle_bytes(
+        Path(path),
+        max_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+    )
     try:
         payload = json.loads(raw_bytes, parse_constant=_reject_nonfinite_json)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
@@ -487,25 +564,29 @@ def initialize_zotero_run(
     slug = slugify_title(title)
     resolved_pdf = Path(attachment_identity.resolved_path)
     try:
-        lock_handle = resolved_pdf.open("rb")
-    except OSError as exc:
+        source_guard_context = open_resolved_source_guard(
+            resolved_pdf,
+            max_bytes=V2_RESOURCE_POLICY.local_pdf_max_bytes,
+            expected_sha256=attachment_identity.sha256,
+            expected_size=attachment_identity.size_bytes,
+            expected_device=attachment_identity.device,
+            expected_inode=attachment_identity.inode,
+        )
+    except (OSError, ValueError) as exc:
         raise ZoteroLifecycleError(
             "zotero_pdf_unavailable",
             f"selected Zotero PDF became unavailable before allocation: {exc}",
         ) from exc
-    with lock_handle:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    with source_guard_context as source_guard:
+        fcntl.flock(source_guard.descriptor, fcntl.LOCK_EX)
         try:
-            locked_stat = os.fstat(lock_handle.fileno())
-            if (locked_stat.st_dev, locked_stat.st_ino, locked_stat.st_size) != (
-                attachment_identity.device,
-                attachment_identity.inode,
-                attachment_identity.size_bytes,
-            ):
+            try:
+                source_guard.verify()
+            except (OSError, ValueError) as exc:
                 raise ZoteroLifecycleError(
                     "zotero_pdf_unavailable",
-                    "selected Zotero PDF changed before run allocation",
-                )
+                    f"selected Zotero PDF changed before run allocation: {exc}",
+                ) from exc
             try:
                 root_anchor_context = DirectoryAnchor.open(
                     resolved_root,
@@ -548,6 +629,14 @@ def initialize_zotero_run(
                                 }
                             )
                             try:
+                                source_guard.verify()
+                            except (OSError, ValueError) as exc:
+                                raise ZoteroLifecycleError(
+                                    "zotero_pdf_unavailable",
+                                    "selected Zotero PDF changed before run publication: "
+                                    f"{exc}",
+                                ) from exc
+                            try:
                                 atomic_publish_tree(
                                     staging,
                                     destination,
@@ -563,6 +652,14 @@ def initialize_zotero_run(
                                     "initialization_failed",
                                     f"Zotero run reservation failed: {destination}: {exc}",
                                 ) from exc
+                            try:
+                                source_guard.verify()
+                            except (OSError, ValueError) as exc:
+                                raise ZoteroLifecycleError(
+                                    "zotero_pdf_unavailable",
+                                    "selected Zotero PDF changed while the run was allocated: "
+                                    f"{exc}",
+                                ) from exc
                             return InitializedZoteroRun(run_dir=destination, run=run)
                         finally:
                             try:
@@ -574,7 +671,7 @@ def initialize_zotero_run(
                             finally:
                                 staging_anchor.close()
         finally:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(source_guard.descriptor, fcntl.LOCK_UN)
 
 
 __all__ = [

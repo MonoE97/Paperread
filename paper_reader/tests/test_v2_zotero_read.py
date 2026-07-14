@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib
 import importlib.util
 
+import pytest
+
 
 def _module():
     module_name = "paper_reader.zotero_read"
@@ -95,3 +97,67 @@ def test_default_local_api_provider_returns_full_read_only_payload_shapes() -> N
     assert provider.get_children("PARENT1") == [_note()]
     assert provider.get_note("NOTE1") == _note()
     assert payloads == []
+
+
+def test_children_read_fails_closed_when_server_repeats_a_full_page() -> None:
+    module = _module()
+    note = _note()
+    requested_urls: list[str] = []
+
+    def fetch_json(url: str):
+        requested_urls.append(url)
+        return [note]
+
+    provider = module.LocalApiZoteroReadProvider(
+        base_url="http://zotero.test",
+        fetch_json=fetch_json,
+        page_size=1,
+        max_pages=3,
+        max_children=3,
+    )
+
+    with pytest.raises(module.ZoteroReadError) as exc_info:
+        provider.get_children("PARENT1")
+
+    assert exc_info.value.code == "zotero_children_pagination_stalled"
+    assert len(requested_urls) == 2
+
+
+def test_children_read_enforces_page_limit_before_an_unbounded_fetch_loop() -> None:
+    module = _module()
+    counter = 0
+
+    def fetch_json(_url: str):
+        nonlocal counter
+        counter += 1
+        return [_note(f"NOTE{counter}")]
+
+    provider = module.LocalApiZoteroReadProvider(
+        fetch_json=fetch_json,
+        page_size=1,
+        max_pages=2,
+        max_children=10,
+    )
+
+    with pytest.raises(module.ZoteroReadError) as exc_info:
+        provider.get_children("PARENT1")
+
+    assert exc_info.value.code == "zotero_children_page_limit_exceeded"
+    assert exc_info.value.data == {"page_count": 2, "max_pages": 2}
+    assert counter == 2
+
+
+def test_children_read_enforces_member_limit_before_extending_result() -> None:
+    module = _module()
+    provider = module.LocalApiZoteroReadProvider(
+        fetch_json=lambda _url: [_note("NOTE1"), _note("NOTE2")],
+        page_size=2,
+        max_pages=2,
+        max_children=1,
+    )
+
+    with pytest.raises(module.ZoteroReadError) as exc_info:
+        provider.get_children("PARENT1")
+
+    assert exc_info.value.code == "zotero_children_member_limit_exceeded"
+    assert exc_info.value.data == {"member_count": 2, "max_children": 1}

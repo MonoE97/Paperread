@@ -5,7 +5,7 @@ paper_reader_batch uses two execution modes under the journal-and-lease contract
 ## Main Mode: Outer-Agent Parallel Dispatch
 
 1. Run `uv run paper_reader_batch run validate <batch_run>`.
-2. Claim up to the manifest concurrency through `uv run paper_reader_batch worker claim <batch_run> --worker-id <worker_id> --request-id UUID`. Default Codex concurrency is 3.
+2. Claim up to the manifest concurrency through `uv run paper_reader_batch worker claim <batch_run> --worker-id <worker_id> --request-id UUID`. Default Codex concurrency is 3. Each `worker claim` and `local-prepare claim` binds at most one PDF item per journal event. Within its requested/capacity limit, worker claim scans eligible items in queue order, selects at most the first PDF it encounters, skips later PDFs, and fills remaining event capacity with eligible non-PDF items; local-prepare claim returns one eligible PDF. Repeat independent claims for PDF concurrency.
 3. Read the exact deterministic instruction with `uv run paper_reader_batch worker prompt <batch_run> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id>`. This command is read-only and never dispatches an LLM. Dispatch one outer-agent worker per leased assignment. The assignment binds item, claim id, exact attempt, worker identity, lease token and expiry; worker leases default to 900 seconds.
 4. Renew long work with `uv run paper_reader_batch worker renew <batch_run> <item_id> --worker-id <worker_id> --claim-id <claim_id> --lease-token <lease_token> --attempt-id <attempt_id> --request-id UUID`.
 5. Each worker runs `$paper_reader` and produces a strict `paper_reader_batch.worker-result.v2` referring to immutable single-paper artifacts.

@@ -31,7 +31,7 @@ If native MCP tools are not injected, use the local Zotero MCP endpoint `http://
 
 ## Steps
 
-1. Run `uv run paper_reader route` before Zotero search. Existing `.pdf` paths must use the local PDF path workflow, existing directory paths must be delegated to `$paper_reader_batch`, and missing path-like input must fail as `unsupported_local_path`; none may trigger Zotero lookup or duplicate checks.
+1. Run `uv run paper_reader route "<original user input>"` before Zotero search. Existing `.pdf` paths must use the local PDF path workflow, existing directory paths must be delegated to `$paper_reader_batch`, and missing path-like input must fail as `unsupported_local_path`; none may trigger Zotero lookup or duplicate checks.
 2. Use `search_library` for exact-title resolution. Save the exact `search_library response` together with the selected item details from `get_item_details(mode="complete")` as one unmodified raw discovery bundle. The bundle must preserve every search candidate needed to prove whether multiple entries have the same normalized title and identify the exact selected item key. If duplicates exist, stop before run allocation/lock/mutation and ask the user to de-duplicate in Zotero.
 3. Initialize from the saved raw discovery bundle and exact expected item key:
 
@@ -48,14 +48,7 @@ uv run paper_reader run prepare <run_dir>
 uv run paper_reader run validate <run_dir>
 ```
 
-5. If `secondary_sources.json` lists Extra/web URLs, capture each source for cross-check only:
-
-```bash
-mkdir -p <run_dir>/secondary_contexts
-node scripts/capture-secondary-url.mjs "<url>" --output <run_dir>/secondary_contexts/secondary-001.md --request-retries 2 --request-retry-ms 500
-```
-
-Captured files use `source_status: secondary_context` when usable. Unavailable captures use `source_status: secondary_context_unavailable`, including warnings such as `navigation_timeout`. Secondary context must not cite secondary context in `evidence_summary`; it is only for cross-checking and background.
+5. Treat URLs in `secondary_sources.json` as metadata only. The current grouped runtime has no immutable secondary-capture ingestion command. The bundled `scripts/capture-secondary-url.mjs` helper is not such an ingestion command: outputs labelled `source_status: secondary_context` or `source_status: secondary_context_unavailable` remain unbound. A secondary source may be used only after an immutable evidence ingestion step publishes it inside the evidence directory and `evidence.json` records its exact membership, size, and SHA-256. Until that lifecycle exists, secondary captures must not be written into the run and neither listed URLs nor separately captured bytes may participate in review or candidate construction.
 
 6. Read `context.md`, `section_context.md`, and `figure_context.md` if available. `section_context.md` is not a canonical evidence source. Final locators must use canonical forms such as `context.md page 3 section Methods`, `context.md page 6 section Results table_candidate 1`, or `figure_context.md fig_p4_1`. Bare `context.md` / `figure_context.md`, prose locators, `section_context.md`, and secondary context paths are invalid.
 7. Create `paper_reader.summary.v2` and `paper_reader.review.v2`, then validate and seal an immutable `paper_reader.review-package.v2`:

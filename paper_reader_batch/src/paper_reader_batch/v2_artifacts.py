@@ -2,28 +2,15 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import datetime
 import hashlib
 from html import unescape
 from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path, PurePosixPath
-import re
 import stat
 import tomllib
-from typing import Annotated, Iterator, Literal, TypeAlias
-
-from markdown_it import MarkdownIt
-from pydantic import (
-    AfterValidator,
-    BaseModel,
-    ConfigDict,
-    Field,
-    StringConstraints,
-    ValidationError,
-    model_validator,
-)
+from typing import Iterator
 
 from paper_reader_batch.v2_contracts import (
     ArtifactRef,
@@ -39,6 +26,9 @@ from paper_reader_batch.v2_contracts import (
 )
 from paper_reader_batch.v2_errors import BatchRuntimeError
 from paper_reader_batch.v2_json import (
+    MAX_JSON_ARTIFACT_BYTES,
+    MAX_OPAQUE_ARTIFACT_BYTES,
+    _bounded_sorted_names,
     canonical_json_bytes,
     canonical_sha256,
     list_directory,
@@ -52,406 +42,139 @@ from paper_reader_batch.v2_json import (
 from paper_reader_batch.v2_manifest import _pdf_source
 
 
-class ForeignStrictModel(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
-
-
 _RUN_ARTIFACT_ANCHOR: ContextVar[tuple[Path, int] | None] = ContextVar(
     "paper_reader_batch_run_artifact_anchor",
     default=None,
 )
+_ARTIFACT_READ_LIMIT: ContextVar[int] = ContextVar(
+    "paper_reader_batch_artifact_read_limit",
+    default=MAX_JSON_ARTIFACT_BYTES,
+)
+_MAX_FOREIGN_BUNDLE_MEMBERS = 100_000
+_REQUIRED_REVIEW_PROOFS = frozenset(
+    {
+        "summary_schema",
+        "review_schema",
+        "run_binding",
+        "evidence_binding",
+        "locator_membership",
+        "resolved_render_chinese_prose",
+    }
+)
+_REQUIRED_LOCAL_CANDIDATE_PROOFS = frozenset(
+    {
+        "source_identity",
+        "evidence_hashes",
+        "sealed_review_hashes",
+        "rendered_note_hash",
+        "fixed_local_target",
+    }
+)
+_REQUIRED_ZOTERO_CANDIDATE_PROOFS = frozenset(
+    {
+        "source_identity",
+        "evidence_hashes",
+        "sealed_review_hashes",
+        "parent_fingerprint",
+        "live_title_availability",
+        "canonical_html_binding",
+    }
+)
 
 
-def _validate_foreign_rfc3339_utc(value: str) -> str:
-    if not value.endswith("Z"):
-        raise ValueError("timestamp must use the UTC Z suffix")
-    try:
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
-    except ValueError as exc:
-        raise ValueError("timestamp must be valid RFC3339 UTC") from exc
-    if parsed.utcoffset() is None or parsed.utcoffset().total_seconds() != 0:
-        raise ValueError("timestamp must be UTC")
+class _OpaqueRecord:
+    """Attribute view over one canonical JSON object owned by paper_reader.
+
+    This deliberately has no field schema.  Batch validates only the immutable
+    paths, hashes, and cross-bindings it consumes; the single skill remains the
+    sole owner of the artifact's full schema and semantic gates.
+    """
+
+    __slots__ = ("_payload",)
+
+    def __init__(self, payload: dict[str, object]) -> None:
+        self._payload = payload
+
+    def __getattr__(self, name: str):
+        try:
+            value = self._payload[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+        return _opaque(value)
+
+    def __getitem__(self, name: str):
+        return _opaque(self._payload[name])
+
+    def get(self, name: str, default=None):
+        return _opaque(self._payload.get(name, default))
+
+    def __eq__(self, other: object) -> bool:
+        return self._payload == _plain(other)
+
+    def as_dict(self) -> dict[str, object]:
+        return self._payload
+
+
+def _opaque(value: object):
+    if isinstance(value, dict):
+        return _OpaqueRecord(value)
+    if isinstance(value, list):
+        return tuple(_opaque(item) for item in value)
     return value
 
 
-def _validate_foreign_absolute_path(value: str) -> str:
-    if not value or "\x00" in value:
-        raise ValueError("resolved path must be non-empty")
-    if not value.startswith("/"):
-        raise ValueError("resolved path must be absolute")
+def _plain(value: object):
+    if isinstance(value, _OpaqueRecord):
+        return value.as_dict()
+    if isinstance(value, tuple):
+        return [_plain(item) for item in value]
     return value
 
 
-def _validate_foreign_artifact_path(value: str) -> str:
-    if not value or value == "." or "\\" in value or "\x00" in value:
-        raise ValueError("artifact path must be a non-empty POSIX relative path")
-    path = PurePosixPath(value)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        raise ValueError("artifact path must not be absolute or contain dot segments")
-    if str(path) != value:
-        raise ValueError("artifact path must be normalized")
+def _require_object(value: object, *, code: str, label: str) -> _OpaqueRecord:
+    if isinstance(value, _OpaqueRecord):
+        return value
+    if not isinstance(value, dict):
+        raise _invalid(code, f"{label} must be a JSON object")
+    return _OpaqueRecord(value)
+
+
+def _require_string(value: object, *, code: str, label: str) -> str:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise _invalid(code, f"{label} must be a non-empty string")
     return value
 
 
-# These aliases intentionally copy paper_reader.contracts rather than importing
-# the sibling skill. The two skills remain independently installable while the
-# foreign envelope parser enforces the exact public single-paper field contract.
-ForeignRfc3339Utc: TypeAlias = Annotated[
-    str,
-    StringConstraints(pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"),
-    AfterValidator(_validate_foreign_rfc3339_utc),
-]
-ForeignSha256: TypeAlias = Annotated[
-    str,
-    StringConstraints(pattern=r"^[0-9a-f]{64}$"),
-]
-ForeignIdentifier: TypeAlias = Annotated[
-    str,
-    StringConstraints(
-        min_length=1,
-        max_length=160,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-    ),
-]
-ForeignArtifactPath: TypeAlias = Annotated[
-    str,
-    AfterValidator(_validate_foreign_artifact_path),
-]
-ForeignAbsolutePath: TypeAlias = Annotated[
-    str,
-    AfterValidator(_validate_foreign_absolute_path),
-]
-ForeignNonNegativeInt: TypeAlias = Annotated[int, Field(ge=0)]
+def _require_nonnegative_int(value: object, *, code: str, label: str) -> int:
+    if type(value) is not int or value < 0:
+        raise _invalid(code, f"{label} must be a non-negative integer")
+    return value
 
 
-class ForeignArtifactRef(ForeignStrictModel):
-    role: ForeignIdentifier
-    path: ForeignArtifactPath
-    sha256: ForeignSha256
-    size_bytes: ForeignNonNegativeInt
-    media_type: str | None = None
+def _require_sha256(value: object, *, code: str, label: str) -> str:
+    digest = _require_string(value, code=code, label=label)
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise _invalid(code, f"{label} must be a lowercase SHA-256")
+    return digest
 
 
-class ForeignLocalSource(ForeignStrictModel):
-    source_type: Literal["local_pdf"] = "local_pdf"
-    requested_path: str
-    resolved_path: ForeignAbsolutePath
-    sha256: ForeignSha256
-    size_bytes: ForeignNonNegativeInt
-    device: ForeignNonNegativeInt
-    inode: ForeignNonNegativeInt
+def _require_sequence(value: object, *, code: str, label: str) -> tuple[object, ...]:
+    if isinstance(value, tuple):
+        return value
+    if not isinstance(value, list):
+        raise _invalid(code, f"{label} must be a JSON array")
+    return tuple(_opaque(item) for item in value)
 
 
-class ForeignZoteroSource(ForeignStrictModel):
-    source_type: Literal["zotero"] = "zotero"
-    item_key: ForeignIdentifier
-    title: str
-    doi: str
-    parent_version: ForeignNonNegativeInt
-    parent_fingerprint: ForeignSha256
-    raw_discovery_bundle: ForeignArtifactRef
-    normalized_source: ForeignArtifactRef
-    attachment_key: ForeignIdentifier
-    attachment: ForeignLocalSource
-
-
-ForeignSource: TypeAlias = Annotated[
-    ForeignLocalSource | ForeignZoteroSource,
-    Field(discriminator="source_type"),
-]
-
-
-class ForeignLocalTarget(ForeignStrictModel):
-    target_type: Literal["local"] = "local"
-    resolved_path: ForeignAbsolutePath
-    parent_device: ForeignNonNegativeInt
-    parent_inode: ForeignNonNegativeInt
-
-
-class ForeignZoteroTarget(ForeignStrictModel):
-    target_type: Literal["zotero"] = "zotero"
-    parent_key: ForeignIdentifier
-    parent_fingerprint: ForeignSha256
-    note_title: str
-
-
-ForeignTarget: TypeAlias = Annotated[
-    ForeignLocalTarget | ForeignZoteroTarget,
-    Field(discriminator="target_type"),
-]
-
-
-class ForeignGateBlocker(ForeignStrictModel):
-    code: ForeignIdentifier
-    message: str
-    artifact_path: ForeignArtifactPath | None = None
-
-
-class ForeignGate(ForeignStrictModel):
-    status: Literal["not_evaluated", "blocked", "passed", "write_ready"]
-    evaluated_at: ForeignRfc3339Utc | None = None
-    checks: tuple[ForeignIdentifier, ...] = ()
-    blockers: tuple[ForeignGateBlocker, ...] = ()
-
-
-class ForeignLivePreflight(ForeignStrictModel):
-    preflight_id: ForeignIdentifier
-    captured_at: ForeignRfc3339Utc
-    parent_key: ForeignIdentifier
-    parent_fingerprint: ForeignSha256
-    requested_note_title: str
-    title_available: bool
-    matching_note_keys: tuple[ForeignIdentifier, ...]
-    parent_snapshot: ForeignArtifactRef
-    children_snapshot: ForeignArtifactRef
-
-
-class ForeignRun(ForeignStrictModel):
-    schema_version: Literal["paper_reader.run.v2"]
-    run_id: ForeignIdentifier
-    created_at: ForeignRfc3339Utc
-    source: ForeignSource
-    target: ForeignTarget | None
-    status: Literal["initialized", "prepared", "reviewed", "candidate_built", "published", "blocked"]
-    artifacts: tuple[ForeignArtifactRef, ...] = ()
-    gate: ForeignGate
-    live_preflight: ForeignLivePreflight | None = None
-
-
-class ForeignReviewIssue(ForeignStrictModel):
-    severity: Literal["low", "medium", "high", "blocker"]
-    issue: str
-    suggested_fix: str
-
-
-class ForeignMethodModule(ForeignStrictModel):
-    name: str
-    input: str
-    target: str
-    output: str
-    role: str
-
-
-class ForeignKeyFigure(ForeignStrictModel):
-    figure_id: ForeignIdentifier
-    caption: str
-    analysis: str | None = None
-    why_it_matters: str | None = None
-    why_it_matters_short: str | None = None
-    image_quality: str | None = None
-    evidence_level: str | None = None
-    figure_quality_note: str | None = None
-
-
-class ForeignEvidenceItem(ForeignStrictModel):
-    type: str
-    locator: str
-    summary: str
-
-
-class ForeignEvidenceClaim(ForeignStrictModel):
-    claim: str
-    evidence: tuple[ForeignEvidenceItem, ...]
-    confidence: Literal["low", "medium", "high"]
-
-
-class ForeignAuthorLimitation(ForeignStrictModel):
-    text: str
-    source_type: Literal["author_stated"] = "author_stated"
-    locator: str
-
-
-class ForeignInferredLimitation(ForeignStrictModel):
-    text: str
-    source_type: Literal["inferred"] = "inferred"
-    basis: str
-    locator: str
-
-
-class ForeignImprovementNote(ForeignStrictModel):
-    issue: str
-    action: str
-    source: str
-
-
-class ForeignSummary(ForeignStrictModel):
-    schema_version: Literal["paper_reader.summary.v2"]
-    summary_id: ForeignIdentifier
-    run_id: ForeignIdentifier
-    created_at: ForeignRfc3339Utc
-    evidence_digest: ForeignSha256
-    paper_type: Literal[
-        "research_article",
-        "review",
-        "perspective",
-        "benchmark",
-        "method_paper",
-        "dataset_paper",
-        "theory_paper",
-    ]
-    trust_status: Literal["trusted", "usable_with_caveats", "needs_manual_review", "rejected"]
-    review_status: Literal["not_reviewed", "passed", "passed_with_caveats", "failed"]
-    improvement_status: Literal["not_needed", "needed", "completed"]
-    trust_rationale: str
-    one_sentence_summary: str
-    abstract_translation: str
-    research_question: str
-    method: str
-    experiments: str
-    ai4s_relevance: str
-    key_points: tuple[str, ...]
-    contributions: tuple[str, ...]
-    limitations: tuple[str, ...]
-    follow_up_keywords: tuple[str, ...]
-    evidence_summary: tuple[ForeignEvidenceClaim, ...]
-    tldr: str | None = None
-    research_object: str | None = None
-    research_question_short: str | None = None
-    core_method_short: str | None = None
-    core_result_short: str | None = None
-    main_risk_short: str | None = None
-    reading_decision: str | None = None
-    background_problem: str | None = None
-    existing_gap: str | None = None
-    paper_entry_point: str | None = None
-    method_overview: str | None = None
-    method_modules: tuple[ForeignMethodModule, ...] = ()
-    workflow_steps: tuple[str, ...] = ()
-    technical_details: tuple[str, ...] = ()
-    key_figures: tuple[ForeignKeyFigure, ...] = ()
-    author_stated_limitations: tuple[ForeignAuthorLimitation, ...] = ()
-    inferred_limits: tuple[ForeignInferredLimitation, ...] = ()
-    applicability_limits: tuple[str, ...] = ()
-    note_labels: tuple[str, ...] = ()
-    review_issues: tuple[ForeignReviewIssue, ...] = ()
-    improvement_notes: tuple[ForeignImprovementNote, ...] = ()
-
-
-class ForeignReview(ForeignStrictModel):
-    schema_version: Literal["paper_reader.review.v2"]
-    review_id: ForeignIdentifier
-    run_id: ForeignIdentifier
-    created_at: ForeignRfc3339Utc
-    summary_sha256: ForeignSha256
-    evidence_digest: ForeignSha256
-    review_status: Literal["passed", "passed_with_caveats", "failed"]
-    needs_improvement: bool
-    review_issues: tuple[ForeignReviewIssue, ...]
-    trust_status_recommendation: Literal[
-        "trusted", "usable_with_caveats", "needs_manual_review", "rejected"
-    ]
-    improvement_requests: tuple[str, ...]
-
-
-class ForeignReviewValidation(ForeignStrictModel):
-    format: Literal["paper_reader.review-validation.v2-internal"]
-    run_id: ForeignIdentifier
-    summary_sha256: ForeignSha256
-    review_sha256: ForeignSha256
-    evidence_digest: ForeignSha256
-    rendered_note_sha256: ForeignSha256
-    rendered_html_sha256: ForeignSha256
-    checks: tuple[ForeignIdentifier, ...]
-    blockers: tuple[ForeignGateBlocker, ...]
-
-
-class ForeignReviewPackage(ForeignStrictModel):
-    schema_version: Literal["paper_reader.review-package.v2"]
-    review_package_id: ForeignIdentifier
-    run_id: ForeignIdentifier
-    created_at: ForeignRfc3339Utc
-    summary: ForeignArtifactRef
-    review: ForeignArtifactRef
-    evidence_manifest: ForeignArtifactRef
-    summary_sha256: ForeignSha256
-    review_sha256: ForeignSha256
-    evidence_digest: ForeignSha256
-    artifacts: tuple[ForeignArtifactRef, ...]
-    gate: ForeignGate
-
-
-class ForeignCandidate(ForeignStrictModel):
-    schema_version: Literal["paper_reader.candidate.v2"]
-    candidate_id: ForeignIdentifier
-    run_id: ForeignIdentifier
-    created_at: ForeignRfc3339Utc
-    source: ForeignSource
-    target: ForeignTarget
-    evidence_manifest: ForeignArtifactRef
-    sealed_review: ForeignArtifactRef
-    note_title: str
-    tags: tuple[str, ...]
-    content_sha256: ForeignSha256
-    content_length: ForeignNonNegativeInt
-    artifacts: tuple[ForeignArtifactRef, ...]
-    gate: ForeignGate
-    live_preflight: ForeignLivePreflight | None = None
-
-
-class EvidenceResourceCheck(ForeignStrictModel):
-    name: str
-    status: Literal["passed", "degraded", "blocked"]
-    actual: int | float | str | bool | None
-    limit: int | float | str | None
-    message: str | None = None
-
-
-class EvidenceSection(ForeignStrictModel):
-    title: str
-    start_page: ForeignNonNegativeInt
-    end_page: ForeignNonNegativeInt
-
-
-class EvidenceTable(ForeignStrictModel):
-    index: ForeignNonNegativeInt
-    page: ForeignNonNegativeInt
-    section: str
-
-
-class EvidenceFigure(ForeignStrictModel):
-    figure_id: ForeignIdentifier
-    page: ForeignNonNegativeInt
-    artifact_path: ForeignArtifactPath
-
-
-class ForeignEvidence(ForeignStrictModel):
-    format: Literal["paper_reader.evidence.v2-internal"]
-    evidence_id: ForeignIdentifier
-    run_id: ForeignIdentifier
-    created_at: ForeignRfc3339Utc
-    source_sha256: ForeignSha256
-    complete: bool
-    degraded: bool
-    preview_pages: ForeignNonNegativeInt | None
-    files: tuple[ForeignArtifactRef, ...]
-    pages: tuple[ForeignNonNegativeInt, ...]
-    sections: tuple[EvidenceSection, ...]
-    table_candidates: tuple[EvidenceTable, ...]
-    figures: tuple[EvidenceFigure, ...]
-    resource_checks: tuple[EvidenceResourceCheck, ...]
-
-
-class ForeignLocalReceipt(ForeignStrictModel):
-    format: Literal["paper_reader.local-receipt.v2-internal"]
-    receipt_id: ForeignIdentifier
-    run_id: ForeignIdentifier
-    candidate_path: ForeignArtifactPath
-    candidate_digest: ForeignSha256
-    intent_path: ForeignArtifactPath
-    intent_sha256: ForeignSha256
-    target_path: ForeignAbsolutePath
-    content_sha256: ForeignSha256
-    content_length: ForeignNonNegativeInt
-
-
-class ForeignLocalIntent(ForeignStrictModel):
-    format: Literal["paper_reader.local-publication-intent.v2-internal"]
-    run_id: ForeignIdentifier
-    candidate_id: ForeignIdentifier
-    candidate_digest: ForeignSha256
-    target_path: ForeignAbsolutePath
-    content_sha256: ForeignSha256
-    content_length: ForeignNonNegativeInt
+def _require_inner_ref(value: object, *, code: str = "artifact_binding_mismatch") -> _OpaqueRecord:
+    ref = _require_object(value, code=code, label="artifact reference")
+    _require_string(ref.role, code=code, label="artifact role")
+    _relative_path(_require_string(ref.path, code=code, label="artifact path"))
+    _require_sha256(ref.sha256, code=code, label="artifact SHA-256")
+    _require_nonnegative_int(ref.size_bytes, code=code, label="artifact size")
+    if ref.media_type is not None and not isinstance(ref.media_type, str):
+        raise _invalid(code, "artifact media type must be a string or null")
+    return ref
 
 
 class _HeadingParser(HTMLParser):
@@ -483,341 +206,14 @@ def _html_title(content: str) -> str:
     return parser.title
 
 
-def _render_note_html_like_single(markdown: str) -> bytes:
-    rendered = MarkdownIt("commonmark", {"html": False}).enable("table").render(markdown)
-    return (rendered.strip() + "\n").encode("utf-8")
-
-
-def _markdown_literal_note_title(note_title: str) -> str:
-    prefix = "[Codex Summary] "
-    fixed_prefix = prefix if note_title.startswith(prefix) else ""
-    remainder = note_title[len(fixed_prefix) :]
-    for character in ("\\", "`", "*", "_", "[", "]", "<", ">", "&"):
-        remainder = remainder.replace(character, f"\\{character}")
-    return f"{fixed_prefix}{remainder}"
-
-
-def _expected_zotero_candidate_notes(
-    sealed_markdown: bytes,
-    note_title: str,
-) -> tuple[bytes, bytes]:
-    if "\r" in note_title or "\n" in note_title:
-        raise _invalid("candidate_binding_mismatch", "candidate note title must be one line")
-    try:
-        markdown = sealed_markdown.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise _invalid(
-            "candidate_binding_mismatch",
-            "sealed Markdown must be UTF-8 before candidate title rewrite",
-            exc,
-        )
-    lines = markdown.splitlines(keepends=True)
-    if not lines or not lines[0].startswith("# "):
-        raise _invalid(
-            "candidate_binding_mismatch",
-            "sealed Markdown must start with the review H1",
-        )
-    newline = "\r\n" if lines[0].endswith("\r\n") else "\n" if lines[0].endswith("\n") else ""
-    lines[0] = f"# {_markdown_literal_note_title(note_title)}{newline}"
-    expected_markdown = "".join(lines).encode("utf-8")
-    return expected_markdown, _render_note_html_like_single(expected_markdown.decode("utf-8"))
-
-
-def _expected_tags(labels: tuple[str, ...]) -> tuple[str, ...]:
-    result = ["codex-summary", "paper-summary"]
-    seen = set(result)
-    for raw in labels:
-        normalized = raw.strip().lower().replace("&", " and ")
-        normalized = re.sub(r"[^a-z0-9]+", "_", normalized)
-        normalized = re.sub(r"_+", "_", normalized).strip("_")
-        if not normalized or normalized in seen:
-            continue
-        result.append(normalized)
-        seen.add(normalized)
-        if len(result) == 6:
-            break
-    return tuple(result)
-
-
-_REVIEW_CHECKS = (
-    "summary_schema",
-    "review_schema",
-    "run_binding",
-    "evidence_binding",
-    "locator_membership",
-    "resolved_render_chinese_prose",
-)
-_LOCAL_CANDIDATE_CHECKS = (
-    "source_identity",
-    "evidence_hashes",
-    "sealed_review_hashes",
-    "rendered_note_hash",
-    "fixed_local_target",
-)
-_ZOTERO_CANDIDATE_CHECKS = (
-    "source_identity",
-    "evidence_hashes",
-    "sealed_review_hashes",
-    "parent_fingerprint",
-    "live_title_availability",
-    "canonical_html_binding",
-)
-_CANONICAL_CONTEXT_LOCATOR = re.compile(
-    r"^context\.md page (?P<page>\d+)"
-    r"(?: section (?P<section>[A-Za-z0-9][A-Za-z0-9 /&().,+:_-]*?)"
-    r"(?: table_candidate (?P<table_candidate>\d+))?)?$"
-)
-_CANONICAL_FIGURE_LOCATOR = re.compile(
-    r"^figure_context\.md (?P<figure_id>[A-Za-z0-9_.:-]+)$"
-)
-_CJK_RE = re.compile(r"[\u3400-\u9fff]")
-_ENGLISH_TOKEN_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]*(?:[-/][A-Za-z0-9]+)*\b")
-_LATIN_LETTER_RE = re.compile(r"[A-Za-z]")
-_LATIN_SPAN_RE = re.compile(r"[^\u3400-\u9fff]+")
-_LOCATOR_FRAGMENT_RE = re.compile(
-    r"\b(?:context\.md page \d+|figure_context\.md [A-Za-z0-9_.:-]+|context\.md|figure_context\.md)\b"
-    r"(?: table_candidate \d+)?"
-)
-_KNOWN_CONTEXT_SECTION_NAMES = (
-    "Results and discussion",
-    "Materials and methods",
-    "Experimental section",
-    "Computational methods",
-    "Supporting information",
-    "Introduction",
-    "Background",
-    "Methods",
-    "Results",
-    "Discussion",
-    "Conclusions",
-    "Conclusion",
-    "Abstract",
-)
-_CONTEXT_SECTION_FRAGMENT_RE = re.compile(
-    r"\bsection (?:"
-    + "|".join(re.escape(name) for name in _KNOWN_CONTEXT_SECTION_NAMES)
-    + r")\b",
-    flags=re.IGNORECASE,
-)
-_ALLOWED_MIXED_ENGLISH_PHRASES = (
-    "on-the-fly",
-    "solid-state electrolyte",
-    "all-solid-state",
-    "sulfide SSE",
-    "Li metal interface",
-    "XPS depth profiling",
-    "DC polarization",
-    "post-mortem",
-    "ex situ",
-    "cycling 后",
-)
-_ENGLISH_FUNCTION_WORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is",
-    "of", "or", "that", "the", "this", "to", "which", "with",
-}
-_UNIT_TOKENS = {
-    "a", "c", "cm", "ev", "g", "h", "k", "kg", "mah", "mpa", "ms", "ps", "rh",
-    "rpm", "s", "usd", "v", "vs",
-}
-_RENDERED_TEXT_FIELDS = (
-    "one_sentence_summary",
-    "research_object",
-    "research_question_short",
-    "core_method_short",
-    "core_result_short",
-    "main_risk_short",
-    "tldr",
-    "background_problem",
-    "existing_gap",
-    "paper_entry_point",
-    "method_overview",
-)
-_RENDERED_TEXT_LIST_FIELDS = (
-    "contributions", "technical_details", "limitations", "applicability_limits"
-)
-
-
-def _is_technical_token(token: str) -> bool:
-    lower = token.lower()
-    if lower in _UNIT_TOKENS or any(char.isdigit() for char in token):
-        return True
-    if re.fullmatch(r"[A-Z][a-z]?", token):
-        return True
-    parts = re.split(r"[-/]", token)
-    if all(part.isupper() for part in parts):
-        return True
-    letters = _LATIN_LETTER_RE.findall(token)
-    if len(letters) < 3 and lower not in _ENGLISH_FUNCTION_WORDS:
-        return True
-    return bool(re.fullmatch(r"(?:[A-Z][a-z]?)(?:[-/][A-Z][a-z]?)+", token))
-
-
-def _strip_allowed_mixed_english_phrases(value: str) -> str:
-    text = _LOCATOR_FRAGMENT_RE.sub(" ", value)
-    text = _CONTEXT_SECTION_FRAGMENT_RE.sub(" ", text)
-    for phrase in _ALLOWED_MIXED_ENGLISH_PHRASES:
-        text = re.sub(re.escape(phrase), " ", text, flags=re.IGNORECASE)
-    return text
-
-
-def _contains_allowed_mixed_english_phrase(value: str) -> bool:
-    return any(
-        re.search(re.escape(phrase), value, flags=re.IGNORECASE)
-        for phrase in _ALLOWED_MIXED_ENGLISH_PHRASES
-    )
-
-
-def _english_prose_tokens(value: str) -> list[str]:
-    text = _strip_allowed_mixed_english_phrases(value)
-    return [
-        token
-        for token in _ENGLISH_TOKEN_RE.findall(text)
-        if not _is_technical_token(token)
-        and len(_LATIN_LETTER_RE.findall(token)) >= 2
-        and any(char.islower() for char in token)
-    ]
-
-
-def _looks_like_english_prose(value: object) -> bool:
-    if not isinstance(value, str) or not value.strip():
-        return False
-    text = value.strip()
-    spans = _LATIN_SPAN_RE.findall(text) if _CJK_RE.search(text) else [text]
-    for span in spans:
-        tokens = _english_prose_tokens(span)
-        if len(tokens) >= 3:
-            return True
-        if (
-            len(tokens) >= 2
-            and len(_LATIN_LETTER_RE.findall(_strip_allowed_mixed_english_phrases(span))) >= 10
-        ):
-            return True
-    return _contains_allowed_mixed_english_phrase(text) and len(_english_prose_tokens(text)) == 1
-
-
-def _iter_rendered_summary_text(summary: ForeignSummary):
-    payload = summary.model_dump(mode="json")
-    for field in _RENDERED_TEXT_FIELDS:
-        yield payload.get(field)
-    for field in _RENDERED_TEXT_LIST_FIELDS:
-        yield from payload.get(field, [])
-    yield from payload.get("workflow_steps", [])
-    for module in payload.get("method_modules", []):
-        for field in ("name", "input", "target", "output", "role"):
-            yield module.get(field)
-    for figure in payload.get("key_figures", []):
-        for field in ("analysis", "why_it_matters", "why_it_matters_short"):
-            yield figure.get(field)
-        if not str(figure.get("analysis") or "").strip():
-            yield figure.get("caption")
-    for field in ("author_stated_limitations", "inferred_limits"):
-        for item in payload.get(field, []):
-            yield item.get("text")
-            if field == "inferred_limits":
-                yield item.get("basis")
-
-
-def _rendered_markdown_has_english_prose(note: str) -> bool:
-    for raw_line in note.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or line == "---" or line.startswith("Tags:"):
-            continue
-        if line.startswith("|") and line.endswith("|"):
-            values = [cell.strip() for cell in line.strip("|").split("|")]
-            if values and all(re.fullmatch(r":?-{3,}:?", value) for value in values):
-                continue
-        else:
-            values = [re.sub(r"^(?:[-*]|\d+\.)\s+", "", line)]
-        if any(_looks_like_english_prose(value) for value in values):
-            return True
-    return False
-
-
-def _locator_is_member(locator: str, evidence: ForeignEvidence) -> bool:
-    figure = _CANONICAL_FIGURE_LOCATOR.fullmatch(locator)
-    if figure is not None:
-        figure_id = figure.group("figure_id")
-        return any(item.figure_id == figure_id for item in evidence.figures)
-    context = _CANONICAL_CONTEXT_LOCATOR.fullmatch(locator)
-    if context is None:
-        return False
-    page = int(context.group("page"))
-    if page not in evidence.pages:
-        return False
-    section = context.group("section")
-    if section is None:
-        return True
-    if not any(
-        item.title == section and item.start_page <= page <= item.end_page
-        for item in evidence.sections
-    ):
-        return False
-    table = context.group("table_candidate")
-    return table is None or any(
-        item.index == int(table) and item.page == page and item.section == section
-        for item in evidence.table_candidates
-    )
-
-
-def _validate_summary_evidence(summary: ForeignSummary, evidence: ForeignEvidence) -> None:
-    locators = [
-        item.locator
-        for claim in summary.evidence_summary
-        for item in claim.evidence
-    ]
-    locators.extend(item.locator for item in summary.author_stated_limitations)
-    locators.extend(item.locator for item in summary.inferred_limits)
-    if any(not _locator_is_member(locator, evidence) for locator in locators):
-        raise _invalid(
-            "review_not_sealed",
-            "sealed summary contains a noncanonical or nonmember evidence locator",
-        )
-    figure_ids = {item.figure_id for item in evidence.figures}
-    if any(item.figure_id not in figure_ids for item in summary.key_figures):
-        raise _invalid("review_not_sealed", "sealed summary cites a figure absent from evidence")
-
-
-def _validate_write_ready_summary_semantics(summary: ForeignSummary) -> None:
-    if summary.trust_status not in {"trusted", "usable_with_caveats"}:
-        raise _invalid("review_not_sealed", "sealed summary trust status is not write-ready")
-    required_text = (
-        summary.trust_rationale,
-        summary.one_sentence_summary,
-        summary.abstract_translation,
-        summary.research_question,
-        summary.method,
-        summary.experiments,
-        summary.ai4s_relevance,
-    )
-    if any(not " ".join(value.split()) for value in required_text):
-        raise _invalid("review_not_sealed", "sealed summary lacks required write-ready text")
-    required_lists = (
-        summary.key_points,
-        summary.contributions,
-        summary.limitations,
-        summary.follow_up_keywords,
-    )
-    if any(not any(item.strip() for item in values) for values in required_lists):
-        raise _invalid("review_not_sealed", "sealed summary lacks required write-ready list values")
-    if not summary.evidence_summary:
-        raise _invalid("review_not_sealed", "sealed summary must contain an evidence claim")
-    for claim in summary.evidence_summary:
-        if not claim.claim.strip() or not any(item.locator.strip() for item in claim.evidence):
-            raise _invalid(
-                "review_not_sealed",
-                "each sealed summary claim must bind at least one evidence locator",
-            )
-    if summary.improvement_status == "needed":
-        raise _invalid("review_not_sealed", "sealed summary still needs improvement")
-
-
 def _require_ref_shape(
-    ref: ForeignArtifactRef,
+    ref: object,
     *,
     role: str,
     path: str | None = None,
     media_type: str,
 ) -> None:
+    ref = _require_inner_ref(ref)
     if ref.role != role or ref.media_type != media_type or (path is not None and ref.path != path):
         raise _invalid("artifact_binding_mismatch", f"artifact ref shape is invalid for {role}")
 
@@ -907,7 +303,7 @@ def _normalized_inventory_entry(value: object, *, label: str) -> dict[str, objec
 
 
 def _validate_zotero_source_snapshots(
-    source: ForeignZoteroSource,
+    source: _OpaqueRecord,
     raw_bytes: bytes,
     normalized_bytes: bytes,
 ) -> str:
@@ -1047,30 +443,49 @@ def _relative_path(value: str) -> PurePosixPath:
     return candidate
 
 
+def _artifact_ref_read_limit(
+    size_bytes: object,
+    *,
+    code: str,
+    json_artifact: bool,
+) -> int:
+    if type(size_bytes) is not int or size_bytes < 0:
+        raise _invalid(code, "artifact reference must declare non-negative integer size_bytes")
+    limit = MAX_JSON_ARTIFACT_BYTES if json_artifact else MAX_OPAQUE_ARTIFACT_BYTES
+    return min(size_bytes, limit)
+
+
 def _read_artifact_bytes(path: Path, *, code: str) -> bytes:
     anchor = _RUN_ARTIFACT_ANCHOR.get()
+    max_bytes = _ARTIFACT_READ_LIMIT.get()
     normalized = normalized_absolute_path(path)
     if anchor is not None and normalized.is_relative_to(anchor[0]):
         relative = normalized.relative_to(anchor[0]).as_posix()
-        return read_relative_bytes(anchor[1], relative, code=code)
-    return read_bytes(path, code=code)
+        return read_relative_bytes(anchor[1], relative, code=code, max_bytes=max_bytes)
+    return read_bytes(path, code=code, max_bytes=max_bytes)
 
 
-def _read_model(path: Path, model_type, *, code: str):
-    raw = _read_artifact_bytes(path, code=code)
+def _read_model(
+    path: Path,
+    *,
+    code: str,
+    max_bytes: int = MAX_JSON_ARTIFACT_BYTES,
+):
+    token = _ARTIFACT_READ_LIMIT.set(max_bytes)
     try:
-        json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
-        model = model_type.model_validate_json(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError, ValueError, ValidationError) as exc:
-        raise _invalid(code, f"strict foreign artifact validation failed: {path}", exc)
-    if raw != canonical_json_bytes(model):
+        raw = _read_artifact_bytes(path, code=code)
+    finally:
+        _ARTIFACT_READ_LIMIT.reset(token)
+    payload = _json_no_nonfinite(raw, code=code)
+    if not isinstance(payload, dict):
+        raise _invalid(code, f"foreign artifact must be a JSON object: {path}")
+    if raw != canonical_json_bytes(payload):
         raise _invalid(code, f"foreign artifact is not canonical JSON: {path}")
-    return raw, model
+    return raw, _OpaqueRecord(payload)
 
 
 def _read_envelope(
     ref: ArtifactRef,
-    model_type,
     *,
     basename: str,
     schema: str,
@@ -1080,8 +495,20 @@ def _read_envelope(
     path = normalized_absolute_path(Path(ref.path))
     if str(path) != ref.path or path.name != basename:
         raise _invalid("artifact_path_invalid", f"artifact envelope path is not the required {basename}: {ref.path}")
-    raw, model = _read_model(path, model_type, code="artifact_invalid")
-    payload = model.model_dump(mode="json")
+    raw, model = _read_model(
+        path,
+        code="artifact_invalid",
+        max_bytes=(
+            _artifact_ref_read_limit(
+                ref.size_bytes,
+                code="artifact_binding_mismatch",
+                json_artifact=True,
+            )
+            if bind_bytes
+            else MAX_JSON_ARTIFACT_BYTES
+        ),
+    )
+    payload = model.as_dict()
     if ref.schema_version != schema:
         raise _invalid("artifact_binding_mismatch", f"artifact envelope declares the wrong schema: {path}")
     if (
@@ -1093,31 +520,45 @@ def _read_envelope(
     return path, raw, model
 
 
-def _read_inner(run_dir: Path, ref: ForeignArtifactRef, *, model_type=None, code: str = "artifact_invalid"):
+def _read_inner(
+    run_dir: Path,
+    ref: object,
+    *,
+    canonical_json: bool = False,
+    code: str = "artifact_invalid",
+):
+    ref = _require_inner_ref(ref)
     relative = _relative_path(ref.path)
     path = run_dir.joinpath(*relative.parts)
-    raw = _read_artifact_bytes(path, code=code)
+    max_bytes = _artifact_ref_read_limit(
+        ref.size_bytes,
+        code="artifact_binding_mismatch",
+        json_artifact=(canonical_json or ref.media_type == "application/json"),
+    )
+    token = _ARTIFACT_READ_LIMIT.set(max_bytes)
+    try:
+        raw = _read_artifact_bytes(path, code=code)
+    finally:
+        _ARTIFACT_READ_LIMIT.reset(token)
     if len(raw) != ref.size_bytes or sha256_bytes(raw) != ref.sha256:
         raise _invalid("artifact_binding_mismatch", f"foreign artifact reference hash/size mismatch: {ref.path}")
-    if model_type is None:
+    if not canonical_json:
         return path, raw, None
-    try:
-        json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
-        model = model_type.model_validate_json(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError, ValueError, ValidationError) as exc:
-        raise _invalid(code, f"strict nested artifact validation failed: {ref.path}", exc)
-    if raw != canonical_json_bytes(model):
+    payload = _json_no_nonfinite(raw, code=code)
+    if not isinstance(payload, dict):
+        raise _invalid(code, f"nested artifact must be a JSON object: {ref.path}")
+    if raw != canonical_json_bytes(payload):
         raise _invalid(code, f"nested artifact is not canonical JSON: {ref.path}")
-    return path, raw, model
+    return path, raw, _OpaqueRecord(payload)
 
 
 def _run_ref_for(
-    run: ForeignRun,
+    run: _OpaqueRecord,
     run_dir: Path,
     absolute_path: Path,
     envelope: ArtifactRef,
     role: str,
-) -> ForeignArtifactRef:
+) -> _OpaqueRecord:
     try:
         expected_relative = absolute_path.relative_to(run_dir).as_posix()
     except ValueError as exc:
@@ -1139,10 +580,10 @@ def _run_ref_for(
     return matches[0]
 
 
-def _source_matches(manifest_item, source: ForeignSource, *, refingerprint: bool = True) -> str | None:
+def _source_matches(manifest_item, source: _OpaqueRecord, *, refingerprint: bool = True) -> str | None:
     expected = manifest_item.source
     if isinstance(manifest_item, PdfManifestItem):
-        if not isinstance(source, ForeignLocalSource):
+        if source.get("source_type") != "local_pdf":
             raise _invalid("source_binding_mismatch", "PDF item requires a local paper_reader source")
         _require_normalized_absolute_path(
             source.resolved_path,
@@ -1163,7 +604,7 @@ def _source_matches(manifest_item, source: ForeignSource, *, refingerprint: bool
             if current != expected:
                 raise _invalid("source_drift", f"PDF source changed before finish: {expected.path}")
         return None
-    if not isinstance(source, ForeignZoteroSource):
+    if source.get("source_type") != "zotero":
         raise _invalid("source_binding_mismatch", "Zotero item requires a Zotero paper_reader source")
     _require_normalized_absolute_path(
         source.attachment.resolved_path,
@@ -1195,7 +636,7 @@ def _source_matches(manifest_item, source: ForeignSource, *, refingerprint: bool
 def _validate_local_run_target(
     manifest_item: PdfManifestItem,
     run_path: Path,
-    target: ForeignLocalTarget,
+    target: _OpaqueRecord,
     *,
     check_parent_identity: bool,
 ) -> None:
@@ -1240,16 +681,30 @@ def _walk_regular_files(root: Path) -> set[str]:
         try:
             return walk_relative_regular_files(anchor[1], relative_root)
         except BatchRuntimeError as exc:
+            if exc.code == "resource_limit":
+                raise
             raise _invalid(
                 "artifact_closed_world_mismatch",
                 f"foreign bundle cannot be walked through its held run directory: {root}",
                 exc,
             ) from exc
     found: set[str] = set()
+    member_count = 0
 
     def walk(directory: Path, prefix: PurePosixPath) -> None:
+        nonlocal member_count
         with open_directory_fd(directory, create=False) as (descriptor, _normalized):
-            for name in sorted(os.listdir(descriptor)):
+            for name in _bounded_sorted_names(
+                descriptor,
+                max_entries=_MAX_FOREIGN_BUNDLE_MEMBERS - member_count,
+                label="foreign artifact bundle",
+            ):
+                member_count += 1
+                if member_count > _MAX_FOREIGN_BUNDLE_MEMBERS:
+                    raise _invalid(
+                        "resource_limit",
+                        "foreign artifact bundle has too many members",
+                    )
                 metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
                 relative = prefix / name
                 if stat.S_ISLNK(metadata.st_mode):
@@ -1265,10 +720,10 @@ def _walk_regular_files(root: Path) -> set[str]:
     return found
 
 
-def _validate_source_directory(run_dir: Path, source: ForeignSource) -> None:
+def _validate_source_directory(run_dir: Path, source: _OpaqueRecord) -> None:
     expected = (
         {"source.json"}
-        if isinstance(source, ForeignLocalSource)
+        if source.get("source_type") == "local_pdf"
         else {"discovery.raw.json", "source.json"}
     )
     if _walk_regular_files(run_dir / "source") != expected:
@@ -1278,69 +733,24 @@ def _validate_source_directory(run_dir: Path, source: ForeignSource) -> None:
         )
 
 
-def _validate_evidence(run_dir: Path, evidence_path: Path, evidence: ForeignEvidence, source_sha256: str) -> None:
+def _validate_evidence(
+    run_dir: Path,
+    evidence_path: Path,
+    evidence: _OpaqueRecord,
+    source_sha256: str,
+) -> None:
     if not evidence.complete or evidence.preview_pages is not None:
         raise _invalid("evidence_incomplete", "batch accepts only complete, non-preview evidence")
-    if any(check.status == "blocked" for check in evidence.resource_checks):
-        raise _invalid("evidence_incomplete", "complete evidence cannot contain blocked resource checks")
     if evidence.source_sha256 != source_sha256:
         raise _invalid("evidence_binding_mismatch", "evidence source digest differs from paper_reader source")
-    roles = [ref.role for ref in evidence.files]
-    for role in {"metadata", "extract", "context", "section_context", "secondary_sources"}:
-        if roles.count(role) != 1:
-            raise _invalid("evidence_binding_mismatch", f"evidence requires exactly one {role} artifact")
-    pages = set(evidence.pages)
-    if len(pages) != len(evidence.pages) or any(page <= 0 for page in pages):
-        raise _invalid("evidence_binding_mismatch", "evidence pages must be unique positive integers")
-    section_keys: set[tuple[str, int, int]] = set()
-    for section in evidence.sections:
-        key = (section.title, section.start_page, section.end_page)
-        if (
-            key in section_keys
-            or section.start_page > section.end_page
-            or section.start_page not in pages
-            or section.end_page not in pages
-        ):
-            raise _invalid("evidence_binding_mismatch", "evidence section membership is invalid")
-        section_keys.add(key)
-    table_indices: set[int] = set()
-    for table in evidence.table_candidates:
-        if (
-            table.index <= 0
-            or table.index in table_indices
-            or table.page not in pages
-            or not any(
-                section.title == table.section and section.start_page <= table.page <= section.end_page
-                for section in evidence.sections
-            )
-        ):
-            raise _invalid("evidence_binding_mismatch", "evidence table membership is invalid")
-        table_indices.add(table.index)
-    figure_paths = {ref.path for ref in evidence.files if ref.role == "figure_image"}
-    figure_ids: set[str] = set()
-    for figure in evidence.figures:
-        if (
-            figure.figure_id in figure_ids
-            or figure.page not in pages
-            or figure.artifact_path not in figure_paths
-        ):
-            raise _invalid("evidence_binding_mismatch", "evidence figure membership is invalid")
-        figure_ids.add(figure.figure_id)
     expected_members: set[str] = set()
     evidence_dir = evidence_path.parent
-    for ref in evidence.files:
-        expected_media = {
-            "metadata": "application/json",
-            "extract": "application/json",
-            "context": "text/markdown",
-            "section_context": "text/markdown",
-            "secondary_sources": "application/json",
-            "figure_context": "text/markdown",
-        }.get(ref.role)
-        if expected_media is not None and ref.media_type != expected_media:
-            raise _invalid("evidence_binding_mismatch", f"evidence {ref.role} media type is invalid")
-        if ref.role == "figure_image" and not str(ref.media_type or "").startswith("image/"):
-            raise _invalid("evidence_binding_mismatch", "evidence figure image media type is invalid")
+    for raw_ref in _require_sequence(
+        evidence.files,
+        code="evidence_binding_mismatch",
+        label="evidence files",
+    ):
+        ref = _require_inner_ref(raw_ref, code="evidence_binding_mismatch")
         member_path, _raw, _model = _read_inner(run_dir, ref)
         try:
             relative = member_path.relative_to(evidence_dir).as_posix()
@@ -1355,33 +765,133 @@ def _validate_evidence(run_dir: Path, evidence_path: Path, evidence: ForeignEvid
         raise _invalid("artifact_closed_world_mismatch", "evidence bundle membership differs from manifest")
 
 
+def _canonical_snapshot(
+    raw: bytes,
+    *,
+    code: str,
+    tag_field: str,
+    tag_value: str,
+) -> _OpaqueRecord:
+    payload = _json_no_nonfinite(raw, code=code)
+    if not isinstance(payload, dict):
+        raise _invalid(code, "single-paper snapshot must be a JSON object")
+    if payload.get(tag_field) != tag_value:
+        raise _invalid("unsupported_run_schema", f"single-paper snapshot must use {tag_value}")
+    if raw != canonical_json_bytes(payload):
+        raise _invalid(code, "single-paper snapshot must be canonical JSON")
+    return _OpaqueRecord(payload)
+
+
+def _validated_gate(
+    record: object,
+    *,
+    status: str,
+    required_proofs: frozenset[str],
+    code: str,
+) -> tuple[str, ...]:
+    gate = _require_object(record, code=code, label="sealed gate")
+    if gate.get("status") != status:
+        raise _invalid(code, f"sealed gate must have status {status}")
+    blockers = _require_sequence(gate.get("blockers"), code=code, label="gate blockers")
+    checks = _require_sequence(gate.get("checks"), code=code, label="gate checks")
+    if blockers or not checks or any(not isinstance(check, str) or not check for check in checks):
+        raise _invalid(code, "sealed gate must have non-empty string checks and no blockers")
+    normalized = tuple(checks)
+    if len(set(normalized)) != len(normalized) or not required_proofs.issubset(normalized):
+        raise _invalid(code, "sealed gate is missing or repeats a consumer-required proof")
+    return normalized
+
+
+def _markdown_body(raw: bytes, *, code: str) -> tuple[str, str]:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _invalid(code, "candidate Markdown must be UTF-8", exc)
+    lines = text.splitlines(keepends=True)
+    if not lines or not lines[0].startswith("# "):
+        raise _invalid(code, "candidate Markdown must begin with an H1")
+    return lines[0][2:].strip(), "".join(lines[1:])
+
+
+def _html_body(raw: bytes, *, code: str) -> tuple[str, str]:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _invalid(code, "candidate HTML must be UTF-8", exc)
+    closing = text.casefold().find("</h1>")
+    title = _html_title(text)
+    if closing < 0 or not title:
+        raise _invalid(code, "candidate HTML must contain one visible H1")
+    return title, text[closing + len("</h1>") :]
+
+
 def _validate_review_and_candidate(
     manifest_item,
     run_path: Path,
-    run: ForeignRun,
+    run: _OpaqueRecord,
     review_ref: ArtifactRef,
     candidate_ref: ArtifactRef,
     refingerprint: bool = True,
 ):
     run_dir = run_path.parent
-    review_path, _review_raw, package = _read_envelope(
+    review_path, review_raw, package = _read_envelope(
         review_ref,
-        ForeignReviewPackage,
         basename="review-package.json",
         schema="paper_reader.review-package.v2",
         id_field="review_package_id",
     )
     candidate_path, _candidate_raw, candidate = _read_envelope(
         candidate_ref,
-        ForeignCandidate,
         basename="candidate.json",
         schema="paper_reader.candidate.v2",
         id_field="candidate_id",
     )
-    expected_review_path = run_dir / "reviews" / package.review_package_id / "review-package.json"
-    expected_candidate_path = run_dir / "candidates" / candidate.candidate_id / "candidate.json"
-    if review_path != expected_review_path or candidate_path != expected_candidate_path:
-        raise _invalid("artifact_path_invalid", "review/candidate must live in the bound run id directory")
+    review_id = _require_string(
+        package.get("review_package_id"),
+        code="review_not_sealed",
+        label="review package id",
+    )
+    candidate_id = _require_string(
+        candidate.get("candidate_id"),
+        code="candidate_binding_mismatch",
+        label="candidate id",
+    )
+    if (
+        review_path != run_dir / "reviews" / review_id / "review-package.json"
+        or candidate_path != run_dir / "candidates" / candidate_id / "candidate.json"
+    ):
+        raise _invalid("artifact_path_invalid", "review/candidate belongs to another run directory")
+    if package.get("run_id") != run.run_id or candidate.get("run_id") != run.run_id:
+        raise _invalid("artifact_binding_mismatch", "review/candidate run id differs from paper_reader run")
+    _run_ref_for(run, run_dir, review_path, review_ref, "review_package")
+    _run_ref_for(run, run_dir, candidate_path, candidate_ref, "candidate")
+
+    package_checks = _validated_gate(
+        package.get("gate"),
+        status="passed",
+        required_proofs=_REQUIRED_REVIEW_PROOFS,
+        code="review_not_sealed",
+    )
+    target = _require_object(
+        candidate.get("target"),
+        code="candidate_binding_mismatch",
+        label="candidate target",
+    )
+    target_type = target.get("target_type")
+    candidate_proofs = (
+        _REQUIRED_LOCAL_CANDIDATE_PROOFS
+        if target_type == "local"
+        else _REQUIRED_ZOTERO_CANDIDATE_PROOFS
+        if target_type == "zotero"
+        else frozenset({"unsupported_target"})
+    )
+    _validated_gate(
+        candidate.get("gate"),
+        status="write_ready",
+        required_proofs=candidate_proofs,
+        code="candidate_not_write_ready",
+    )
+
     review_names = {
         "summary.json": ("summary_snapshot", "application/json"),
         "review.json": ("review_snapshot", "application/json"),
@@ -1391,136 +901,123 @@ def _validate_review_and_candidate(
         "note.html": ("review_note_html", "text/html"),
     }
     if _walk_regular_files(review_path.parent) != {*review_names, "review-package.json"}:
-        raise _invalid("artifact_closed_world_mismatch", "sealed review directory is not the fixed seven-file closure")
+        raise _invalid("artifact_closed_world_mismatch", "sealed review directory is not its fixed closure")
+    package_artifacts = _require_sequence(
+        package.get("artifacts"),
+        code="review_not_sealed",
+        label="review package artifacts",
+    )
+    if len(package_artifacts) != len(review_names):
+        raise _invalid("review_not_sealed", "review package artifact count differs from its fixed closure")
     review_snapshots: dict[str, bytes] = {}
-    if len(package.artifacts) != len(review_names):
-        raise _invalid("review_not_sealed", "review package artifact count is not the fixed closure")
+    review_refs: dict[str, _OpaqueRecord] = {}
     for name, (role, media_type) in review_names.items():
-        matches = [ref for ref in package.artifacts if ref.role == role]
+        matches = [
+            _require_inner_ref(ref, code="review_not_sealed")
+            for ref in package_artifacts
+            if _require_object(ref, code="review_not_sealed", label="review ref").get("role") == role
+        ]
         if len(matches) != 1:
             raise _invalid("review_not_sealed", f"review package must bind one {role}")
+        ref = matches[0]
         _require_ref_shape(
-            matches[0],
+            ref,
             role=role,
             path=(review_path.parent / name).relative_to(run_dir).as_posix(),
             media_type=media_type,
         )
-        path, raw, _model = _read_inner(run_dir, matches[0])
+        path, raw, _ = _read_inner(run_dir, ref)
         if path != review_path.parent / name:
             raise _invalid("review_not_sealed", f"review package {role} path is not fixed")
         review_snapshots[name] = raw
-    by_role = {ref.role: ref for ref in package.artifacts}
+        review_refs[role] = ref
     if (
-        package.summary != by_role["summary_snapshot"]
-        or package.review != by_role["review_snapshot"]
-        or package.evidence_manifest != by_role["evidence_manifest_snapshot"]
+        package.get("summary") != review_refs["summary_snapshot"]
+        or package.get("review") != review_refs["review_snapshot"]
+        or package.get("evidence_manifest") != review_refs["evidence_manifest_snapshot"]
     ):
         raise _invalid("review_not_sealed", "review package primary refs differ from closure refs")
-    if package.run_id != run.run_id or candidate.run_id != run.run_id:
-        raise _invalid("artifact_binding_mismatch", "review/candidate run id differs from paper_reader run")
-    # The mutable root manifest may advance status/target/gate after a committed
-    # batch result, but it must retain the exact immutable artifacts it owns.
-    _run_ref_for(run, run_dir, review_path, review_ref, "review_package")
-    _run_ref_for(run, run_dir, candidate_path, candidate_ref, "candidate")
-    if (
-        package.gate.status != "passed"
-        or package.gate.blockers
-        or package.gate.checks != _REVIEW_CHECKS
-    ):
-        raise _invalid("review_not_sealed", "review package must pass sealed Chinese-first validation")
-    expected_candidate_checks = (
-        _LOCAL_CANDIDATE_CHECKS
-        if isinstance(candidate.target, ForeignLocalTarget)
-        else _ZOTERO_CANDIDATE_CHECKS
-    )
-    if (
-        candidate.gate.status != "write_ready"
-        or candidate.gate.blockers
-        or candidate.gate.checks != expected_candidate_checks
-    ):
-        raise _invalid("candidate_not_write_ready", "candidate gate must be write_ready with no blockers")
-    for required_ref, label in [
-        (package.summary, "summary"),
-        (package.review, "review"),
-        (package.evidence_manifest, "evidence_manifest"),
-    ]:
-        if required_ref not in package.artifacts:
-            raise _invalid("review_not_sealed", f"review package does not bind its {label} artifact")
-    for required_ref, label in [
-        (candidate.sealed_review, "sealed_review"),
-        (candidate.evidence_manifest, "evidence_manifest"),
-    ]:
-        if required_ref not in candidate.artifacts:
-            raise _invalid("candidate_binding_mismatch", f"candidate does not bind its {label} artifact")
-    try:
-        summary = ForeignSummary.model_validate_json(review_snapshots["summary.json"])
-        review_json = ForeignReview.model_validate_json(review_snapshots["review.json"])
-        validation = ForeignReviewValidation.model_validate_json(review_snapshots["validation.json"])
-    except ValidationError as exc:
-        raise _invalid("review_invalid", "sealed summary/review/validation fails strict validation", exc)
-    review_json_raw = review_snapshots["review.json"]
+
     summary_raw = review_snapshots["summary.json"]
+    review_json_raw = review_snapshots["review.json"]
+    validation_raw = review_snapshots["validation.json"]
     note_md = review_snapshots["note.md"]
     note_html = review_snapshots["note.html"]
+    summary = _canonical_snapshot(
+        summary_raw,
+        code="review_invalid",
+        tag_field="schema_version",
+        tag_value="paper_reader.summary.v2",
+    )
+    review_json = _canonical_snapshot(
+        review_json_raw,
+        code="review_invalid",
+        tag_field="schema_version",
+        tag_value="paper_reader.review.v2",
+    )
+    validation = _canonical_snapshot(
+        validation_raw,
+        code="review_invalid",
+        tag_field="format",
+        tag_value="paper_reader.review-validation.v2-internal",
+    )
+    package_summary_sha = _require_sha256(
+        package.get("summary_sha256"),
+        code="review_not_sealed",
+        label="package summary digest",
+    )
+    package_review_sha = _require_sha256(
+        package.get("review_sha256"),
+        code="review_not_sealed",
+        label="package review digest",
+    )
+    package_evidence_sha = _require_sha256(
+        package.get("evidence_digest"),
+        code="review_not_sealed",
+        label="package evidence digest",
+    )
+    validation_checks = _require_sequence(
+        validation.get("checks"),
+        code="review_not_sealed",
+        label="sealed validation checks",
+    )
+    validation_blockers = _require_sequence(
+        validation.get("blockers"),
+        code="review_not_sealed",
+        label="sealed validation blockers",
+    )
     if (
-        summary_raw != canonical_json_bytes(summary)
-        or review_json_raw != canonical_json_bytes(review_json)
-        or review_snapshots["validation.json"] != canonical_json_bytes(validation)
+        summary.get("run_id") != run.run_id
+        or summary.get("evidence_digest") != package_evidence_sha
+        or review_json.get("run_id") != run.run_id
+        or review_json.get("summary_sha256") != package_summary_sha
+        or review_json.get("evidence_digest") != package_evidence_sha
+        or sha256_bytes(summary_raw) != package_summary_sha
+        or sha256_bytes(review_json_raw) != package_review_sha
+        or validation.get("run_id") != run.run_id
+        or validation.get("summary_sha256") != package_summary_sha
+        or validation.get("review_sha256") != package_review_sha
+        or validation.get("evidence_digest") != package_evidence_sha
+        or validation.get("rendered_note_sha256") != sha256_bytes(note_md)
+        or validation.get("rendered_html_sha256") != sha256_bytes(note_html)
+        or validation_blockers
+        or tuple(validation_checks) != package_checks
     ):
-        raise _invalid("review_not_sealed", "sealed summary/review/validation must be canonical JSON")
-    _validate_write_ready_summary_semantics(summary)
+        raise _invalid("review_not_sealed", "sealed validation hash closure is inconsistent")
+
+    evidence_raw = review_snapshots["evidence.json"]
+    evidence = _canonical_snapshot(
+        evidence_raw,
+        code="evidence_invalid",
+        tag_field="format",
+        tag_value="paper_reader.evidence.v2-internal",
+    )
     if (
-        summary.run_id != run.run_id
-        or summary.evidence_digest != package.evidence_digest
-        or summary.review_status not in {"passed", "passed_with_caveats"}
-        or summary.review_status != review_json.review_status
-        or summary.improvement_status == "needed"
-        or review_json.run_id != run.run_id
-        or review_json.review_status == "failed"
-        or review_json.needs_improvement
-        or review_json.summary_sha256 != package.summary_sha256
-        or review_json.evidence_digest != package.evidence_digest
-        or sha256_bytes(summary_raw) != package.summary_sha256
-        or sha256_bytes(review_json_raw) != package.review_sha256
+        evidence.get("run_id") != run.run_id
+        or package_evidence_sha != review_refs["evidence_manifest_snapshot"].sha256
     ):
-        raise _invalid("review_not_sealed", "sealed review content is failed, improvable, or hash-mismatched")
-    if (
-        validation.run_id != run.run_id
-        or validation.summary_sha256 != package.summary_sha256
-        or validation.review_sha256 != package.review_sha256
-        or validation.evidence_digest != package.evidence_digest
-        or validation.rendered_note_sha256 != sha256_bytes(note_md)
-        or validation.rendered_html_sha256 != sha256_bytes(note_html)
-        or validation.blockers
-        or validation.checks != _REVIEW_CHECKS
-        or package.gate.checks != _REVIEW_CHECKS
-    ):
-        raise _invalid("review_not_sealed", "sealed validation hashes/checks/blockers are inconsistent")
-    try:
-        rendered_text = note_md.decode("utf-8")
-        note_html.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise _invalid("review_not_sealed", "sealed rendered notes must be UTF-8", exc)
-    if note_html != _render_note_html_like_single(rendered_text):
-        raise _invalid(
-            "review_not_sealed",
-            "sealed review HTML is not the canonical rendering of sealed Markdown",
-        )
-    if (
-        not _CJK_RE.search(rendered_text)
-        or any(_looks_like_english_prose(value) for value in _iter_rendered_summary_text(summary))
-        or _rendered_markdown_has_english_prose(rendered_text)
-    ):
-        raise _invalid("review_not_sealed", "sealed rendered note does not satisfy Chinese-first prose")
-    evidence_snapshot_raw = review_snapshots["evidence.json"]
-    try:
-        evidence = ForeignEvidence.model_validate_json(evidence_snapshot_raw)
-    except ValidationError as exc:
-        raise _invalid("evidence_invalid", "sealed evidence snapshot fails strict validation", exc)
-    source_sha = run.source.sha256 if isinstance(run.source, ForeignLocalSource) else run.source.attachment.sha256
-    if evidence.run_id != run.run_id or package.evidence_digest != package.evidence_manifest.sha256:
         raise _invalid("evidence_binding_mismatch", "sealed review evidence identity mismatch")
-    _validate_summary_evidence(summary, evidence)
+
     candidate_names = {
         "run.json": ("run_snapshot", "application/json"),
         "source.json": ("source_snapshot", "application/json"),
@@ -1532,7 +1029,7 @@ def _validate_review_and_candidate(
         "note.md": ("note_markdown", "text/markdown"),
         "note.html": ("note_html", "text/html"),
     }
-    if isinstance(candidate.target, ForeignZoteroTarget):
+    if target_type == "zotero":
         candidate_names.update(
             {
                 "discovery.raw.json": ("raw_discovery_bundle_snapshot", "application/json"),
@@ -1540,312 +1037,346 @@ def _validate_review_and_candidate(
                 "children.json": ("zotero_children_snapshot", "application/json"),
             }
         )
-    if _walk_regular_files(candidate_path.parent) != {*candidate_names, "candidate.json"}:
-        raise _invalid("artifact_closed_world_mismatch", "candidate directory is not its fixed immutable closure")
-    if len(candidate.artifacts) != len(candidate_names):
-        raise _invalid("candidate_binding_mismatch", "candidate artifact count is not the fixed closure")
+    elif target_type != "local":
+        raise _invalid("candidate_binding_mismatch", "candidate target type is unsupported")
+
+    candidate_artifacts = _require_sequence(
+        candidate.get("artifacts"),
+        code="candidate_binding_mismatch",
+        label="candidate artifacts",
+    )
+    if (
+        _walk_regular_files(candidate_path.parent) != {*candidate_names, "candidate.json"}
+        or len(candidate_artifacts) != len(candidate_names)
+    ):
+        raise _invalid("artifact_closed_world_mismatch", "candidate directory differs from its fixed closure")
     candidate_snapshots: dict[str, bytes] = {}
-    candidate_refs: dict[str, ForeignArtifactRef] = {}
+    candidate_refs: dict[str, _OpaqueRecord] = {}
     for name, (role, media_type) in candidate_names.items():
-        matches = [ref for ref in candidate.artifacts if ref.role == role]
+        matches = [
+            _require_inner_ref(ref, code="candidate_binding_mismatch")
+            for ref in candidate_artifacts
+            if _require_object(ref, code="candidate_binding_mismatch", label="candidate ref").get("role")
+            == role
+        ]
         if len(matches) != 1:
             raise _invalid("candidate_binding_mismatch", f"candidate must bind one {role}")
+        ref = matches[0]
         _require_ref_shape(
-            matches[0],
+            ref,
             role=role,
             path=(candidate_path.parent / name).relative_to(run_dir).as_posix(),
             media_type=media_type,
         )
-        path, raw, _model = _read_inner(run_dir, matches[0])
+        path, raw, _ = _read_inner(run_dir, ref)
         if path != candidate_path.parent / name:
             raise _invalid("candidate_binding_mismatch", f"candidate {role} path is not fixed")
         candidate_snapshots[name] = raw
-        candidate_refs[role] = matches[0]
+        candidate_refs[role] = ref
+
     if (
-        candidate.sealed_review != candidate_refs["review_package_snapshot"]
-        or candidate.evidence_manifest != candidate_refs["evidence_manifest_snapshot"]
-        or candidate_snapshots["review-package.json"] != _review_raw
-        or candidate_snapshots["evidence.json"] != evidence_snapshot_raw
-        or candidate_snapshots["summary.json"] != review_snapshots["summary.json"]
-        or candidate_snapshots["review.json"] != review_snapshots["review.json"]
-        or candidate_snapshots["validation.json"] != review_snapshots["validation.json"]
+        candidate.get("sealed_review") != candidate_refs["review_package_snapshot"]
+        or candidate.get("evidence_manifest") != candidate_refs["evidence_manifest_snapshot"]
+        or candidate_snapshots["review-package.json"] != review_raw
+        or candidate_snapshots["evidence.json"] != evidence_raw
+        or candidate_snapshots["summary.json"] != summary_raw
+        or candidate_snapshots["review.json"] != review_json_raw
+        or candidate_snapshots["validation.json"] != validation_raw
     ):
         raise _invalid("candidate_binding_mismatch", "candidate snapshots differ from sealed review package")
-    try:
-        run_snapshot = ForeignRun.model_validate_json(candidate_snapshots["run.json"])
-        source_snapshot = (
-            ForeignLocalSource.model_validate_json(candidate_snapshots["source.json"])
-            if isinstance(candidate.source, ForeignLocalSource)
-            else None
-        )
-    except ValidationError as exc:
-        raise _invalid("candidate_binding_mismatch", "candidate run/source snapshot is invalid", exc)
     if (
-        candidate_snapshots["run.json"] != canonical_json_bytes(run_snapshot)
-        or run_snapshot.run_id != run.run_id
-        or run_snapshot.source != candidate.source
-        or run_snapshot.status != "reviewed"
-        or run_snapshot.gate != package.gate
-        or run_snapshot.live_preflight is not None
-        or (
-            isinstance(candidate.source, ForeignLocalSource)
-            and (
-                source_snapshot != candidate.source
-                or candidate_snapshots["source.json"] != canonical_json_bytes(source_snapshot)
-                or run_snapshot.target != candidate.target
-            )
-        )
-        or (
-            isinstance(candidate.source, ForeignZoteroSource)
-            and run_snapshot.target is not None
-        )
+        candidate_refs["review_package_snapshot"].sha256 != review_ref.sha256
+        or candidate_refs["evidence_manifest_snapshot"].sha256 != package_evidence_sha
     ):
-        raise _invalid("candidate_binding_mismatch", "candidate run/source snapshots do not bind source")
+        raise _invalid("candidate_binding_mismatch", "candidate does not bind supplied review/evidence")
+
+    run_snapshot = _canonical_snapshot(
+        candidate_snapshots["run.json"],
+        code="candidate_binding_mismatch",
+        tag_field="schema_version",
+        tag_value="paper_reader.run.v2",
+    )
+    source = _require_object(
+        candidate.get("source"),
+        code="candidate_binding_mismatch",
+        label="candidate source",
+    )
+    source_type = source.get("source_type")
+    if (
+        run_snapshot.get("run_id") != run.run_id
+        or run_snapshot.get("source") != source
+        or run_snapshot.get("status") != "reviewed"
+        or run_snapshot.get("gate") != package.get("gate")
+        or run_snapshot.get("live_preflight") is not None
+        or (source_type == "local_pdf" and run_snapshot.get("target") != target)
+        or (source_type == "zotero" and run_snapshot.get("target") is not None)
+    ):
+        raise _invalid("candidate_binding_mismatch", "candidate run snapshot does not bind source/review")
     _run_ref_for(run_snapshot, run_dir, review_path, review_ref, "review_package")
+
+    run_snapshot_artifacts = _require_sequence(
+        run_snapshot.get("artifacts"),
+        code="evidence_binding_mismatch",
+        label="run snapshot artifacts",
+    )
     evidence_refs = [
-        ref
-        for ref in run_snapshot.artifacts
-        if ref.role == "evidence_manifest"
-        and ref.sha256 == package.evidence_digest
-        and ref.size_bytes == len(evidence_snapshot_raw)
-        and ref.media_type == "application/json"
+        _require_inner_ref(ref, code="evidence_binding_mismatch")
+        for ref in run_snapshot_artifacts
+        if _require_object(ref, code="evidence_binding_mismatch", label="run ref").get("role")
+        == "evidence_manifest"
+        and _require_object(ref, code="evidence_binding_mismatch", label="run ref").get("sha256")
+        == package_evidence_sha
     ]
     if len(evidence_refs) != 1:
         raise _invalid("evidence_binding_mismatch", "candidate run snapshot must bind canonical evidence")
-    evidence_path, evidence_raw, canonical_evidence = _read_inner(
+    evidence_path, canonical_evidence_raw, canonical_evidence = _read_inner(
         run_dir,
         evidence_refs[0],
-        model_type=ForeignEvidence,
+        canonical_json=True,
         code="evidence_invalid",
     )
-    if evidence_raw != evidence_snapshot_raw or canonical_evidence != evidence:
-        raise _invalid("evidence_binding_mismatch", "sealed evidence snapshot differs from canonical evidence")
-    if [ref for ref in run.artifacts if ref == evidence_refs[0]] != [evidence_refs[0]]:
-        raise _invalid(
-            "evidence_binding_mismatch",
-            "current paper_reader run must retain the exact immutable evidence ref",
+    if canonical_evidence_raw != evidence_raw or canonical_evidence != evidence:
+        raise _invalid("evidence_binding_mismatch", "sealed evidence differs from canonical evidence")
+    current_run_artifacts = _require_sequence(
+        run.get("artifacts"),
+        code="evidence_binding_mismatch",
+        label="current run artifacts",
+    )
+    if [ref for ref in current_run_artifacts if ref == evidence_refs[0]] != [evidence_refs[0]]:
+        raise _invalid("evidence_binding_mismatch", "current run does not retain canonical evidence")
+
+    source_sha = (
+        _require_sha256(source.get("sha256"), code="source_binding_mismatch", label="source digest")
+        if source_type == "local_pdf"
+        else _require_sha256(
+            _require_object(
+                source.get("attachment"),
+                code="source_binding_mismatch",
+                label="Zotero attachment",
+            ).get("sha256"),
+            code="source_binding_mismatch",
+            label="attachment digest",
         )
-    _validate_evidence(run_dir, evidence_path, evidence, source_sha)
-    if run.source != candidate.source:
-        raise _invalid("candidate_binding_mismatch", "final paper_reader run source/target differs from candidate")
-    if refingerprint:
-        if (
-            run.target != candidate.target
-            or run.gate != candidate.gate
-            or run.live_preflight != candidate.live_preflight
-        ):
-            raise _invalid("candidate_binding_mismatch", "current paper_reader run differs from candidate")
-    if candidate.tags != _expected_tags(summary.note_labels):
-        raise _invalid("candidate_binding_mismatch", "candidate tags differ from sealed summary labels")
-    if (
-        candidate.sealed_review.sha256 != review_ref.sha256
-        or candidate.evidence_manifest.sha256 != package.evidence_manifest.sha256
+    )
+    _validate_evidence(run_dir, evidence_path, canonical_evidence, source_sha)
+    if run.get("source") != source:
+        raise _invalid("candidate_binding_mismatch", "current run source differs from candidate")
+    if refingerprint and (
+        run.get("target") != target
+        or run.get("gate") != candidate.get("gate")
+        or run.get("live_preflight") != candidate.get("live_preflight")
     ):
-        raise _invalid("candidate_binding_mismatch", "candidate does not bind supplied review/evidence")
+        raise _invalid("candidate_binding_mismatch", "current run target/gate differs from candidate")
+
+    tags = _require_sequence(
+        candidate.get("tags"),
+        code="candidate_binding_mismatch",
+        label="candidate tags",
+    )
+    if not tags or any(not isinstance(tag, str) or not tag for tag in tags) or len(set(tags)) != len(tags):
+        raise _invalid("candidate_binding_mismatch", "candidate tags must be unique non-empty strings")
+    note_title = _require_string(
+        candidate.get("note_title"),
+        code="candidate_binding_mismatch",
+        label="candidate title",
+    )
     note_md_bytes = candidate_snapshots["note.md"]
     note_html_bytes = candidate_snapshots["note.html"]
-    try:
-        note_md_text = note_md_bytes.decode("utf-8")
-        note_html_text = note_html_bytes.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise _invalid("candidate_binding_mismatch", "candidate note snapshots must be UTF-8", exc)
-    if not _CJK_RE.search(note_md_text) or _rendered_markdown_has_english_prose(note_md_text):
-        raise _invalid("candidate_binding_mismatch", "candidate Markdown violates Chinese-first prose")
-    markdown_title = note_md_text.splitlines()[0].removeprefix("# ").strip() if note_md_text.splitlines() else ""
-    if isinstance(candidate.target, ForeignLocalTarget):
-        original_source_refs = [
-            ref
-            for ref in run_snapshot.artifacts
-            if ref.role == "source_snapshot"
-            and ref.path == "source/source.json"
-            and ref.sha256 == sha256_bytes(candidate_snapshots["source.json"])
-            and ref.size_bytes == len(candidate_snapshots["source.json"])
-            and ref.media_type == "application/json"
-        ]
-        if len(original_source_refs) != 1:
-            raise _invalid("source_binding_mismatch", "local run snapshot must bind exact source snapshot")
-        if [ref for ref in run.artifacts if ref == original_source_refs[0]] != [
-            original_source_refs[0]
-        ]:
-            raise _invalid(
-                "source_binding_mismatch",
-                "current local run must retain the exact immutable source snapshot ref",
-            )
-        _source_path, original_source_raw, original_source = _read_inner(
-            run_dir,
-            original_source_refs[0],
-            model_type=ForeignLocalSource,
-            code="source_binding_mismatch",
-        )
-        if original_source_raw != candidate_snapshots["source.json"] or original_source != candidate.source:
-            raise _invalid("source_binding_mismatch", "original local source snapshot differs from candidate")
+    markdown_title, _markdown_body_text = _markdown_body(
+        note_md_bytes,
+        code="candidate_binding_mismatch",
+    )
+    html_title, _html_body_text = _html_body(
+        note_html_bytes,
+        code="candidate_binding_mismatch",
+    )
+    content_sha = _require_sha256(
+        candidate.get("content_sha256"),
+        code="candidate_binding_mismatch",
+        label="candidate content digest",
+    )
+    content_length = _require_nonnegative_int(
+        candidate.get("content_length"),
+        code="candidate_binding_mismatch",
+        label="candidate content length",
+    )
+
+    resolved_key = _source_matches(manifest_item, source, refingerprint=refingerprint)
+    if isinstance(manifest_item, PdfManifestItem):
+        if source_type != "local_pdf" or target_type != "local":
+            raise _invalid("candidate_binding_mismatch", "local item requires local source/target")
         if (
-            sha256_bytes(note_md_bytes) != candidate.content_sha256
-            or len(note_md_bytes) != candidate.content_length
-            or markdown_title != candidate.note_title
+            sha256_bytes(note_md_bytes) != content_sha
+            or len(note_md_bytes) != content_length
+            or markdown_title != note_title
             or note_md_bytes != review_snapshots["note.md"]
             or note_html_bytes != review_snapshots["note.html"]
         ):
-            raise _invalid("candidate_binding_mismatch", "local candidate note Markdown binding is invalid")
-    else:
-        canonical_html = note_html_text.rstrip("\r\n")
-        expected_note_md, expected_note_html = _expected_zotero_candidate_notes(
-            review_snapshots["note.md"],
-            candidate.note_title,
+            raise _invalid("candidate_binding_mismatch", "local candidate note closure is invalid")
+        original_source_refs = [
+            _require_inner_ref(ref, code="source_binding_mismatch")
+            for ref in run_snapshot_artifacts
+            if _require_object(ref, code="source_binding_mismatch", label="source ref").get("role")
+            == "source_snapshot"
+        ]
+        if len(original_source_refs) != 1:
+            raise _invalid("source_binding_mismatch", "local run must bind one source snapshot")
+        if [ref for ref in current_run_artifacts if ref == original_source_refs[0]] != [
+            original_source_refs[0]
+        ]:
+            raise _invalid("source_binding_mismatch", "current local run dropped its source snapshot")
+        _source_path, original_source_raw, original_source = _read_inner(
+            run_dir,
+            original_source_refs[0],
+            canonical_json=True,
+            code="source_binding_mismatch",
         )
-        if (
-            sha256_bytes(canonical_html.encode("utf-8")) != candidate.content_sha256
-            or len(canonical_html) != candidate.content_length
-            or note_md_bytes != expected_note_md
-            or note_html_bytes != expected_note_html
-        ):
-            raise _invalid(
-                "candidate_binding_mismatch",
-                "Zotero candidate notes may differ from sealed review only by the exact H1 title rewrite",
-            )
-    resolved_key = _source_matches(manifest_item, candidate.source, refingerprint=refingerprint)
-    if isinstance(manifest_item, PdfManifestItem):
-        if not isinstance(candidate.target, ForeignLocalTarget):
-            raise _invalid("candidate_binding_mismatch", "local PDF candidate must target a local publication")
+        if original_source_raw != candidate_snapshots["source.json"] or original_source != source:
+            raise _invalid("source_binding_mismatch", "local source snapshot differs from candidate")
         _validate_local_run_target(
             manifest_item,
             run_path,
-            candidate.target,
+            target,
             check_parent_identity=refingerprint,
         )
-    else:
-        if not isinstance(candidate.target, ForeignZoteroTarget) or candidate.target.parent_key != resolved_key:
-            raise _invalid("candidate_binding_mismatch", "Zotero candidate parent differs from resolved source")
-        if not isinstance(candidate.source, ForeignZoteroSource) or candidate.live_preflight is None:
-            raise _invalid("candidate_binding_mismatch", "Zotero candidate requires source and live preflight")
-        live = candidate.live_preflight
-        if (
-            (refingerprint and run.live_preflight != live)
-            or live.parent_key != resolved_key
-            or live.parent_fingerprint != candidate.source.parent_fingerprint
-            or candidate.target.parent_fingerprint != candidate.source.parent_fingerprint
-            or live.requested_note_title != candidate.note_title
-            or candidate.target.note_title != candidate.note_title
-            or not live.title_available
-            or live.matching_note_keys
-            or live.parent_snapshot != candidate_refs["zotero_parent_snapshot"]
-            or live.children_snapshot != candidate_refs["zotero_children_snapshot"]
-        ):
-            raise _invalid("candidate_binding_mismatch", "Zotero candidate live parent/title binding is invalid")
-        try:
-            parent_payload = json.loads(candidate_snapshots["parent.json"])
-            children_payload = json.loads(candidate_snapshots["children.json"])
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise _invalid("zotero_snapshot_invalid", "Zotero parent/children snapshot is invalid JSON", exc)
-        if (
-            canonical_json_bytes(parent_payload) != candidate_snapshots["parent.json"]
-            or canonical_json_bytes(children_payload) != candidate_snapshots["children.json"]
-            or not isinstance(children_payload, list)
-        ):
-            raise _invalid("zotero_snapshot_invalid", "Zotero parent/children snapshots are not canonical")
-        parent_key, parent_title, parent_doi, parent_version, parent_digest = _parent_fingerprint(parent_payload)
-        if (
-            parent_key != candidate.source.item_key
-            or parent_title != candidate.source.title
-            or parent_doi != candidate.source.doi
-            or parent_version != candidate.source.parent_version
-            or parent_digest != candidate.source.parent_fingerprint
-        ):
-            raise _invalid("zotero_snapshot_invalid", "Zotero parent snapshot differs from source identity")
-        exact_matches: list[str] = []
-        for child in children_payload:
-            if not isinstance(child, dict):
-                raise _invalid("zotero_snapshot_invalid", "Zotero children snapshot has a non-object entry")
-            child_data = child.get("data")
-            if not isinstance(child_data, dict) or child_data.get("itemType") != "note":
-                continue
-            child_key = str(child.get("key") or child_data.get("key") or "").strip()
-            if not child_key:
-                raise _invalid("zotero_snapshot_invalid", "Zotero note child is missing its key")
-            if str(child_data.get("parentItem") or "").strip() != resolved_key:
-                raise _invalid("zotero_snapshot_invalid", "Zotero child belongs to another parent")
-            if _html_title(str(child_data.get("note") or "")) == candidate.note_title:
-                exact_matches.append(child_key)
-        if exact_matches or tuple(exact_matches) != live.matching_note_keys:
-            raise _invalid("candidate_binding_mismatch", "candidate title is no longer available in children snapshot")
-        source_raw_ref = candidate.source.raw_discovery_bundle
-        source_normalized_ref = candidate.source.normalized_source
-        _require_ref_shape(
-            source_raw_ref,
-            role="raw_discovery_bundle",
-            path="source/discovery.raw.json",
-            media_type="application/json",
-        )
-        _require_ref_shape(
-            source_normalized_ref,
-            role="normalized_source",
-            path="source/source.json",
-            media_type="application/json",
-        )
-        if (
-            [ref for ref in run_snapshot.artifacts if ref == source_raw_ref] != [source_raw_ref]
-            or [ref for ref in run_snapshot.artifacts if ref == source_normalized_ref]
-            != [source_normalized_ref]
-            or [ref for ref in run.artifacts if ref == source_raw_ref] != [source_raw_ref]
-            or [ref for ref in run.artifacts if ref == source_normalized_ref]
-            != [source_normalized_ref]
-            or candidate_snapshots["discovery.raw.json"] != _read_inner(
-                run_dir, candidate_refs["raw_discovery_bundle_snapshot"]
-            )[1]
-        ):
-            raise _invalid("source_binding_mismatch", "Zotero run/candidate source closure is invalid")
-        raw_bytes = candidate_snapshots["discovery.raw.json"]
-        normalized_bytes = candidate_snapshots["source.json"]
-        if (
-            sha256_bytes(raw_bytes) != source_raw_ref.sha256
-            or len(raw_bytes) != source_raw_ref.size_bytes
-            or sha256_bytes(normalized_bytes) != source_normalized_ref.sha256
-            or len(normalized_bytes) != source_normalized_ref.size_bytes
-        ):
-            raise _invalid(
-                "source_binding_mismatch",
-                "candidate Zotero source snapshots do not match immutable source refs",
-            )
-        raw_path, original_raw, _raw_model = _read_inner(run_dir, source_raw_ref)
-        normalized_path, original_normalized, _normalized_model = _read_inner(
-            run_dir, source_normalized_ref
-        )
-        if (
-            raw_path != run_dir / "source" / "discovery.raw.json"
-            or normalized_path != run_dir / "source" / "source.json"
-            or original_raw != raw_bytes
-            or original_normalized != normalized_bytes
-        ):
-            raise _invalid("source_binding_mismatch", "original Zotero source differs from candidate")
-        inventory_sha256 = _validate_zotero_source_snapshots(
-            candidate.source,
-            raw_bytes,
-            normalized_bytes,
-        )
-        if (
-            _html_title(note_html_text) != candidate.note_title
-            or candidate.source.attachment.sha256 != source_sha
-        ):
-            raise _invalid("candidate_binding_mismatch", "Zotero rendered title/source attachment binding is invalid")
         return (
             review_path,
             package,
             candidate_path,
             candidate,
             evidence_path,
-            evidence,
+            canonical_evidence,
             resolved_key,
-            inventory_sha256,
+            None,
         )
+
+    if source_type != "zotero" or target_type != "zotero" or target.get("parent_key") != resolved_key:
+        raise _invalid("candidate_binding_mismatch", "Zotero candidate source/parent differs from manifest")
+    live = _require_object(
+        candidate.get("live_preflight"),
+        code="candidate_binding_mismatch",
+        label="candidate live preflight",
+    )
+    if (
+        (refingerprint and run.get("live_preflight") != live)
+        or live.get("parent_key") != resolved_key
+        or live.get("parent_fingerprint") != source.get("parent_fingerprint")
+        or target.get("parent_fingerprint") != source.get("parent_fingerprint")
+        or live.get("requested_note_title") != note_title
+        or target.get("note_title") != note_title
+        or live.get("title_available") is not True
+        or _require_sequence(
+            live.get("matching_note_keys"),
+            code="candidate_binding_mismatch",
+            label="matching note keys",
+        )
+        or live.get("parent_snapshot") != candidate_refs["zotero_parent_snapshot"]
+        or live.get("children_snapshot") != candidate_refs["zotero_children_snapshot"]
+    ):
+        raise _invalid("candidate_binding_mismatch", "Zotero live parent/title binding is invalid")
+    canonical_html = note_html_bytes.decode("utf-8").rstrip("\r\n")
+    if (
+        sha256_bytes(canonical_html.encode("utf-8")) != content_sha
+        or len(canonical_html) != content_length
+        or html_title != note_title
+    ):
+        raise _invalid(
+            "candidate_binding_mismatch",
+            "Zotero candidate must bind its exact visible H1 and canonical HTML content",
+        )
+
+    parent_payload = _json_no_nonfinite(
+        candidate_snapshots["parent.json"],
+        code="zotero_snapshot_invalid",
+    )
+    children_payload = _json_no_nonfinite(
+        candidate_snapshots["children.json"],
+        code="zotero_snapshot_invalid",
+    )
+    if (
+        canonical_json_bytes(parent_payload) != candidate_snapshots["parent.json"]
+        or canonical_json_bytes(children_payload) != candidate_snapshots["children.json"]
+        or not isinstance(children_payload, list)
+    ):
+        raise _invalid("zotero_snapshot_invalid", "Zotero parent/children snapshots are not canonical")
+    parent_key, parent_title, parent_doi, parent_version, parent_digest = _parent_fingerprint(parent_payload)
+    if (
+        parent_key != source.get("item_key")
+        or parent_title != source.get("title")
+        or parent_doi != source.get("doi")
+        or parent_version != source.get("parent_version")
+        or parent_digest != source.get("parent_fingerprint")
+    ):
+        raise _invalid("zotero_snapshot_invalid", "Zotero parent snapshot differs from source identity")
+    exact_matches: list[str] = []
+    for child in children_payload:
+        if not isinstance(child, dict):
+            raise _invalid("zotero_snapshot_invalid", "Zotero children snapshot contains a non-object")
+        child_data = child.get("data")
+        if not isinstance(child_data, dict) or child_data.get("itemType") != "note":
+            continue
+        child_key = str(child.get("key") or child_data.get("key") or "").strip()
+        if not child_key or str(child_data.get("parentItem") or "").strip() != resolved_key:
+            raise _invalid("zotero_snapshot_invalid", "Zotero note child identity/parent is invalid")
+        if _html_title(str(child_data.get("note") or "")) == note_title:
+            exact_matches.append(child_key)
+    if exact_matches:
+        raise _invalid("candidate_binding_mismatch", "candidate title is unavailable in children snapshot")
+
+    source_raw_ref = _require_inner_ref(
+        source.get("raw_discovery_bundle"),
+        code="source_binding_mismatch",
+    )
+    source_normalized_ref = _require_inner_ref(
+        source.get("normalized_source"),
+        code="source_binding_mismatch",
+    )
+    _require_ref_shape(
+        source_raw_ref,
+        role="raw_discovery_bundle",
+        path="source/discovery.raw.json",
+        media_type="application/json",
+    )
+    _require_ref_shape(
+        source_normalized_ref,
+        role="normalized_source",
+        path="source/source.json",
+        media_type="application/json",
+    )
+    if (
+        [ref for ref in run_snapshot_artifacts if ref == source_raw_ref] != [source_raw_ref]
+        or [ref for ref in run_snapshot_artifacts if ref == source_normalized_ref]
+        != [source_normalized_ref]
+        or [ref for ref in current_run_artifacts if ref == source_raw_ref] != [source_raw_ref]
+        or [ref for ref in current_run_artifacts if ref == source_normalized_ref]
+        != [source_normalized_ref]
+    ):
+        raise _invalid("source_binding_mismatch", "Zotero run does not retain source closure")
+    raw_bytes = candidate_snapshots["discovery.raw.json"]
+    normalized_bytes = candidate_snapshots["source.json"]
+    raw_path, original_raw, _ = _read_inner(run_dir, source_raw_ref)
+    normalized_path, original_normalized, _ = _read_inner(run_dir, source_normalized_ref)
+    if (
+        raw_path != run_dir / "source" / "discovery.raw.json"
+        or normalized_path != run_dir / "source" / "source.json"
+        or original_raw != raw_bytes
+        or original_normalized != normalized_bytes
+        or sha256_bytes(raw_bytes) != source_raw_ref.sha256
+        or len(raw_bytes) != source_raw_ref.size_bytes
+        or sha256_bytes(normalized_bytes) != source_normalized_ref.sha256
+        or len(normalized_bytes) != source_normalized_ref.size_bytes
+    ):
+        raise _invalid("source_binding_mismatch", "candidate Zotero source snapshots differ from source refs")
+    inventory_sha256 = _validate_zotero_source_snapshots(source, raw_bytes, normalized_bytes)
     return (
         review_path,
         package,
         candidate_path,
         candidate,
         evidence_path,
-        evidence,
+        canonical_evidence,
         resolved_key,
-        None,
+        inventory_sha256,
     )
 
 
@@ -1854,11 +1385,11 @@ def _validate_prepared_local_continuation(
     prepared: LocalPrepareResult,
     *,
     run_path: Path,
-    run: ForeignRun,
-    package: ForeignReviewPackage,
-    candidate: ForeignCandidate,
+    run: _OpaqueRecord,
+    package: _OpaqueRecord,
+    candidate: _OpaqueRecord,
     canonical_evidence_path: Path,
-    canonical_evidence: ForeignEvidence,
+    canonical_evidence: _OpaqueRecord,
 ) -> None:
     if prepared.status != "prepared" or prepared.paper_reader_run is None or prepared.evidence is None:
         raise _invalid(
@@ -1925,7 +1456,6 @@ def validate_worker_result_artifacts(
     *,
     allow_mutable_run: bool = False,
     prepared_local_result: LocalPrepareResult | None = None,
-    allow_legacy_prepared_run_identity: bool = False,
 ) -> str | None:
     if prepared_local_result is None or result.status != "succeeded":
         return _validate_worker_result_artifacts_unanchored(
@@ -1938,17 +1468,6 @@ def validate_worker_result_artifacts(
         prepared_local_result.paper_reader_run_directory is None
         or result.paper_reader_run is None
     ):
-        if (
-            allow_legacy_prepared_run_identity
-            and prepared_local_result.paper_reader_run_directory is None
-            and result.paper_reader_run is not None
-        ):
-            return _validate_worker_result_artifacts_unanchored(
-                manifest,
-                result,
-                allow_mutable_run=allow_mutable_run,
-                prepared_local_result=prepared_local_result,
-            )
         raise _invalid(
             "local_prepare_binding_mismatch",
             "worker success lacks the prepared stable run directory identity",
@@ -2003,7 +1522,6 @@ def _validate_worker_result_artifacts_unanchored(
     assert result.paper_reader_run and result.review_package and result.candidate
     run_path, _run_raw, run = _read_envelope(
         result.paper_reader_run,
-        ForeignRun,
         basename="run.json",
         schema="paper_reader.run.v2",
         id_field="run_id",
@@ -2059,7 +1577,6 @@ def _validate_worker_result_artifacts_unanchored(
             raise _invalid("local_publication_invalid", "local worker success requires a published run and receipt")
         receipt_path, _receipt_raw, receipt = _read_envelope(
             result.local_publication,
-            ForeignLocalReceipt,
             basename=f"{candidate.candidate_id}.json",
             schema="paper_reader.local-receipt.v2-internal",
             id_field="receipt_id",
@@ -2086,8 +1603,30 @@ def _validate_worker_result_artifacts_unanchored(
             code="local_publication_invalid",
             label="local publication target",
         )
+        run_intent_refs = [ref for ref in run.artifacts if ref.role == "local_publication_intent"]
+        run_receipt_refs = [ref for ref in run.artifacts if ref.role == "local_receipt"]
+        if (
+            len(run_intent_refs) != 1
+            or len(run_receipt_refs) != 1
+            or run_intent_refs[0].path != receipt.intent_path
+            or run_intent_refs[0].sha256 != receipt.intent_sha256
+            or run_intent_refs[0].media_type != "application/json"
+            or run_receipt_refs[0].path != receipt_path.relative_to(run_path.parent).as_posix()
+            or run_receipt_refs[0].sha256 != result.local_publication.sha256
+            or run_receipt_refs[0].size_bytes != result.local_publication.size_bytes
+            or run_receipt_refs[0].media_type != "application/json"
+        ):
+            raise _invalid("local_publication_invalid", "published run does not bind exact intent/receipt refs")
         intent_path = run_path.parent / receipt.intent_path
-        intent_raw, intent = _read_model(intent_path, ForeignLocalIntent, code="local_publication_invalid")
+        intent_raw, intent = _read_model(
+            intent_path,
+            code="local_publication_invalid",
+            max_bytes=_artifact_ref_read_limit(
+                run_intent_refs[0].size_bytes,
+                code="local_publication_invalid",
+                json_artifact=True,
+            ),
+        )
         if (
             sha256_bytes(intent_raw) != receipt.intent_sha256
             or intent.run_id != run.run_id
@@ -2098,20 +1637,7 @@ def _validate_worker_result_artifacts_unanchored(
             or intent.content_length != receipt.content_length
         ):
             raise _invalid("local_publication_invalid", "local publication intent differs from receipt/candidate")
-        run_intent_refs = [ref for ref in run.artifacts if ref.role == "local_publication_intent"]
-        run_receipt_refs = [ref for ref in run.artifacts if ref.role == "local_receipt"]
-        if (
-            len(run_intent_refs) != 1
-            or len(run_receipt_refs) != 1
-            or run_intent_refs[0].path != receipt.intent_path
-            or run_intent_refs[0].sha256 != receipt.intent_sha256
-            or run_intent_refs[0].size_bytes != len(intent_raw)
-            or run_intent_refs[0].media_type != "application/json"
-            or run_receipt_refs[0].path != receipt_path.relative_to(run_path.parent).as_posix()
-            or run_receipt_refs[0].sha256 != result.local_publication.sha256
-            or run_receipt_refs[0].size_bytes != result.local_publication.size_bytes
-            or run_receipt_refs[0].media_type != "application/json"
-        ):
+        if run_intent_refs[0].size_bytes != len(intent_raw):
             raise _invalid("local_publication_invalid", "published run does not bind exact intent/receipt refs")
         note_refs = [ref for ref in candidate.artifacts if ref.role == "note_markdown"]
         if len(note_refs) != 1:
@@ -2119,7 +1645,15 @@ def _validate_worker_result_artifacts_unanchored(
         note_path, note_bytes, _model = _read_inner(run_path.parent, note_refs[0])
         if not allow_mutable_run:
             target_path = normalized_absolute_path(Path(receipt.target_path))
-            published = read_bytes(target_path, code="local_publication_invalid")
+            published = read_bytes(
+                target_path,
+                code="local_publication_invalid",
+                max_bytes=_artifact_ref_read_limit(
+                    note_refs[0].size_bytes,
+                    code="local_publication_invalid",
+                    json_artifact=False,
+                ),
+            )
             try:
                 target_stat = os.stat(target_path, follow_symlinks=False)
                 note_stat = os.stat(note_path, follow_symlinks=False)
@@ -2192,7 +1726,6 @@ def validate_local_prepare_result_artifacts(
     *,
     expected_root: Path | None = None,
     allow_mutable_run: bool = False,
-    allow_legacy_prepared_run_identity: bool = False,
 ) -> None:
     if result.status != "prepared":
         return _validate_local_prepare_result_artifacts_unanchored(
@@ -2202,17 +1735,6 @@ def validate_local_prepare_result_artifacts(
             allow_mutable_run=allow_mutable_run,
         )
     if result.paper_reader_run_directory is None or result.paper_reader_run is None:
-        if (
-            allow_legacy_prepared_run_identity
-            and result.paper_reader_run_directory is None
-            and result.paper_reader_run is not None
-        ):
-            return _validate_local_prepare_result_artifacts_unanchored(
-                manifest,
-                result,
-                expected_root=expected_root,
-                allow_mutable_run=allow_mutable_run,
-            )
         raise _invalid(
             "local_prepare_binding_mismatch",
             "prepared result lacks its stable paper_reader run directory identity",
@@ -2252,14 +1774,13 @@ def _validate_local_prepare_result_artifacts_unanchored(
     assert result.paper_reader_run and result.evidence
     run_path, _run_raw, run = _read_envelope(
         result.paper_reader_run,
-        ForeignRun,
         basename="run.json",
         schema="paper_reader.run.v2",
         id_field="run_id",
         bind_bytes=not allow_mutable_run,
     )
     _validate_source_directory(run_path.parent, run.source)
-    if not isinstance(run.target, ForeignLocalTarget) or (
+    if run.target.get("target_type") != "local" or (
         not allow_mutable_run
         and (run.status != "prepared" or run.gate.status == "blocked" or run.gate.blockers)
     ):
@@ -2273,7 +1794,6 @@ def _validate_local_prepare_result_artifacts_unanchored(
     )
     evidence_path, _evidence_raw, evidence = _read_envelope(
         result.evidence,
-        ForeignEvidence,
         basename="evidence.json",
         schema="paper_reader.evidence.v2-internal",
         id_field="evidence_id",

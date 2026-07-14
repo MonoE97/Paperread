@@ -477,6 +477,9 @@ def test_root_agents_defines_breaking_v2_public_contract() -> None:
         "both batch identity options must appear together",
         "write.lease_expired_uncertain",
         "clean install",
+        "committed revision",
+        "tracked files",
+        "--release-bundle",
     ]:
         assert phrase in text
 
@@ -528,6 +531,17 @@ def test_root_readmes_publish_v2_clean_install_contract() -> None:
             "unsupported_run_schema",
         ]:
             assert phrase in text
+
+
+def test_root_readmes_use_tracked_release_staging_instead_of_recursive_source_copy() -> None:
+    if not (REPO_ROOT / "README.md").exists():
+        pytest.skip("root documentation is validated only in the source repository")
+
+    for path in [REPO_ROOT / "README.md", REPO_ROOT / "README.zh-CN.md"]:
+        text = read(path)
+        assert "cp -R" not in text
+        assert 'git -C "$repo" archive --format=tar "HEAD:${source_name}"' in text
+        assert "--release-bundle" in text
 
 
 def test_single_validator_tracks_v2_runtime_and_schemas() -> None:

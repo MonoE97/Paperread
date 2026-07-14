@@ -7,12 +7,20 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from paper_reader_batch import v2_cli
+from paper_reader_batch import v2_cli, v2_json, v2_manifest
 from paper_reader_batch.v2_cli import app
 from paper_reader_batch.v2_contracts import EVENT_SCHEMA_VERSION, MANIFEST_SCHEMA_VERSION, STATE_SCHEMA_VERSION
 from paper_reader_batch.v2_errors import BatchRuntimeError
-from paper_reader_batch.v2_json import canonical_json_bytes, ensure_directory, initialize_locked_secret, locked_file
+from paper_reader_batch.v2_json import (
+    active_transition_targets,
+    canonical_json_bytes,
+    ensure_directory,
+    initialize_locked_secret,
+    list_directory,
+    locked_file,
+)
 from paper_reader_batch.v2_manifest import create_pdf_paths_manifest, validate_manifest_file
+from paper_reader_batch.v2_receipts import RequestReceipt, RequestReceiptStore
 from paper_reader_batch.v2_run import initialize_run
 
 
@@ -39,12 +47,171 @@ def _snapshot(path: Path) -> dict[str, tuple[int, int, str]]:
     return snapshot
 
 
+def _strong_receipt_snapshot(
+    path: Path,
+) -> dict[str, tuple[int, int, int, int, str, bytes]]:
+    snapshot: dict[str, tuple[int, int, int, int, str, bytes]] = {}
+    for candidate in [path, *sorted(path.rglob("*"))]:
+        metadata = candidate.lstat()
+        raw = candidate.read_bytes() if candidate.is_file() else b""
+        relative = "." if candidate == path else str(candidate.relative_to(path))
+        snapshot[relative] = (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mtime_ns,
+            metadata.st_size,
+            hashlib.sha256(raw).hexdigest(),
+            raw,
+        )
+    return snapshot
+
+
 def _make_paths_input(tmp_path: Path) -> tuple[Path, Path]:
     pdf = tmp_path / "论文.pdf"
     pdf.write_bytes(b"%PDF-1.7\nsource bytes\n")
     paths = tmp_path / "paths.txt"
     paths.write_text(f"{pdf}\n", encoding="utf-8")
     return pdf, paths
+
+
+def test_oversized_manifest_request_is_read_only_on_first_attempt_and_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    skill_root = tmp_path / "skill"
+    skill_root.mkdir()
+    _pdf, paths = _make_paths_input(tmp_path)
+    output = tmp_path / "manifest.json"
+    monkeypatch.setattr(v2_json, "MAX_JSON_ARTIFACT_BYTES", 64)
+
+    receipt_dir = skill_root / ".paper_reader_batch" / "request-receipts"
+    for _attempt in range(2):
+        with pytest.raises(BatchRuntimeError) as exc_info:
+            create_pdf_paths_manifest(
+                paths,
+                batch_title="oversized manifest",
+                output=output,
+                request_id=REQUEST_1,
+                skill_root=skill_root,
+                created_at="2026-07-10T00:00:00Z",
+            )
+
+        assert exc_info.value.code == "resource_limit"
+        assert not output.exists()
+        assert receipt_dir.is_dir()
+        assert list(receipt_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("oversized_stage", ["reserved", "committed"])
+def test_receipt_preflights_both_canonical_sizes_before_reserved_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    oversized_stage: str,
+) -> None:
+    skill_root = tmp_path / "skill"
+    skill_root.mkdir()
+    target = (tmp_path / "output.json").resolve()
+    store = RequestReceiptStore(skill_root)
+    plan = {
+        "semantic_result": {"value": "x" * 128},
+        "payload": "bounded",
+    }
+    unsigned = RequestReceipt(
+        request_id=REQUEST_1,
+        command="test receipt size",
+        request_fingerprint="a" * 64,
+        requested_target=str(target),
+        target=str(target),
+        status="reserved",
+        plan=plan,
+        result=None,
+        integrity_hmac="0" * 64,
+    )
+    reserved = unsigned.model_copy(
+        update={"integrity_hmac": store._signature(b"test-key", unsigned)}
+    )
+    committed = store._committed_receipt(reserved, b"test-key")
+    reserved_size = len(canonical_json_bytes(reserved))
+    assert len(canonical_json_bytes(committed)) > reserved_size
+    limit = reserved_size - 1 if oversized_stage == "reserved" else reserved_size
+    monkeypatch.setattr(v2_json, "MAX_JSON_ARTIFACT_BYTES", limit)
+
+    def forbidden_publish(*_args, **_kwargs) -> None:
+        raise AssertionError("oversized receipt reached output publication")
+
+    for _attempt in range(2):
+        with pytest.raises(BatchRuntimeError) as exc_info:
+            store.execute(
+                request_id=REQUEST_1,
+                command="test receipt size",
+                request_fingerprint="a" * 64,
+                requested_target=target,
+                target_factory=lambda _reserved: target,
+                plan_factory=lambda _target: plan,
+                publish=forbidden_publish,
+                inspect=lambda _target, _plan: False,
+            )
+
+        assert exc_info.value.code == "resource_limit"
+        assert not target.exists()
+        assert not store._receipt_path(REQUEST_1).exists()
+
+
+def test_pdf_source_rejects_initial_size_limit_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pdf = tmp_path / "oversized.pdf"
+    pdf.write_bytes(b"%PDF-12")
+    monkeypatch.setattr(v2_manifest, "MAX_PDF_SOURCE_BYTES", 6)
+
+    def forbidden_read(*_args, **_kwargs):
+        raise AssertionError("oversized PDF reached os.read")
+
+    monkeypatch.setattr(v2_manifest.os, "read", forbidden_read)
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        v2_manifest._pdf_source(pdf)
+
+    assert exc_info.value.code == "source_too_large"
+    assert exc_info.value.details == {"size_bytes": 7, "max_bytes": 6}
+
+
+def test_pdf_source_rejects_growth_past_cumulative_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pdf = tmp_path / "growing.pdf"
+    pdf.write_bytes(b"%PDF-")
+    chunks = iter([b"%PDF-", b"12"])
+    monkeypatch.setattr(v2_manifest, "MAX_PDF_SOURCE_BYTES", 6)
+    monkeypatch.setattr(
+        v2_manifest.os,
+        "read",
+        lambda _descriptor, _requested: next(chunks, b""),
+    )
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        v2_manifest._pdf_source(pdf)
+
+    assert exc_info.value.code == "source_too_large"
+    assert exc_info.value.details == {"size_bytes": 7, "max_bytes": 6}
+
+
+def test_pdf_source_rejects_fifo_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fifo = tmp_path / "source.pdf"
+    os.mkfifo(fifo)
+
+    def forbidden_open(*_args, **_kwargs):
+        raise AssertionError("PDF FIFO reached os.open")
+
+    monkeypatch.setattr(v2_manifest.os, "open", forbidden_open)
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        v2_manifest._pdf_source(fifo)
+
+    assert exc_info.value.code == "invalid_pdf"
 
 
 def _manifest_process(
@@ -367,7 +534,12 @@ def test_manifest_receipt_hard_crash_recovers_original_reserved_plan(tmp_path: P
     assert recovered.replayed is True
     assert output.exists()
     receipt_dir = skill_root / ".paper_reader_batch" / "request-receipts"
-    assert [path.name for path in receipt_dir.iterdir()] == [f"{REQUEST_1}.json"]
+    receipt_name = f"{REQUEST_1}.json"
+    assert set(list_directory(receipt_dir)) == {receipt_name, ".transitions"}
+    assert active_transition_targets(
+        receipt_dir,
+        replace_targets={receipt_name},
+    ) == set()
 
 
 def test_pending_receipt_keeps_target_reserved_against_another_request(tmp_path: Path) -> None:
@@ -426,8 +598,12 @@ def test_committed_receipt_replacement_pending_recovers_exactly(
     assert process.exitcode == 77
     assert output.exists()
     receipt_dir = skill_root / ".paper_reader_batch" / "request-receipts"
-    assert (receipt_dir / f"{REQUEST_1}.json").exists()
-    assert len(list(receipt_dir.glob("*.tmp"))) + len(list(receipt_dir.glob("*.writing"))) == 1
+    receipt_name = f"{REQUEST_1}.json"
+    assert (receipt_dir / receipt_name).exists()
+    assert active_transition_targets(
+        receipt_dir,
+        replace_targets={receipt_name},
+    ) == {receipt_name}
 
     recovered = create_pdf_paths_manifest(
         paths,
@@ -440,7 +616,11 @@ def test_committed_receipt_replacement_pending_recovers_exactly(
     assert recovered.replayed is True
     receipt = json.loads((receipt_dir / f"{REQUEST_1}.json").read_bytes())
     assert receipt["status"] == "committed"
-    assert [path.name for path in receipt_dir.iterdir()] == [f"{REQUEST_1}.json"]
+    assert set(list_directory(receipt_dir)) == {receipt_name, ".transitions"}
+    assert active_transition_targets(
+        receipt_dir,
+        replace_targets={receipt_name},
+    ) == set()
 
 
 def test_pending_receipt_commit_conflict_is_zero_mutation(tmp_path: Path) -> None:
@@ -456,7 +636,7 @@ def test_pending_receipt_commit_conflict_is_zero_mutation(tmp_path: Path) -> Non
     process.join(timeout=15)
     assert process.exitcode == 77
     receipt_dir = skill_root / ".paper_reader_batch" / "request-receipts"
-    before = {path.name: path.read_bytes() for path in receipt_dir.iterdir()}
+    before = _snapshot(receipt_dir)
 
     with pytest.raises(BatchRuntimeError) as exc_info:
         create_pdf_paths_manifest(
@@ -468,7 +648,89 @@ def test_pending_receipt_commit_conflict_is_zero_mutation(tmp_path: Path) -> Non
             created_at="2026-07-10T00:00:00Z",
         )
     assert exc_info.value.code == "idempotency_conflict"
-    assert {path.name: path.read_bytes() for path in receipt_dir.iterdir()} == before
+    assert _snapshot(receipt_dir) == before
+
+
+def test_unpublished_receipt_conflict_is_checked_before_other_receipt_recovery(
+    tmp_path: Path,
+) -> None:
+    skill_root = tmp_path / "skill"
+    skill_root.mkdir()
+    _pdf, paths = _make_paths_input(tmp_path)
+    first_output = tmp_path / "first.json"
+
+    def stop_first_before_publication(stage: str) -> None:
+        if stage == "after_file_fsync":
+            raise RuntimeError("first receipt staged")
+
+    with pytest.raises(RuntimeError, match="first receipt staged"):
+        create_pdf_paths_manifest(
+            paths,
+            batch_title="first original",
+            output=first_output,
+            request_id=REQUEST_1,
+            skill_root=skill_root,
+            created_at="2026-07-10T00:00:00Z",
+            fault=stop_first_before_publication,
+        )
+
+    second_output = tmp_path / "second.json"
+    second_file_fsyncs = 0
+
+    def stop_second_during_commit(stage: str) -> None:
+        nonlocal second_file_fsyncs
+        if stage == "after_file_fsync":
+            second_file_fsyncs += 1
+            if second_file_fsyncs == 2:
+                raise RuntimeError("second receipt commit staged")
+
+    with pytest.raises(RuntimeError, match="second receipt commit staged"):
+        create_pdf_paths_manifest(
+            paths,
+            batch_title="second original",
+            output=second_output,
+            request_id=REQUEST_2,
+            skill_root=skill_root,
+            created_at="2026-07-10T00:00:00Z",
+            fault=stop_second_during_commit,
+        )
+
+    receipt_dir = skill_root / ".paper_reader_batch" / "request-receipts"
+    assert active_transition_targets(
+        receipt_dir,
+        replace_targets={f"{REQUEST_2}.json"},
+    ) == {f"{REQUEST_2}.json"}
+    before = _strong_receipt_snapshot(receipt_dir)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        create_pdf_paths_manifest(
+            paths,
+            batch_title="first changed",
+            output=tmp_path / "first-changed.json",
+            request_id=REQUEST_1,
+            skill_root=skill_root,
+            created_at="2026-07-10T00:00:00Z",
+        )
+
+    assert exc_info.value.code == "idempotency_conflict"
+    assert _strong_receipt_snapshot(receipt_dir) == before
+
+    replayed = create_pdf_paths_manifest(
+        paths,
+        batch_title="first original",
+        output=first_output,
+        request_id=REQUEST_1,
+        skill_root=skill_root,
+        created_at="2026-07-10T00:00:00Z",
+    )
+
+    assert replayed.replayed is True
+    assert first_output.exists()
+    assert second_output.exists()
+    assert active_transition_targets(
+        receipt_dir,
+        replace_targets={f"{REQUEST_1}.json", f"{REQUEST_2}.json"},
+    ) == set()
 
 
 def test_partial_first_lock_secret_is_reinitialized_only_before_receipt_evidence(tmp_path: Path) -> None:
@@ -511,7 +773,7 @@ def test_partial_first_lock_secret_is_reinitialized_only_before_receipt_evidence
 
 
 @pytest.mark.parametrize("first_request", [REQUEST_1, REQUEST_2])
-def test_incomplete_initial_receipt_writing_is_cleaned_and_does_not_poison_requests(
+def test_incomplete_initial_receipt_writing_stays_immutable_and_does_not_poison_requests(
     tmp_path: Path,
     first_request: str,
 ) -> None:
@@ -543,7 +805,8 @@ def test_incomplete_initial_receipt_writing_is_cleaned_and_does_not_poison_reque
 
     assert first.replayed is False
     assert first_output.exists()
-    assert not partial.exists()
+    assert partial.exists()
+    assert partial.read_bytes() == b'{"schema_version":'
 
     second_request = REQUEST_2 if first_request == REQUEST_1 else REQUEST_1
     second_output = tmp_path / "second.json"
@@ -557,7 +820,7 @@ def test_incomplete_initial_receipt_writing_is_cleaned_and_does_not_poison_reque
     )
     assert second.replayed is False
     assert second_output.exists()
-    assert not list(receipt_dir.glob("*.writing"))
+    assert partial.read_bytes() == b'{"schema_version":'
 
 
 @pytest.mark.parametrize("unsafe_kind", ["hardlink", "symlink"])
@@ -666,7 +929,11 @@ def test_manifest_target_is_owned_by_one_request_across_processes(tmp_path: Path
         ("error", "output_conflict"),
         ("ok", False),
     ], outcomes
-    receipts = list((skill_root / ".paper_reader_batch" / "request-receipts").glob("*.json"))
+    receipts = [
+        path
+        for path in (skill_root / ".paper_reader_batch" / "request-receipts").glob("*.json")
+        if not path.name.startswith(".")
+    ]
     assert len(receipts) == 1
 
     owner_request = json.loads(receipts[0].read_text(encoding="utf-8"))["request_id"]

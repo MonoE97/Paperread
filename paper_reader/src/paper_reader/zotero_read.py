@@ -4,7 +4,14 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol, runtime_checkable
 from urllib.parse import quote
 
-from paper_reader.zotero_live import fetch_json_url
+from paper_reader.zotero_live import (
+    DEFAULT_CHILD_MAX_MEMBERS,
+    DEFAULT_CHILD_MAX_PAGES,
+    DEFAULT_CHILD_PAGE_SIZE,
+    ZoteroReadError,
+    _fetch_item_children,
+    fetch_json_url,
+)
 
 
 FetchJson = Callable[[str], object]
@@ -25,7 +32,15 @@ class ZoteroReadProvider(Protocol):
 class LocalApiZoteroReadProvider:
     base_url: str = "http://127.0.0.1:23119"
     fetch_json: FetchJson = fetch_json_url
-    page_size: int = 100
+    page_size: int = DEFAULT_CHILD_PAGE_SIZE
+    max_pages: int = DEFAULT_CHILD_MAX_PAGES
+    max_children: int = DEFAULT_CHILD_MAX_MEMBERS
+
+    def __post_init__(self) -> None:
+        for name in ("page_size", "max_pages", "max_children"):
+            value = getattr(self, name)
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
 
     def _item_url(self, item_key: str) -> str:
         return (
@@ -40,22 +55,14 @@ class LocalApiZoteroReadProvider:
         return payload
 
     def get_children(self, parent_key: str) -> list[dict[str, Any]]:
-        children: list[dict[str, Any]] = []
-        start = 0
-        while True:
-            url = (
-                f"{self.base_url.rstrip('/')}/api/users/0/items/{quote(parent_key)}/children"
-                f"?format=json&limit={self.page_size}&start={start}"
-            )
-            payload = self.fetch_json(url)
-            if not isinstance(payload, list):
-                raise ValueError("Zotero children response is not an array")
-            if not all(isinstance(item, dict) for item in payload):
-                raise ValueError("Zotero children response contains a non-object item")
-            children.extend(payload)
-            if len(payload) < self.page_size:
-                return children
-            start += self.page_size
+        return _fetch_item_children(
+            parent_key,
+            base_url=self.base_url,
+            fetch_json=self.fetch_json,
+            page_size=self.page_size,
+            max_pages=self.max_pages,
+            max_children=self.max_children,
+        )
 
     def get_note(self, note_key: str) -> dict[str, Any]:
         payload = self.fetch_json(self._item_url(note_key))
@@ -64,4 +71,4 @@ class LocalApiZoteroReadProvider:
         return payload
 
 
-__all__ = ["LocalApiZoteroReadProvider", "ZoteroReadProvider"]
+__all__ = ["LocalApiZoteroReadProvider", "ZoteroReadError", "ZoteroReadProvider"]

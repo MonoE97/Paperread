@@ -250,6 +250,8 @@ def locked_v2_run(
                             manifest_path=locked.manifest_path,
                         )
                     yield locked
+                    _verify_run_directory(anchor)
+                    _verify_named_lock(anchor, descriptor)
                 finally:
                     fcntl.flock(descriptor, fcntl.LOCK_UN)
             finally:

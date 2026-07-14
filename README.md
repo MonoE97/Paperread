@@ -9,7 +9,7 @@ The repository root is only a maintenance shell; it is not the runtime Python pr
 - `paper_reader/` installs as `paper_reader` for single-paper deep reading.
 - `paper_reader_batch/` installs as `paper_reader_batch` for batch scheduling and lightweight reporting.
 
-Use a clean install: copy each source directory to a new destination skill folder and run commands from that installed skill root. Do not overlay a V1 installation. V1, unversioned, and unknown run artifacts remain untouched historical files; V2 never discovers or migrates them and rejects an explicitly supplied one with `unsupported_run_schema`.
+Use a clean install: export only the selected skill source's tracked files into a staging directory, validate that release bundle, then move it to a new destination skill folder. Do not recursively copy a working source directory: it may contain ignored `.venv`, cache, or `runs/` state. Do not overlay a V1 installation. V1, unversioned, and unknown run artifacts remain untouched historical files; V2 never discovers or migrates them and rejects an explicitly supplied one with `unsupported_run_schema`.
 
 The CLI prepares immutable artifacts, validates gates, renders notes, and records batch state; the agent still reads the extracted context and writes strict `paper_reader.summary.v2` and `paper_reader.review.v2` inputs.
 
@@ -17,7 +17,7 @@ Do not put a `README.md` inside `paper_reader/` or `paper_reader_batch/`; skills
 
 ## Install
 
-Install `uv` before copying the skill. Use the official installer or a package manager; common options are:
+Install `uv` before staging the skill. Use the official installer or a package manager; common options are:
 
 ```bash
 # Option A: standalone installer
@@ -37,61 +37,58 @@ If `uv sync --locked` cannot find Python `>=3.13`, install a managed interpreter
 uv python install 3.13
 ```
 
-Codex personal single-paper skill:
+Set the repository root once, then use this tracked-file staging helper. It validates the staging tree before `uv sync` creates installation-local runtime state:
 
 ```bash
-install_dir="${CODEX_HOME:-$HOME/.codex}/skills/paper_reader"
-test ! -e "$install_dir" || { echo "target exists: $install_dir"; exit 1; }
-mkdir -p "$(dirname "$install_dir")"
-cp -R /path/to/paper_reader/paper_reader "$install_dir"
-cd "$install_dir"
-uv sync --locked
-uv run paper_reader --version
-uv run paper_reader --help
+set -eu
+repo="/path/to/Paperread"
+
+install_tracked_skill() {
+  source_name="$1"
+  install_dir="$2"
+  command_name="$3"
+  test ! -e "$install_dir" || { echo "target exists: $install_dir"; return 1; }
+  install_parent="$(dirname "$install_dir")"
+  mkdir -p "$install_parent"
+  stage_dir="$(mktemp -d "$install_parent/.${source_name}.install.XXXXXX")"
+  git -C "$repo" archive --format=tar "HEAD:${source_name}" | tar -xf - -C "$stage_dir"
+  (
+    cd "$stage_dir"
+    uv run --no-project --python 3.13 python scripts/validate-skill.py . --release-bundle
+  )
+  mv "$stage_dir" "$install_dir"
+  (
+    cd "$install_dir"
+    uv sync --locked
+    uv run "$command_name" --version
+    uv run "$command_name" --help
+  )
+}
 ```
 
-Codex personal batch skill:
+The source must be a Git checkout and `HEAD:<source_name>` must exist. This intentionally installs files from the committed `HEAD` tree only; uncommitted working-tree and index changes are not included. Create the intended release commit before installing it.
+
+Codex personal skills:
 
 ```bash
-install_dir="${CODEX_HOME:-$HOME/.codex}/skills/paper_reader_batch"
-test ! -e "$install_dir" || { echo "target exists: $install_dir"; exit 1; }
-mkdir -p "$(dirname "$install_dir")"
-cp -R /path/to/paper_reader/paper_reader_batch "$install_dir"
-cd "$install_dir"
-uv sync --locked
-uv run paper_reader_batch --version
-uv run paper_reader_batch --help
+install_tracked_skill paper_reader \
+  "${CODEX_HOME:-$HOME/.codex}/skills/paper_reader" paper_reader
+install_tracked_skill paper_reader_batch \
+  "${CODEX_HOME:-$HOME/.codex}/skills/paper_reader_batch" paper_reader_batch
 ```
 
-Claude Code personal single-paper skill:
+Claude Code personal skills:
 
 ```bash
-install_dir="$HOME/.claude/skills/paper_reader"
-test ! -e "$install_dir" || { echo "target exists: $install_dir"; exit 1; }
-mkdir -p "$(dirname "$install_dir")"
-cp -R /path/to/paper_reader/paper_reader "$install_dir"
-cd "$install_dir"
-uv sync --locked
-uv run paper_reader --version
-uv run paper_reader --help
+install_tracked_skill paper_reader \
+  "$HOME/.claude/skills/paper_reader" paper_reader
+install_tracked_skill paper_reader_batch \
+  "$HOME/.claude/skills/paper_reader_batch" paper_reader_batch
 ```
 
-Claude Code personal batch skill:
+If the target `paper_reader/` or `paper_reader_batch/` directory already exists, stop before installing. Paper Reader 2.0 requires a clean install into a new directory. An old installation may remain elsewhere as read-only history. A failed staging validation leaves the hidden staging directory in place for inspection; it is never promoted to the target.
 
-```bash
-install_dir="$HOME/.claude/skills/paper_reader_batch"
-test ! -e "$install_dir" || { echo "target exists: $install_dir"; exit 1; }
-mkdir -p "$(dirname "$install_dir")"
-cp -R /path/to/paper_reader/paper_reader_batch "$install_dir"
-cd "$install_dir"
-uv sync --locked
-uv run paper_reader_batch --version
-uv run paper_reader_batch --help
-```
-
-If the target `paper_reader/` or `paper_reader_batch/` directory already exists, stop before copying. Paper Reader 2.0 requires a clean install into a new directory; blind `cp -R` can mix V1 and V2 or create an undiscoverable nested layout. An old installation may remain elsewhere as read-only history.
-
-The first `uv sync --locked` initializes each installed skill's local environment from its own lockfile. Re-run it after updating a copied skill directory.
+The first `uv sync --locked` initializes each installed skill's local environment from its own lockfile. Re-run it after installing a newly exported revision.
 
 ## Zotero MCP Setup
 
@@ -208,7 +205,7 @@ uv run paper_reader maintenance extract-pdf tests/fixtures/minimal.pdf
 uv run python scripts/validate-skill.py .
 ```
 
-Maintainers should also validate a copied directory outside the repository before treating `paper_reader/` as self-contained.
+Maintainers should also build a tracked-file staging directory outside the repository as shown above, run `uv run --no-project --python 3.13 python scripts/validate-skill.py . --release-bundle` before `uv sync`, and then run the same verification set there before treating `paper_reader/` as self-contained.
 
 From the installed or source `paper_reader_batch/` directory:
 
@@ -220,7 +217,7 @@ uv run paper_reader_batch --help
 uv run python scripts/validate-skill.py .
 ```
 
-Maintainers should also validate a copied directory outside the repository before treating `paper_reader_batch/` as self-contained.
+Maintainers should also build a tracked-file staging directory outside the repository as shown above, run `uv run --no-project --python 3.13 python scripts/validate-skill.py . --release-bundle` before `uv sync`, and then run the same verification set there before treating `paper_reader_batch/` as self-contained.
 
 ## Safety Boundaries
 

@@ -1,27 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ast
 from html import escape
 import hashlib
 import json
 from pathlib import Path
 import shutil
 
-from markdown_it import MarkdownIt
 import pytest
 from pydantic import ValidationError
 
 import paper_reader_batch.v2_artifacts as artifact_module
 import paper_reader_batch.v2_worker as worker_module
 from paper_reader_batch.v2_artifacts import (
-    ForeignArtifactRef,
-    ForeignCandidate,
-    ForeignLocalSource,
-    ForeignReview,
-    ForeignReviewValidation,
-    ForeignRun,
-    ForeignSummary,
-    _markdown_literal_note_title,
     paper_reader_root_identity,
     _require_normalized_absolute_path,
     validate_worker_result_artifacts,
@@ -75,6 +67,15 @@ ZOTERO_CANDIDATE_CHECKS = (
 )
 
 
+def _escape_markdown_title(note_title: str) -> str:
+    prefix = "[Codex Summary] "
+    fixed_prefix = prefix if note_title.startswith(prefix) else ""
+    remainder = note_title[len(fixed_prefix) :]
+    for character in ("\\", "`", "*", "_", "[", "]", "<", ">", "&"):
+        remainder = remainder.replace(character, f"\\{character}")
+    return f"{fixed_prefix}{remainder}"
+
+
 def _write(path: Path, content: bytes) -> bytes:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
@@ -122,10 +123,23 @@ def _gate(status: str, checks: tuple[str, ...]) -> dict[str, object]:
 
 
 def _render_like_single(note_md: bytes) -> bytes:
-    rendered = MarkdownIt("commonmark", {"html": False}).enable("table").render(
-        note_md.decode("utf-8")
-    )
-    return (rendered.strip() + "\n").encode("utf-8")
+    def heading_text(value: str) -> str:
+        for character in ("\\", "`", "*", "_", "[", "]", "<", ">", "&"):
+            value = value.replace(f"\\{character}", character)
+        return value
+
+    rendered: list[str] = []
+    for raw_line in note_md.decode("utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("## "):
+            rendered.append(f"<h2>{escape(heading_text(line[3:]), quote=False)}</h2>")
+        elif line.startswith("# "):
+            rendered.append(f"<h1>{escape(heading_text(line[2:]), quote=False)}</h1>")
+        else:
+            rendered.append(f"<p>{escape(line, quote=False)}</p>")
+    return ("\n".join(rendered) + "\n").encode("utf-8")
 
 
 def _parent_fingerprint(*, key: str, title: str, doi: str, version: int) -> str:
@@ -336,6 +350,7 @@ def _make_review(
     noncanonical_summary: bool = False,
     noncanonical_validation: bool = False,
     mismatched_rendered_html: bool = False,
+    review_checks: tuple[str, ...] = REVIEW_CHECKS,
 ) -> tuple[Path, dict[str, object], dict[str, bytes]]:
     package_id = "review-package_test"
     review_dir = run_dir / "reviews" / package_id
@@ -347,11 +362,9 @@ def _make_review(
         allowed_mixed=allowed_mixed,
         semantic_mutation=semantic_mutation,
     )
-    summary_model = ForeignSummary.model_validate_json(canonical_json_bytes(summary))
-    summary_payload = summary_model.model_dump(mode="json")
     summary_raw = _json(
         review_dir / "summary.json",
-        summary_payload,
+        summary,
         canonical=not noncanonical_summary,
     )
     review = {
@@ -367,8 +380,7 @@ def _make_review(
         "trust_status_recommendation": "usable_with_caveats",
         "improvement_requests": [],
     }
-    review_payload = ForeignReview.model_validate_json(canonical_json_bytes(review)).model_dump(mode="json")
-    review_raw = _json(review_dir / "review.json", review_payload)
+    review_raw = _json(review_dir / "review.json", review)
     evidence_raw = _write(review_dir / "evidence.json", evidence_path.read_bytes())
     note_md = (
         "# [Codex Summary] 测试论文 - 2026-07-10\n\n"
@@ -400,15 +412,12 @@ def _make_review(
         "evidence_digest": evidence_ref["sha256"],
         "rendered_note_sha256": sha256_bytes(note_md),
         "rendered_html_sha256": sha256_bytes(note_html),
-        "checks": list(REVIEW_CHECKS),
+        "checks": list(review_checks),
         "blockers": [],
     }
-    validation_payload = ForeignReviewValidation.model_validate_json(
-        canonical_json_bytes(validation)
-    ).model_dump(mode="json")
     validation_raw = _json(
         review_dir / "validation.json",
-        validation_payload,
+        validation,
         canonical=not noncanonical_validation,
     )
     specs = {
@@ -436,7 +445,7 @@ def _make_review(
         "review_sha256": sha256_bytes(review_raw),
         "evidence_digest": evidence_ref["sha256"],
         "artifacts": artifacts,
-        "gate": _gate("passed", REVIEW_CHECKS),
+        "gate": _gate("passed", review_checks),
     }
     package_path = review_dir / "review-package.json"
     _json(package_path, package)
@@ -561,6 +570,7 @@ def _local_fixture(
     noncanonical_summary: bool = False,
     noncanonical_validation: bool = False,
     candidate_checks: tuple[str, ...] = LOCAL_CANDIDATE_CHECKS,
+    review_checks: tuple[str, ...] = REVIEW_CHECKS,
 ) -> BuiltWorkerFixture:
     pdf_path = tmp_path / "paper.pdf"
     _write(pdf_path, b"%PDF-1.7\nfixture\n")
@@ -601,6 +611,7 @@ def _local_fixture(
         semantic_mutation=semantic_mutation,
         noncanonical_summary=noncanonical_summary,
         noncanonical_validation=noncanonical_validation,
+        review_checks=review_checks,
     )
     review_ref = _foreign_ref(run_dir, review_path, "review_package", "application/json")
     target = {
@@ -966,7 +977,7 @@ def _zotero_fixture(
     note_title = f"[Codex Summary] {title} - 2026-07-10"
     sealed_md = review_snapshots["note.md"].decode()
     sealed_md_lines = sealed_md.splitlines(keepends=True)
-    sealed_md_lines[0] = f"# {_markdown_literal_note_title(note_title)}\n"
+    sealed_md_lines[0] = f"# {_escape_markdown_title(note_title)}\n"
     note_md = "".join(sealed_md_lines).encode()
     note_html = _render_like_single(note_md)
     review_snapshots = {**review_snapshots, "note.md": note_md, "note.html": note_html}
@@ -1301,21 +1312,8 @@ def test_worker_success_rejects_same_path_same_run_id_directory_replacement(
     )
     legacy_payload = prepared.model_dump(mode="json")
     legacy_payload.pop("paper_reader_run_directory")
-    legacy_prepared = LocalPrepareResult.model_validate(legacy_payload)
-    with pytest.raises(BatchRuntimeError) as legacy_mutation_error:
-        validate_worker_result_artifacts(
-            built.manifest,
-            built.result,
-            prepared_local_result=legacy_prepared,
-        )
-    assert legacy_mutation_error.value.code == "local_prepare_binding_mismatch"
-    assert validate_worker_result_artifacts(
-        built.manifest,
-        built.result,
-        allow_mutable_run=True,
-        prepared_local_result=legacy_prepared,
-        allow_legacy_prepared_run_identity=True,
-    ) is None
+    with pytest.raises(ValidationError):
+        LocalPrepareResult.model_validate(legacy_payload)
     assert validate_worker_result_artifacts(
         built.manifest,
         built.result,
@@ -1546,6 +1544,80 @@ def test_accepts_real_local_and_zotero_success_artifact_shapes(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
+    "fixture_options",
+    [
+        {"locator": "context.md page 2"},
+        {"english_fallback": True},
+        {"semantic_mutation": "rejected"},
+    ],
+)
+def test_batch_trusts_hash_bound_single_seal_without_replaying_single_gate(
+    fixture_options: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    built = _local_fixture(tmp_path, **fixture_options)
+
+    assert validate_worker_result_artifacts(built.manifest, built.result) is None
+
+
+def test_batch_source_does_not_copy_single_schema_renderer_or_gate() -> None:
+    source_path = Path(artifact_module.__file__)
+    source = source_path.read_text(encoding="utf-8")
+    module = ast.parse(source)
+    classes = {node.name for node in module.body if isinstance(node, ast.ClassDef)}
+    functions = {node.name for node in module.body if isinstance(node, ast.FunctionDef)}
+    imported_modules = {
+        node.module
+        for node in module.body
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    } | {
+        alias.name
+        for node in module.body
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+
+    assert not classes.intersection(
+        {
+            "ForeignRun",
+            "ForeignSummary",
+            "ForeignReview",
+            "ForeignReviewPackage",
+            "ForeignCandidate",
+            "ForeignEvidence",
+        }
+    )
+    assert not functions.intersection(
+        {
+            "_render_note_html_like_single",
+            "_expected_zotero_candidate_notes",
+            "_expected_tags",
+            "_looks_like_english_prose",
+            "_rendered_markdown_has_english_prose",
+            "_locator_is_member",
+            "_validate_summary_evidence",
+            "_validate_write_ready_summary_semantics",
+        }
+    )
+    assert "markdown_it" not in imported_modules
+
+    pyproject = source_path.parents[2] / "pyproject.toml"
+    assert "markdown-it-py" not in pyproject.read_text(encoding="utf-8")
+
+
+def test_batch_write_source_does_not_copy_single_lifecycle_schemas() -> None:
+    source_path = Path(artifact_module.__file__).with_name("v2_write.py")
+    module = ast.parse(source_path.read_text(encoding="utf-8"))
+    copied = {
+        node.name
+        for node in module.body
+        if isinstance(node, ast.ClassDef) and node.name.startswith("_Foreign")
+    }
+
+    assert not copied
+
+
+@pytest.mark.parametrize(
     ("paper_title", "rendered_h1"),
     [
         (
@@ -1569,19 +1641,16 @@ def test_zotero_candidate_accepts_single_markdown_title_rendering(
     assert built.candidate_path.parent.joinpath("note.html").read_text().splitlines()[0] == rendered_h1
 
 
-def test_rejects_sealed_review_html_that_is_not_rendered_from_sealed_markdown(
+def test_trusts_sealed_validation_hashes_without_replaying_markdown_renderer(
     tmp_path: Path,
 ) -> None:
     built = _zotero_fixture(tmp_path, mismatched_rendered_html=True)
 
-    with pytest.raises(BatchRuntimeError) as exc_info:
-        validate_worker_result_artifacts(built.manifest, built.result)
-
-    assert exc_info.value.code == "review_not_sealed"
+    assert validate_worker_result_artifacts(built.manifest, built.result) == "PARENT1"
 
 
 @pytest.mark.parametrize("artifact", ["note.md", "note.html"])
-def test_zotero_candidate_rejects_self_consistent_unreviewed_rendered_body(
+def test_batch_does_not_replay_single_candidate_body_semantics(
     artifact: str,
     tmp_path: Path,
 ) -> None:
@@ -1605,10 +1674,7 @@ def test_zotero_candidate_rejects_self_consistent_unreviewed_rendered_body(
             ).encode(),
         )
 
-    with pytest.raises(BatchRuntimeError) as exc_info:
-        validate_worker_result_artifacts(built.manifest, built.result)
-
-    assert exc_info.value.code == "candidate_binding_mismatch"
+    assert validate_worker_result_artifacts(built.manifest, built.result) == "PARENT1"
 
 
 def test_committed_validation_uses_immutable_candidate_not_mutable_root_run(tmp_path: Path) -> None:
@@ -1766,135 +1832,15 @@ def test_source_directory_is_an_exact_closed_world_bundle(kind: str, tmp_path: P
     assert exc_info.value.code == "artifact_closed_world_mismatch"
 
 
-@pytest.mark.parametrize(
-    ("field", "invalid"),
-    [
-        ("resolved_path", "relative/paper.pdf"),
-        ("sha256", "A" * 64),
-        ("size_bytes", -1),
-        ("device", -1),
-        ("inode", -1),
-    ],
-)
-def test_foreign_local_source_enforces_public_identity_constraints(
-    field: str,
-    invalid: object,
-) -> None:
-    payload = {
-        "source_type": "local_pdf",
-        "requested_path": "/tmp/paper.pdf",
-        "resolved_path": "/tmp/paper.pdf",
-        "sha256": "a" * 64,
-        "size_bytes": 1,
-        "device": 1,
-        "inode": 1,
-    }
-    payload[field] = invalid
-
-    with pytest.raises(ValidationError):
-        ForeignLocalSource.model_validate(payload)
-
-
-def test_foreign_absolute_paths_are_lexically_normalized_at_semantic_boundary() -> None:
-    # paper_reader.contracts.AbsolutePath promises absolute/non-NUL syntax; the
-    # runtime ownership check adds lexical normalization without narrowing that
-    # reusable public field schema in the foreign mirror.
-    mirrored = ForeignLocalSource.model_validate(
-        {
-            "source_type": "local_pdf",
-            "requested_path": "/tmp/../tmp/paper.pdf",
-            "resolved_path": "/tmp/../tmp/paper.pdf",
-            "sha256": "a" * 64,
-            "size_bytes": 1,
-            "device": 1,
-            "inode": 1,
-        }
-    )
-
+def test_foreign_absolute_paths_are_lexically_normalized_at_consumption_boundary() -> None:
     with pytest.raises(BatchRuntimeError) as exc_info:
         _require_normalized_absolute_path(
-            mirrored.resolved_path,
+            "/tmp/../tmp/paper.pdf",
             code="source_binding_mismatch",
             label="paper_reader local source",
         )
 
     assert exc_info.value.code == "source_binding_mismatch"
-
-
-def test_foreign_public_size_fields_remain_nonnegative_like_single_contract() -> None:
-    ref = ForeignArtifactRef(
-        role="context",
-        path="evidence/context.md",
-        sha256="a" * 64,
-        size_bytes=0,
-    )
-    source = ForeignLocalSource(
-        requested_path="paper.pdf",
-        resolved_path="/tmp/paper.pdf",
-        sha256="b" * 64,
-        size_bytes=0,
-        device=0,
-        inode=0,
-    )
-
-    assert ref.size_bytes == 0
-    assert (source.size_bytes, source.device, source.inode) == (0, 0, 0)
-
-
-@pytest.mark.parametrize(
-    ("field", "invalid"),
-    [
-        ("role", "not an identifier"),
-        ("path", "../evidence.json"),
-        ("sha256", "not-a-sha256"),
-        ("size_bytes", -1),
-    ],
-)
-def test_foreign_artifact_ref_enforces_public_reference_constraints(
-    field: str,
-    invalid: object,
-) -> None:
-    payload = {
-        "role": "evidence_manifest",
-        "path": "evidence/evidence_test/evidence.json",
-        "sha256": "a" * 64,
-        "size_bytes": 1,
-        "media_type": "application/json",
-    }
-    payload[field] = invalid
-
-    with pytest.raises(ValidationError):
-        ForeignArtifactRef.model_validate(payload)
-
-
-@pytest.mark.parametrize(
-    ("model_name", "field", "invalid"),
-    [
-        ("run", "run_id", "invalid id"),
-        ("run", "created_at", "2026-07-10T00:00:00+00:00"),
-        ("candidate", "candidate_id", "invalid id"),
-        ("candidate", "created_at", "not-a-timestamp"),
-        ("candidate", "content_sha256", "f" * 63),
-        ("candidate", "content_length", -1),
-    ],
-)
-def test_foreign_public_envelopes_enforce_identifier_time_hash_and_size_constraints(
-    model_name: str,
-    field: str,
-    invalid: object,
-    tmp_path: Path,
-) -> None:
-    built = _local_fixture(tmp_path)
-    if model_name == "run":
-        model_type = ForeignRun
-        payload = json.loads(built.run_path.read_text())
-    else:
-        model_type = ForeignCandidate
-        payload = json.loads(built.candidate_path.read_text())
-    payload[field] = invalid
-
-    with pytest.raises(ValidationError):
-        model_type.model_validate_json(canonical_json_bytes(payload))
 
 
 @pytest.mark.parametrize("noncanonical", ["summary", "validation"])
@@ -1912,43 +1858,14 @@ def test_rejects_noncanonical_sealed_summary_review_validation(
         validate_worker_result_artifacts(built.manifest, built.result)
 
 
-def test_rejects_forged_locator_membership_even_when_sealed_gate_claims_passed(
-    tmp_path: Path,
-) -> None:
-    built = _local_fixture(tmp_path, locator="context.md page 2")
-
-    with pytest.raises(BatchRuntimeError) as exc_info:
-        validate_worker_result_artifacts(built.manifest, built.result)
-
-    assert exc_info.value.code == "review_not_sealed"
-
-
-def test_rejects_english_render_fallback_even_when_other_chinese_text_exists(
-    tmp_path: Path,
-) -> None:
-    built = _local_fixture(tmp_path, english_fallback=True)
-
-    with pytest.raises(BatchRuntimeError) as exc_info:
-        validate_worker_result_artifacts(built.manifest, built.result)
-
-    assert exc_info.value.code == "review_not_sealed"
-
-
 def test_accepts_single_reader_allowed_mixed_technical_phrases(tmp_path: Path) -> None:
     built = _local_fixture(tmp_path, allowed_mixed=True)
 
     assert validate_worker_result_artifacts(built.manifest, built.result) is None
 
 
-@pytest.mark.parametrize(
-    "semantic_mutation",
-    ["rejected", "empty_required", "empty_claims", "empty_claim_evidence"],
-)
-def test_rejects_forged_pass_gate_without_write_ready_summary_semantics(
-    semantic_mutation: str,
-    tmp_path: Path,
-) -> None:
-    built = _local_fixture(tmp_path, semantic_mutation=semantic_mutation)
+def test_rejects_sealed_review_missing_consumer_required_proofs(tmp_path: Path) -> None:
+    built = _local_fixture(tmp_path, review_checks=("summary_schema",))
 
     with pytest.raises(BatchRuntimeError) as exc_info:
         validate_worker_result_artifacts(built.manifest, built.result)
@@ -1956,8 +1873,15 @@ def test_rejects_forged_pass_gate_without_write_ready_summary_semantics(
     assert exc_info.value.code == "review_not_sealed"
 
 
-def test_rejects_nonexact_candidate_and_current_run_gate(tmp_path: Path) -> None:
-    built = _local_fixture(tmp_path, candidate_checks=("source_identity",))
+@pytest.mark.parametrize(
+    "candidate_checks",
+    [(), ("source_identity",), ("source_identity", "source_identity")],
+)
+def test_rejects_candidate_missing_or_repeating_consumer_required_proofs(
+    candidate_checks: tuple[str, ...],
+    tmp_path: Path,
+) -> None:
+    built = _local_fixture(tmp_path, candidate_checks=candidate_checks)
 
     with pytest.raises(BatchRuntimeError) as exc_info:
         validate_worker_result_artifacts(built.manifest, built.result)

@@ -26,6 +26,7 @@ class ResolvedSourceFingerprint:
     device: int
     inode: int
     mtime_ns: int
+    ctime_ns: int
 
     def as_dict(self) -> dict[str, str | int]:
         return asdict(self)
@@ -65,6 +66,16 @@ class DirectoryAnchorLike(Protocol):
     inode: int
 
 
+class ExactFinalizationGuard(Protocol):
+    def verify(self) -> None: ...
+
+
+class LoadedRunUpdateLike(Protocol):
+    manifest_path: Path
+    manifest_bytes: bytes
+    run_directory_anchor: DirectoryAnchorLike | None
+
+
 @dataclass(slots=True)
 class OwnedDirectoryAnchor:
     path: Path
@@ -73,15 +84,296 @@ class OwnedDirectoryAnchor:
     inode: int
 
     def close(self) -> None:
-        if self.descriptor >= 0:
-            os.close(self.descriptor)
+        descriptor = self.descriptor
+        if descriptor >= 0:
             self.descriptor = -1
+            os.close(descriptor)
 
     def __enter__(self) -> OwnedDirectoryAnchor:
         return self
 
     def __exit__(self, *_exc_info: object) -> None:
         self.close()
+
+
+@dataclass(slots=True)
+class OwnedPublishedFile:
+    path: Path
+    descriptor: int
+    identity: tuple[int, int, int, int, int, int]
+    content_sha256: str
+
+    def detach_descriptor(self) -> int:
+        if self.descriptor < 0:
+            raise ValueError(f"published file descriptor is already detached: {self.path}")
+        descriptor = self.descriptor
+        self.descriptor = -1
+        return descriptor
+
+    def close(self) -> None:
+        descriptor = self.descriptor
+        if descriptor >= 0:
+            self.descriptor = -1
+            os.close(descriptor)
+
+    def __enter__(self) -> OwnedPublishedFile:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+
+@dataclass(slots=True)
+class OwnedPublishedTree:
+    path: Path
+    directory: OwnedDirectoryAnchor
+    held_file: OwnedPublishedFile
+    held_relative_path: str
+
+    def close(self) -> None:
+        try:
+            self.held_file.close()
+        finally:
+            self.directory.close()
+
+    def __enter__(self) -> OwnedPublishedTree:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+
+@dataclass(slots=True)
+class HeldExactFileGuard:
+    anchor: DirectoryAnchorLike
+    owned_file: OwnedPublishedFile
+    expected_bytes: bytes
+    label: str = "published file"
+
+    def close(self) -> None:
+        self.owned_file.close()
+
+    def __enter__(self) -> HeldExactFileGuard:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+    def verify(self) -> None:
+        try:
+            validate_directory_anchor(self.anchor)
+            opened_before = os.fstat(self.owned_file.descriptor)
+            named_before = stat_anchored_entry(
+                self.anchor,
+                self.owned_file.path,
+            )
+            chunks: list[bytes] = []
+            offset = 0
+            limit = len(self.expected_bytes)
+            while offset <= limit:
+                chunk = os.pread(
+                    self.owned_file.descriptor,
+                    min(1024 * 1024, limit - offset + 1),
+                    offset,
+                )
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                offset += len(chunk)
+                if offset > limit:
+                    break
+            opened_after = os.fstat(self.owned_file.descriptor)
+            named_after = stat_anchored_entry(
+                self.anchor,
+                self.owned_file.path,
+            )
+            validate_directory_anchor(self.anchor)
+        except (OSError, UnsafeStoragePathError) as exc:
+            raise UnsafeStoragePathError(
+                f"held {self.label} identity became uncertain: "
+                f"{self.owned_file.path}: {exc}"
+            ) from exc
+
+        identities = {
+            (
+                item.st_dev,
+                item.st_ino,
+                item.st_size,
+                item.st_mtime_ns,
+                item.st_ctime_ns,
+                item.st_nlink,
+            )
+            for item in (opened_before, named_before, opened_after, named_after)
+        }
+        raw = b"".join(chunks)
+        if (
+            identities != {self.owned_file.identity}
+            or not all(
+                stat.S_ISREG(item.st_mode)
+                for item in (opened_before, named_before, opened_after, named_after)
+            )
+            or self.owned_file.identity[5] != 1
+            or raw != self.expected_bytes
+            or hashlib.sha256(raw).digest()
+            != hashlib.sha256(self.expected_bytes).digest()
+        ):
+            raise UnsafeStoragePathError(
+                f"held {self.label} changed before finalization: "
+                f"{self.owned_file.path}"
+            )
+
+
+@dataclass(slots=True)
+class HeldExactTreeGuard:
+    published_tree: OwnedPublishedTree
+    expected_tree: ImmutableTreeSnapshot
+    expected_held_bytes: bytes
+    label: str = "published tree"
+
+    def close(self) -> None:
+        self.published_tree.close()
+
+    def __enter__(self) -> HeldExactTreeGuard:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+    def verify(self) -> None:
+        held_guard = HeldExactFileGuard(
+            anchor=self.published_tree.directory,
+            owned_file=self.published_tree.held_file,
+            expected_bytes=self.expected_held_bytes,
+            label=f"{self.label} held manifest",
+        )
+        held_guard.verify()
+        validate_directory_anchor(self.published_tree.directory)
+        observed = snapshot_directory_fd(
+            self.published_tree.directory.descriptor,
+            max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+            max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+            max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+        )
+        validate_directory_anchor(self.published_tree.directory)
+        held_guard.verify()
+        if observed != self.expected_tree:
+            raise UnsafeStoragePathError(
+                f"held {self.label} closed set changed before finalization: "
+                f"{self.published_tree.path}"
+            )
+
+
+@dataclass(slots=True)
+class HeldResolvedSourceGuard:
+    path: Path
+    parent: OwnedDirectoryAnchor
+    descriptor: int
+    identity: tuple[int, int, int, int, int, int]
+    fingerprint: ResolvedSourceFingerprint
+    max_bytes: int
+
+    def close(self) -> None:
+        descriptor = self.descriptor
+        self.descriptor = -1
+        try:
+            if descriptor >= 0:
+                os.close(descriptor)
+        finally:
+            self.parent.close()
+
+    def __enter__(self) -> HeldResolvedSourceGuard:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+    def verify(self) -> None:
+        try:
+            validate_directory_anchor(self.parent)
+            opened_before = os.fstat(self.descriptor)
+            named_before = os.stat(
+                self.path.name,
+                dir_fd=self.parent.descriptor,
+                follow_symlinks=False,
+            )
+            if opened_before.st_size > self.max_bytes:
+                raise UnsafeStoragePathError(
+                    f"source exceeds its read limit of {self.max_bytes} bytes: {self.path}"
+                )
+            digest = _sha256_descriptor(
+                self.descriptor,
+                expected_size=opened_before.st_size,
+            )
+            opened_after = os.fstat(self.descriptor)
+            named_after = os.stat(
+                self.path.name,
+                dir_fd=self.parent.descriptor,
+                follow_symlinks=False,
+            )
+            validate_directory_anchor(self.parent)
+        except (OSError, UnsafeStoragePathError) as exc:
+            raise UnsafeStoragePathError(
+                f"source pathname identity became uncertain: {self.path}: {exc}"
+            ) from exc
+        metadata = (opened_before, named_before, opened_after, named_after)
+        identities = {
+            (
+                item.st_dev,
+                item.st_ino,
+                item.st_size,
+                item.st_mtime_ns,
+                item.st_ctime_ns,
+                item.st_nlink,
+            )
+            for item in metadata
+        }
+        if (
+            identities != {self.identity}
+            or not all(stat.S_ISREG(item.st_mode) for item in metadata)
+            or not digest
+            or digest != self.fingerprint.sha256
+        ):
+            raise UnsafeStoragePathError(
+                f"source pathname or complete fingerprint changed: {self.path}"
+            )
+
+
+@dataclass(slots=True)
+class HeldTerminalArtifactGuard:
+    main: HeldExactFileGuard
+    sidecar: OwnedDirectoryAnchor
+    expected_sidecar: ImmutableTreeSnapshot
+    label: str
+
+    def close(self) -> None:
+        try:
+            self.main.close()
+        finally:
+            self.sidecar.close()
+
+    def __enter__(self) -> HeldTerminalArtifactGuard:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+    def verify(self) -> None:
+        self.main.verify()
+        validate_directory_anchor(self.sidecar)
+        observed = snapshot_directory_fd(
+            self.sidecar.descriptor,
+            max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+            max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+            max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+        )
+        validate_directory_anchor(self.sidecar)
+        if observed != self.expected_sidecar:
+            raise UnsafeStoragePathError(
+                f"held {self.label} sidecar changed before finalization: "
+                f"{self.sidecar.path}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +416,29 @@ def sha256_file(path: Path | str, *, chunk_size: int = 1024 * 1024) -> str:
     with Path(path).open("rb") as handle:
         for chunk in iter(lambda: handle.read(chunk_size), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sha256_descriptor(
+    descriptor: int,
+    *,
+    expected_size: int,
+    chunk_size: int = 1024 * 1024,
+) -> str:
+    digest = hashlib.sha256()
+    offset = 0
+    while offset < expected_size:
+        chunk = os.pread(
+            descriptor,
+            min(chunk_size, expected_size - offset),
+            offset,
+        )
+        if not chunk:
+            break
+        digest.update(chunk)
+        offset += len(chunk)
+    if offset != expected_size or os.pread(descriptor, 1, offset):
+        return ""
     return digest.hexdigest()
 
 
@@ -178,29 +493,12 @@ def resolve_artifact_path(root: Path | str, relative_path: str | PurePosixPath) 
 
 
 def fingerprint_resolved_source(path: Path | str) -> ResolvedSourceFingerprint:
-    resolved = Path(path)
-    if not resolved.is_absolute():
-        raise ValueError(f"resolved source path must be absolute: {resolved}")
-    with resolved.open("rb") as handle:
-        before = os.fstat(handle.fileno())
-        if not stat.S_ISREG(before.st_mode):
-            raise ValueError(f"source must be a regular file: {resolved}")
-        digest = hashlib.sha256()
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-        after = os.fstat(handle.fileno())
-    identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-    identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-    if identity_before != identity_after:
-        raise RuntimeError(f"source changed while it was fingerprinted: {resolved}")
-    return ResolvedSourceFingerprint(
-        resolved_path=str(resolved),
-        sha256=digest.hexdigest(),
-        size_bytes=after.st_size,
-        device=after.st_dev,
-        inode=after.st_ino,
-        mtime_ns=after.st_mtime_ns,
-    )
+    with open_resolved_source_guard(
+        path,
+        max_bytes=V2_RESOURCE_POLICY.local_pdf_max_bytes,
+    ) as guard:
+        guard.verify()
+        return guard.fingerprint
 
 
 def fingerprint_source(path: Path | str) -> ResolvedSourceFingerprint:
@@ -332,6 +630,135 @@ def validate_directory_anchor(anchor: DirectoryAnchorLike) -> None:
         or (current.st_dev, current.st_ino) != expected
     ):
         raise UnsafeStoragePathError(f"anchored directory identity changed: {anchor.path}")
+
+
+def open_resolved_source_guard(
+    path: Path | str,
+    *,
+    max_bytes: int,
+    expected_sha256: str | None = None,
+    expected_size: int | None = None,
+    expected_device: int | None = None,
+    expected_inode: int | None = None,
+) -> HeldResolvedSourceGuard:
+    if type(max_bytes) is not int or max_bytes < 0:
+        raise ValueError("max_bytes must be a non-negative integer")
+    resolved = Path(path)
+    if not resolved.is_absolute():
+        raise ValueError(f"resolved source path must be absolute: {resolved}")
+    lexical = Path(os.path.abspath(resolved))
+    try:
+        if resolved.resolve(strict=True) != lexical:
+            raise ValueError(f"resolved source path must be canonical: {resolved}")
+    except OSError as exc:
+        raise ValueError(f"resolved source path is unavailable: {resolved}: {exc}") from exc
+    parent_descriptor = _open_directory_path_nofollow(lexical.parent)
+    parent_metadata = os.fstat(parent_descriptor)
+    parent = OwnedDirectoryAnchor(
+        path=lexical.parent,
+        descriptor=parent_descriptor,
+        device=parent_metadata.st_dev,
+        inode=parent_metadata.st_ino,
+    )
+    descriptor: int | None = None
+    try:
+        validate_directory_anchor(parent)
+        descriptor = os.open(
+            lexical.name,
+            _REGULAR_READ_FLAGS,
+            dir_fd=parent.descriptor,
+        )
+        opened_before = os.fstat(descriptor)
+        named_before = os.stat(
+            lexical.name,
+            dir_fd=parent.descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(opened_before.st_mode)
+            or not stat.S_ISREG(named_before.st_mode)
+            or not _same_entry(opened_before, named_before)
+        ):
+            raise UnsafeStoragePathError(
+                f"source must be one stable regular file: {lexical}"
+            )
+        if opened_before.st_size > max_bytes:
+            raise ValueError(
+                f"source exceeds its read limit of {max_bytes} bytes: {lexical}"
+            )
+        digest = _sha256_descriptor(
+            descriptor,
+            expected_size=opened_before.st_size,
+        )
+        opened_after = os.fstat(descriptor)
+        named_after = os.stat(
+            lexical.name,
+            dir_fd=parent.descriptor,
+            follow_symlinks=False,
+        )
+        validate_directory_anchor(parent)
+        metadata = (opened_before, named_before, opened_after, named_after)
+        identities = {
+            (
+                item.st_dev,
+                item.st_ino,
+                item.st_size,
+                item.st_mtime_ns,
+                item.st_ctime_ns,
+                item.st_nlink,
+            )
+            for item in metadata
+        }
+        if (
+            len(identities) != 1
+            or not all(stat.S_ISREG(item.st_mode) for item in metadata)
+            or not digest
+        ):
+            raise UnsafeStoragePathError(
+                f"source changed while its complete fingerprint was captured: {lexical}"
+            )
+        identity = next(iter(identities))
+        fingerprint = ResolvedSourceFingerprint(
+            resolved_path=str(lexical),
+            sha256=digest,
+            size_bytes=opened_after.st_size,
+            device=opened_after.st_dev,
+            inode=opened_after.st_ino,
+            mtime_ns=opened_after.st_mtime_ns,
+            ctime_ns=opened_after.st_ctime_ns,
+        )
+        expected = (
+            expected_sha256,
+            expected_size,
+            expected_device,
+            expected_inode,
+        )
+        observed = (
+            fingerprint.sha256,
+            fingerprint.size_bytes,
+            fingerprint.device,
+            fingerprint.inode,
+        )
+        for expected_value, observed_value in zip(expected, observed, strict=True):
+            if expected_value is not None and expected_value != observed_value:
+                raise UnsafeStoragePathError(
+                    f"source no longer matches its expected fingerprint: {lexical}"
+                )
+        guard = HeldResolvedSourceGuard(
+            path=lexical,
+            parent=parent,
+            descriptor=descriptor,
+            identity=identity,
+            fingerprint=fingerprint,
+            max_bytes=max_bytes,
+        )
+        descriptor = None
+        return guard
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        parent.close()
+        raise
 
 
 def _anchor_relative_parts(anchor: DirectoryAnchorLike, path: Path | str) -> tuple[str, ...]:
@@ -478,6 +905,7 @@ def _read_anchored_regular_file(
             before.st_ino,
             before.st_size,
             before.st_mtime_ns,
+            before.st_ctime_ns,
             before.st_nlink,
         )
         after_identity = (
@@ -485,6 +913,7 @@ def _read_anchored_regular_file(
             after.st_ino,
             after.st_size,
             after.st_mtime_ns,
+            after.st_ctime_ns,
             after.st_nlink,
         )
         named_identity = (
@@ -492,6 +921,7 @@ def _read_anchored_regular_file(
             named_after.st_ino,
             named_after.st_size,
             named_after.st_mtime_ns,
+            named_after.st_ctime_ns,
             named_after.st_nlink,
         )
         if before_identity != after_identity or after_identity != named_identity:
@@ -543,6 +973,98 @@ def anchored_entry_exists(anchor: DirectoryAnchorLike, path: Path | str) -> bool
             return False
         return True
     finally:
+        os.close(parent_fd)
+
+
+def stat_anchored_entry(
+    anchor: DirectoryAnchorLike,
+    path: Path | str,
+) -> os.stat_result:
+    destination = Path(path)
+    validate_directory_anchor(anchor)
+    parent_fd, name = _open_anchored_parent(anchor, destination, create=False)
+    try:
+        _validate_anchored_parent(anchor, destination, parent_fd)
+        metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        _validate_anchored_parent(anchor, destination, parent_fd)
+        validate_directory_anchor(anchor)
+        return metadata
+    finally:
+        os.close(parent_fd)
+
+
+def open_anchored_regular_file(
+    anchor: DirectoryAnchorLike,
+    path: Path | str,
+    *,
+    expected_size: int,
+) -> OwnedPublishedFile:
+    if expected_size < 0:
+        raise ValueError("expected held file size must be non-negative")
+    destination = Path(path)
+    validate_directory_anchor(anchor)
+    parent_fd, name = _open_anchored_parent(anchor, destination, create=False)
+    descriptor: int | None = None
+    try:
+        _validate_anchored_parent(anchor, destination, parent_fd)
+        descriptor = os.open(name, _REGULAR_READ_FLAGS, dir_fd=parent_fd)
+        opened = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(named.st_mode)
+            or opened.st_nlink != 1
+            or named.st_nlink != 1
+            or not _same_entry(opened, named)
+        ):
+            raise UnsafeStoragePathError(
+                f"anchored file must be one stable regular file: {destination}"
+            )
+        if opened.st_size != expected_size or named.st_size != expected_size:
+            raise UnexpectedStorageSizeError(
+                f"anchored file size differs from its expected size: {destination}"
+            )
+        content_sha256 = _sha256_descriptor(
+            descriptor,
+            expected_size=expected_size,
+        )
+        opened_after = os.fstat(descriptor)
+        named_after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        identities = {
+            (
+                item.st_dev,
+                item.st_ino,
+                item.st_size,
+                item.st_mtime_ns,
+                item.st_ctime_ns,
+                item.st_nlink,
+            )
+            for item in (opened, named, opened_after, named_after)
+        }
+        if len(identities) != 1 or not content_sha256:
+            raise UnsafeStoragePathError(
+                f"anchored file changed while its identity was captured: {destination}"
+            )
+        _validate_anchored_parent(anchor, destination, parent_fd)
+        validate_directory_anchor(anchor)
+        result = OwnedPublishedFile(
+            path=destination,
+            descriptor=descriptor,
+            identity=(
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_mtime_ns,
+                opened.st_ctime_ns,
+                opened.st_nlink,
+            ),
+            content_sha256=content_sha256,
+        )
+        descriptor = None
+        return result
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
         os.close(parent_fd)
 
 
@@ -635,6 +1157,44 @@ def open_anchored_directory(
     except BaseException:
         os.close(descriptor)
         raise
+
+
+def open_terminal_artifact_guard(
+    anchor: DirectoryAnchorLike,
+    *,
+    main_path: Path,
+    main_bytes: bytes,
+    sidecar_path: Path,
+    sidecar_snapshot: ImmutableTreeSnapshot,
+    label: str,
+) -> HeldTerminalArtifactGuard:
+    sidecar = open_anchored_directory(anchor, sidecar_path)
+    try:
+        main_file = open_anchored_regular_file(
+            anchor,
+            main_path,
+            expected_size=len(main_bytes),
+        )
+    except BaseException:
+        sidecar.close()
+        raise
+    guard = HeldTerminalArtifactGuard(
+        main=HeldExactFileGuard(
+            anchor=anchor,
+            owned_file=main_file,
+            expected_bytes=main_bytes,
+            label=f"{label} main artifact",
+        ),
+        sidecar=sidecar,
+        expected_sidecar=sidecar_snapshot,
+        label=label,
+    )
+    try:
+        guard.verify()
+    except BaseException:
+        guard.close()
+        raise
+    return guard
 
 
 def _remove_tree_contents_at(directory_fd: int) -> None:
@@ -856,6 +1416,56 @@ def _native_renameat_tree_no_replace(
         raise AtomicNoReplaceUnsupportedError(sys.platform)
     if result != 0:
         _raise_native_rename_error(ctypes.get_errno(), source, destination)
+
+
+def _native_exchangeat(
+    parent_fd: int,
+    first_name: str,
+    second_name: str,
+    *,
+    first: Path,
+    second: Path,
+) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    first_bytes = os.fsencode(first_name)
+    second_bytes = os.fsencode(second_name)
+    rename_exchange = 0x00000002
+    if sys.platform == "darwin":
+        try:
+            function = libc.renameatx_np
+        except AttributeError as exc:
+            raise AtomicNoReplaceUnsupportedError(sys.platform) from exc
+    elif sys.platform.startswith("linux"):
+        try:
+            function = libc.renameat2
+        except AttributeError as exc:
+            raise AtomicNoReplaceUnsupportedError(sys.platform) from exc
+    else:
+        raise AtomicNoReplaceUnsupportedError(sys.platform)
+    function.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    function.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    result = function(
+        parent_fd,
+        first_bytes,
+        parent_fd,
+        second_bytes,
+        rename_exchange,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        unsupported_errors = {errno.ENOSYS, errno.ENOTSUP}
+        if hasattr(errno, "EOPNOTSUPP"):
+            unsupported_errors.add(errno.EOPNOTSUPP)
+        if error_number in unsupported_errors:
+            raise AtomicNoReplaceUnsupportedError(sys.platform)
+        raise OSError(error_number, os.strerror(error_number), first, second)
 
 
 def _fsync_tree_at(directory_fd: int, path: Path) -> None:
@@ -1090,6 +1700,7 @@ def _snapshot_tree_fd(
                     before.st_ino,
                     before.st_size,
                     before.st_mtime_ns,
+                    before.st_ctime_ns,
                     before.st_nlink,
                 )
                 after_identity = (
@@ -1097,6 +1708,7 @@ def _snapshot_tree_fd(
                     after.st_ino,
                     after.st_size,
                     after.st_mtime_ns,
+                    after.st_ctime_ns,
                     after.st_nlink,
                 )
                 named_identity = (
@@ -1104,6 +1716,7 @@ def _snapshot_tree_fd(
                     named_after.st_ino,
                     named_after.st_size,
                     named_after.st_mtime_ns,
+                    named_after.st_ctime_ns,
                     named_after.st_nlink,
                 )
                 if before_identity != after_identity or after_identity != named_identity:
@@ -1258,13 +1871,56 @@ def _require_named_regular_descriptor(
     return opened
 
 
+def _require_expected_held_file(
+    parent_fd: int,
+    name: str,
+    expected: OwnedPublishedFile,
+    *,
+    path: Path,
+) -> os.stat_result:
+    if Path(os.path.abspath(expected.path)) != Path(os.path.abspath(path)):
+        raise UnsafeStoragePathError(
+            f"expected held file names a different destination: {expected.path}"
+        )
+    try:
+        opened = os.fstat(expected.descriptor)
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise UnsafeStoragePathError(
+            f"expected held file became unavailable: {path}: {exc}"
+        ) from exc
+    identities = {
+        (
+            item.st_dev,
+            item.st_ino,
+            item.st_size,
+            item.st_mtime_ns,
+            item.st_ctime_ns,
+            item.st_nlink,
+        )
+        for item in (opened, named)
+    }
+    if (
+        identities != {expected.identity}
+        or not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(named.st_mode)
+        or expected.identity[5] != 1
+    ):
+        raise UnsafeStoragePathError(
+            f"atomic compare-and-replace expected file changed: {path}"
+        )
+    return opened
+
+
 def _atomic_write_bytes_anchored(
     anchor: DirectoryAnchorLike,
     destination: Path,
     content: bytes,
     *,
     mode: int,
-) -> Path:
+    hold_open: bool,
+    expected_current: OwnedPublishedFile | None,
+) -> Path | OwnedPublishedFile:
     validate_directory_anchor(anchor)
     parent_fd, name = _open_anchored_parent(anchor, destination, create=True)
     temporary_name = f".{name}.{new_uuid()}.tmp"
@@ -1283,9 +1939,16 @@ def _atomic_write_bytes_anchored(
             raise UnsafeStoragePathError(
                 f"atomic write destination is not a single-link regular file: {destination}"
             )
+        if expected_current is not None:
+            _require_expected_held_file(
+                parent_fd,
+                name,
+                expected_current,
+                path=destination,
+            )
         descriptor = os.open(
             temporary_name,
-            os.O_WRONLY
+            (os.O_RDWR if hold_open else os.O_WRONLY)
             | os.O_CREAT
             | os.O_EXCL
             | getattr(os, "O_NOFOLLOW", 0)
@@ -1307,13 +1970,104 @@ def _atomic_write_bytes_anchored(
         )
         validate_directory_anchor(anchor)
         _validate_anchored_parent(anchor, destination, parent_fd)
-        os.replace(
-            temporary_name,
-            name,
-            src_dir_fd=parent_fd,
-            dst_dir_fd=parent_fd,
-        )
-        replaced = True
+        if expected_current is None:
+            os.replace(
+                temporary_name,
+                name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            replaced = True
+        else:
+            _require_expected_held_file(
+                parent_fd,
+                name,
+                expected_current,
+                path=destination,
+            )
+            _native_exchangeat(
+                parent_fd,
+                temporary_name,
+                name,
+                first=destination.parent / temporary_name,
+                second=destination,
+            )
+            os.fsync(parent_fd)
+            named_new = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            swapped_out = os.stat(
+                temporary_name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            swapped_out_identity = (
+                swapped_out.st_dev,
+                swapped_out.st_ino,
+                swapped_out.st_size,
+                swapped_out.st_mtime_ns,
+                swapped_out.st_ctime_ns,
+                swapped_out.st_nlink,
+            )
+            try:
+                swapped_out_fd_before = os.fstat(expected_current.descriptor)
+                swapped_out_sha256 = _sha256_descriptor(
+                    expected_current.descriptor,
+                    expected_size=expected_current.identity[2],
+                )
+                swapped_out_fd_after = os.fstat(expected_current.descriptor)
+            except OSError:
+                swapped_out_matches_expected = False
+            else:
+                swapped_out_fd_identities = {
+                    (
+                        item.st_dev,
+                        item.st_ino,
+                        item.st_size,
+                        item.st_mtime_ns,
+                        item.st_ctime_ns,
+                        item.st_nlink,
+                    )
+                    for item in (swapped_out, swapped_out_fd_before, swapped_out_fd_after)
+                }
+                expected_structural_identity = (
+                    *expected_current.identity[:4],
+                    expected_current.identity[5],
+                )
+                swapped_out_structural_identity = (
+                    *swapped_out_identity[:4],
+                    swapped_out_identity[5],
+                )
+                swapped_out_matches_expected = (
+                    len(swapped_out_fd_identities) == 1
+                    and swapped_out_structural_identity
+                    == expected_structural_identity
+                    and swapped_out_sha256 == expected_current.content_sha256
+                )
+            if not _same_entry(temporary_metadata, named_new):
+                raise UnsafeStoragePathError(
+                    f"atomic compare-and-replace new file lost its name: {destination}"
+                )
+            if not swapped_out_matches_expected:
+                # A second exchange cannot be made conditional on the retired
+                # name still identifying the file inspected above.  Re-exchanging
+                # here would therefore move an unknown concurrent replacement if
+                # that private name changed at the last instant.  Fail closed:
+                # retain the swapped-out bytes under our unpredictable orphan name
+                # and leave the exact newly-written inode at the destination.  A
+                # later operation can inspect both durable files without this
+                # process deleting or moving either unknown replacement.
+                replaced = True
+                raise UnsafeStoragePathError(
+                    "atomic compare-and-replace observed an external replacement; "
+                    f"swapped-out bytes were preserved as {temporary_name}: "
+                    f"{destination}"
+                )
+            # Retain the unpredictable retired name and its exact bytes.
+            # POSIX provides neither identity-conditional unlink nor
+            # identity-conditional truncate: even after an nlink check, a
+            # concurrent hardlink can make descriptor mutation escape this
+            # run.  The immutable orphan is therefore the only fail-closed
+            # cleanup state.
+            replaced = True
         os.fsync(parent_fd)
         _validate_anchored_parent(anchor, destination, parent_fd)
         named_destination = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
@@ -1337,6 +2091,30 @@ def _atomic_write_bytes_anchored(
                 f"atomic write readback mismatch: {destination}"
             )
         validate_directory_anchor(anchor)
+        if hold_open:
+            held_metadata = os.fstat(descriptor)
+            if (
+                not _same_entry(temporary_metadata, held_metadata)
+                or held_metadata.st_nlink != 1
+            ):
+                raise UnsafeStoragePathError(
+                    f"held atomic write descriptor changed before return: {destination}"
+                )
+            published = OwnedPublishedFile(
+                path=destination,
+                descriptor=descriptor,
+                identity=(
+                    held_metadata.st_dev,
+                    held_metadata.st_ino,
+                    held_metadata.st_size,
+                    held_metadata.st_mtime_ns,
+                    held_metadata.st_ctime_ns,
+                    held_metadata.st_nlink,
+                ),
+                content_sha256=hashlib.sha256(content).hexdigest(),
+            )
+            descriptor = None
+            return published
         return destination
     finally:
         has_primary_error = sys.exc_info()[0] is not None
@@ -1347,7 +2125,11 @@ def _atomic_write_bytes_anchored(
             except BaseException as exc:
                 cleanup_error = exc
         try:
-            if not replaced and owned_temporary is not None:
+            if (
+                not replaced
+                and owned_temporary is not None
+                and expected_current is None
+            ):
                 try:
                     named_temporary = os.stat(
                         temporary_name,
@@ -1376,7 +2158,9 @@ def _publish_bytes_no_replace_anchored(
     anchor: DirectoryAnchorLike,
     destination: Path,
     content: bytes,
-) -> Path:
+    *,
+    hold_open: bool = False,
+) -> Path | OwnedPublishedFile:
     validate_directory_anchor(anchor)
     parent_fd, name = _open_anchored_parent(anchor, destination, create=True)
     temporary_name = f".{name}.{new_uuid()}.tmp"
@@ -1387,7 +2171,7 @@ def _publish_bytes_no_replace_anchored(
         _validate_anchored_parent(anchor, destination, parent_fd)
         descriptor = os.open(
             temporary_name,
-            os.O_WRONLY
+            (os.O_RDWR if hold_open else os.O_WRONLY)
             | os.O_CREAT
             | os.O_EXCL
             | getattr(os, "O_NOFOLLOW", 0)
@@ -1442,6 +2226,27 @@ def _publish_bytes_no_replace_anchored(
                 f"atomic no-replace publication readback mismatch: {destination}"
             )
         validate_directory_anchor(anchor)
+        if hold_open:
+            held_metadata = os.fstat(descriptor)
+            if not _same_entry(temporary_metadata, held_metadata):
+                raise UnsafeStoragePathError(
+                    f"held publication descriptor changed before return: {destination}"
+                )
+            published = OwnedPublishedFile(
+                path=destination,
+                descriptor=descriptor,
+                identity=(
+                    held_metadata.st_dev,
+                    held_metadata.st_ino,
+                    held_metadata.st_size,
+                    held_metadata.st_mtime_ns,
+                    held_metadata.st_ctime_ns,
+                    held_metadata.st_nlink,
+                ),
+                content_sha256=hashlib.sha256(content).hexdigest(),
+            )
+            descriptor = None
+            return published
         return destination
     finally:
         has_primary_error = sys.exc_info()[0] is not None
@@ -1484,7 +2289,8 @@ def _atomic_publish_tree_anchored(
     *,
     expected_staging_anchor: DirectoryAnchorLike | None,
     expected_tree_snapshot: ImmutableTreeSnapshot | None,
-) -> Path:
+    hold_open_relative_file: str | None,
+) -> Path | OwnedPublishedTree:
     validate_directory_anchor(anchor)
     source_parent_fd: int | None = None
     destination_parent_fd: int | None = None
@@ -1587,6 +2393,39 @@ def _atomic_publish_tree_anchored(
             raise UnsafeStoragePathError(
                 f"published tree name changed before commit: {destination}"
             )
+        if hold_open_relative_file is not None:
+            held_snapshot_entries = [
+                entry
+                for entry in sealed_snapshot.entries
+                if entry.path == hold_open_relative_file and entry.kind == "file"
+            ]
+            if len(held_snapshot_entries) != 1:
+                raise UnsafeStoragePathError(
+                    "held publication file is missing from the sealed tree snapshot: "
+                    f"{hold_open_relative_file}"
+                )
+            published_anchor = OwnedDirectoryAnchor(
+                path=Path(os.path.abspath(destination)),
+                descriptor=published_fd,
+                device=published.st_dev,
+                inode=published.st_ino,
+            )
+            published_fd = None
+            try:
+                held_file = open_anchored_regular_file(
+                    published_anchor,
+                    published_anchor.path / hold_open_relative_file,
+                    expected_size=held_snapshot_entries[0].size_bytes,
+                )
+            except BaseException:
+                published_anchor.close()
+                raise
+            return OwnedPublishedTree(
+                path=published_anchor.path,
+                directory=published_anchor,
+                held_file=held_file,
+                held_relative_path=hold_open_relative_file,
+            )
         return destination
     finally:
         if published_fd is not None:
@@ -1605,10 +2444,23 @@ def atomic_write_bytes(
     *,
     mode: int = 0o644,
     anchor: DirectoryAnchorLike | None = None,
-) -> Path:
+    hold_open: bool = False,
+    expected_current: OwnedPublishedFile | None = None,
+) -> Path | OwnedPublishedFile:
     destination = Path(path)
     if anchor is not None:
-        return _atomic_write_bytes_anchored(anchor, destination, content, mode=mode)
+        return _atomic_write_bytes_anchored(
+            anchor,
+            destination,
+            content,
+            mode=mode,
+            hold_open=hold_open,
+            expected_current=expected_current,
+        )
+    if hold_open or expected_current is not None:
+        raise ValueError(
+            "held or identity-bound atomic write requires a directory anchor"
+        )
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.parent / f".{destination.name}.{new_uuid()}.tmp"
     descriptor: int | None = None
@@ -1636,8 +2488,113 @@ def atomic_write_json(
     value: Any,
     *,
     anchor: DirectoryAnchorLike | None = None,
-) -> Path:
-    return atomic_write_bytes(path, canonical_json_bytes(value), anchor=anchor)
+    hold_open: bool = False,
+    expected_current: OwnedPublishedFile | None = None,
+) -> Path | OwnedPublishedFile:
+    return atomic_write_bytes(
+        path,
+        canonical_json_bytes(value),
+        anchor=anchor,
+        hold_open=hold_open,
+        expected_current=expected_current,
+    )
+
+
+def compare_and_swap_bytes(
+    path: Path | str,
+    content: bytes,
+    *,
+    anchor: DirectoryAnchorLike,
+    expected_current_bytes: bytes,
+    hold_new: bool = False,
+    finalization_guards: tuple[ExactFinalizationGuard, ...] = (),
+) -> Path | OwnedPublishedFile:
+    destination = Path(path)
+    current = open_anchored_regular_file(
+        anchor,
+        destination,
+        expected_size=len(expected_current_bytes),
+    )
+    with HeldExactFileGuard(
+        anchor=anchor,
+        owned_file=current,
+        expected_bytes=expected_current_bytes,
+        label="compare-and-swap current file",
+    ) as current_guard:
+        current_guard.verify()
+        for guard in finalization_guards:
+            guard.verify()
+        written = atomic_write_bytes(
+            destination,
+            content,
+            anchor=anchor,
+            hold_open=True,
+            expected_current=current_guard.owned_file,
+        )
+    if not isinstance(written, OwnedPublishedFile):  # pragma: no cover - API invariant
+        raise UnsafeStoragePathError(
+            f"compare-and-swap did not retain the new file identity: {destination}"
+        )
+    written_guard = HeldExactFileGuard(
+        anchor=anchor,
+        owned_file=written,
+        expected_bytes=content,
+        label="compare-and-swap new file",
+    )
+    try:
+        written_guard.verify()
+        for guard in finalization_guards:
+            guard.verify()
+    except BaseException:
+        # The exchange is already durable.  A second compare-and-swap would
+        # introduce another attacker-controlled pathname window and could move
+        # an identity that was never part of the original transaction.  Keep
+        # the published manifest and its exact retired predecessor as immutable
+        # forensic state; callers must fail closed and let the next loader
+        # reject any manifest/artifact inconsistency.
+        written_guard.close()
+        raise
+    if hold_new:
+        return written_guard.owned_file
+    written_guard.close()
+    return destination
+
+
+def cas_update_run(
+    loaded: LoadedRunUpdateLike,
+    updated_run: Any,
+    *,
+    hold_new: bool = False,
+    finalization_guards: tuple[ExactFinalizationGuard, ...] = (),
+) -> Path | OwnedPublishedFile:
+    anchor = loaded.run_directory_anchor
+    if anchor is None:
+        raise UnsafeStoragePathError(
+            "run compare-and-swap requires a locked run directory anchor"
+        )
+    updated_run_bytes = canonical_json_bytes(updated_run)
+    # Every successful identity-bound replacement intentionally retains the
+    # exact previous manifest as an immutable orphan.  Enforce the run cap in
+    # the generic primitive so recovery/replay callers cannot omit that extra
+    # durable copy when they bind an already-published terminal artifact.
+    from paper_reader.run_size import enforce_projected_run_size
+
+    validate_directory_anchor(anchor)
+    enforce_projected_run_size(
+        loaded.manifest_path.parent,
+        max_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+        replacements={loaded.manifest_path: updated_run_bytes},
+        retained_replacement_paths=(loaded.manifest_path,),
+    )
+    validate_directory_anchor(anchor)
+    return compare_and_swap_bytes(
+        loaded.manifest_path,
+        updated_run_bytes,
+        anchor=anchor,
+        expected_current_bytes=loaded.manifest_bytes,
+        hold_new=hold_new,
+        finalization_guards=finalization_guards,
+    )
 
 
 def atomic_publish_tree(
@@ -1647,9 +2604,14 @@ def atomic_publish_tree(
     anchor: DirectoryAnchorLike | None = None,
     expected_staging_anchor: DirectoryAnchorLike | None = None,
     expected_tree_snapshot: ImmutableTreeSnapshot | None = None,
-) -> Path:
+    hold_open_relative_file: str | None = None,
+) -> Path | OwnedPublishedTree:
     staging_path = Path(staging)
     destination_path = Path(destination)
+    if hold_open_relative_file is not None:
+        hold_open_relative_file = safe_relative_artifact_path(
+            hold_open_relative_file
+        )
     if anchor is not None:
         return _atomic_publish_tree_anchored(
             anchor,
@@ -1657,9 +2619,16 @@ def atomic_publish_tree(
             destination_path,
             expected_staging_anchor=expected_staging_anchor,
             expected_tree_snapshot=expected_tree_snapshot,
+            hold_open_relative_file=hold_open_relative_file,
         )
-    if expected_staging_anchor is not None or expected_tree_snapshot is not None:
-        raise ValueError("expected staging identity requires an anchored publication")
+    if (
+        expected_staging_anchor is not None
+        or expected_tree_snapshot is not None
+        or hold_open_relative_file is not None
+    ):
+        raise ValueError(
+            "expected staging identity and held publication require an anchored publication"
+        )
     if not staging_path.is_dir() or staging_path.is_symlink():
         raise ValueError(f"staging tree must be a real directory: {staging_path}")
     destination_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1707,10 +2676,18 @@ def publish_bytes_no_replace(
     destination: Path | str,
     *,
     anchor: DirectoryAnchorLike | None = None,
-) -> Path:
+    hold_open: bool = False,
+) -> Path | OwnedPublishedFile:
     destination_path = Path(destination).expanduser()
     if anchor is not None:
-        return _publish_bytes_no_replace_anchored(anchor, destination_path, content)
+        return _publish_bytes_no_replace_anchored(
+            anchor,
+            destination_path,
+            content,
+            hold_open=hold_open,
+        )
+    if hold_open:
+        raise ValueError("held no-replace publication requires a directory anchor")
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination_path.parent / f".{destination_path.name}.{new_uuid()}.tmp"
     descriptor: int | None = None
@@ -1737,9 +2714,16 @@ def publish_bytes_no_replace(
 __all__ = [
     "AtomicNoReplaceUnsupportedError",
     "DirectoryAnchorLike",
+    "ExactFinalizationGuard",
+    "HeldExactFileGuard",
+    "HeldExactTreeGuard",
+    "HeldResolvedSourceGuard",
+    "HeldTerminalArtifactGuard",
     "ImmutableTreeEntry",
     "ImmutableTreeSnapshot",
     "OwnedDirectoryAnchor",
+    "OwnedPublishedFile",
+    "OwnedPublishedTree",
     "PublishConflictError",
     "ResolvedSourceFingerprint",
     "TreeSnapshotLimitError",
@@ -1750,15 +2734,20 @@ __all__ = [
     "atomic_publish_tree",
     "atomic_write_bytes",
     "atomic_write_json",
+    "cas_update_run",
     "canonical_json_bytes",
     "canonical_json_sha256",
     "create_anchored_directory",
+    "compare_and_swap_bytes",
     "fingerprint_source",
     "fingerprint_resolved_source",
     "fsync_directory",
     "new_random_id",
     "new_uuid",
+    "open_anchored_regular_file",
     "open_anchored_directory",
+    "open_resolved_source_guard",
+    "open_terminal_artifact_guard",
     "paths_alias",
     "publish_bytes_no_replace",
     "publish_file_no_replace",
@@ -1774,6 +2763,7 @@ __all__ = [
     "snapshot_directory_fd",
     "source_fingerprint",
     "source_matches_fingerprint",
+    "stat_anchored_entry",
     "tree_snapshot_from_bytes",
     "tree_snapshot_from_hashes",
     "validate_directory_anchor",

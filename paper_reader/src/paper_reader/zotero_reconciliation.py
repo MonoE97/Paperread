@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from contextlib import contextmanager
@@ -28,11 +29,13 @@ from paper_reader.storage import (
     anchored_entry_exists,
     atomic_write_bytes,
     atomic_write_json,
+    cas_update_run,
     canonical_json_bytes,
     create_anchored_directory,
     new_random_id,
     new_uuid,
     open_anchored_directory,
+    open_terminal_artifact_guard,
     read_anchored_bytes,
     remove_anchored_tree,
     rfc3339_utc,
@@ -46,6 +49,7 @@ from paper_reader.zotero_authorization_loader import (
     LoadedAuthorization,
     ZoteroAuthorizationBindingError,
     load_bound_authorization,
+    open_bound_authorization_guard,
     preflight_authorization_schema_versions,
 )
 from paper_reader.zotero_artifact_paths import (
@@ -251,10 +255,10 @@ def _validate_reconciliation_record(
             "reconciliation_tampered",
             "reconciliation sidecar record differs from its main commit marker",
         )
-    roles: set[str] = set()
+    refs_by_role: dict[str, ArtifactRef] = {}
     for artifact in reconciliation.artifacts:
         expected_filename = _RECONCILIATION_MEMBER_BY_ROLE.get(artifact.role)
-        if expected_filename is None or artifact.role in roles:
+        if expected_filename is None or artifact.role in refs_by_role:
             raise ZoteroReconciliationError(
                 "reconciliation_tampered",
                 "reconciliation sidecar artifact roles changed",
@@ -278,23 +282,136 @@ def _validate_reconciliation_record(
                 "reconciliation_tampered",
                 "reconciliation refs do not bind the exact closed sidecar members",
             )
-        roles.add(artifact.role)
-    if roles != required:
+        refs_by_role[artifact.role] = artifact
+    if set(refs_by_role) != required:
         raise ZoteroReconciliationError(
             "reconciliation_tampered",
             "reconciliation sidecar artifact roles changed",
         )
     if (
-        reconciliation.authorization not in reconciliation.artifacts
-        or reconciliation.children_snapshot not in reconciliation.artifacts
-        or (
-            reconciliation.verification is not None
-            and reconciliation.verification not in reconciliation.artifacts
-        )
+        reconciliation.authorization
+        != refs_by_role["authorization_snapshot"]
+        or reconciliation.children_snapshot
+        != refs_by_role["zotero_children_snapshot"]
+        or reconciliation.verification
+        != refs_by_role.get("reconciliation_verification")
     ):
         raise ZoteroReconciliationError(
             "reconciliation_tampered",
-            "reconciliation refs are not members of the immutable sidecar",
+            "reconciliation named refs do not match their exact immutable sidecar roles",
+        )
+    if sidecar_members["authorization.json"] != bound.authorization_bytes:
+        raise ZoteroReconciliationError(
+            "reconciliation_tampered",
+            "reconciliation authorization snapshot differs from the bound authorization",
+        )
+    try:
+        children = json.loads(sidecar_members["children.json"])
+        if (
+            not isinstance(children, list)
+            or not all(isinstance(item, dict) for item in children)
+            or canonical_json_bytes(children) != sidecar_members["children.json"]
+        ):
+            raise ValueError("children snapshot is not one canonical object array")
+        matched_note_keys = _locate_exact_matches(children, bound=bound)
+    except (TypeError, ValueError) as exc:
+        raise ZoteroReconciliationError(
+            "reconciliation_tampered",
+            f"reconciliation children snapshot cannot be reevaluated: {exc}",
+        ) from exc
+    match_count = len(matched_note_keys)
+    if match_count == 0:
+        expected_outcome = "not_found"
+        expected_retry = True
+        expected_gate = _location_gate(expected_outcome, match_count=0)
+    elif match_count > 1:
+        expected_outcome = "ambiguous"
+        expected_retry = False
+        expected_gate = _location_gate(expected_outcome, match_count=match_count)
+    else:
+        if reconciliation.verification is None:
+            raise ZoteroReconciliationError(
+                "reconciliation_tampered",
+                "unique reconciliation match is missing its full verification",
+            )
+        try:
+            note_snapshot = json.loads(sidecar_members["note.json"])
+            if (
+                not isinstance(note_snapshot, dict)
+                or canonical_json_bytes(note_snapshot) != sidecar_members["note.json"]
+            ):
+                raise ValueError("note snapshot is not one canonical JSON object")
+            evaluation = evaluate_note_snapshot(
+                note_snapshot,
+                authorization=bound.authorization,
+                note_key=matched_note_keys[0],
+            )
+            verification = PaperReaderVerification.model_validate_json(
+                sidecar_members["verification.json"]
+            )
+        except (TypeError, ValueError, ValidationError) as exc:
+            raise ZoteroReconciliationError(
+                "reconciliation_tampered",
+                f"reconciliation verification cannot be reevaluated: {exc}",
+            ) from exc
+        expected_checks = canonical_json_bytes(
+            {
+                "format": "paper_reader.verification-checks.v2-internal",
+                "authorization_digest": bound.authorization_digest,
+                "note_key": matched_note_keys[0],
+                "checks": [item.model_dump(mode="json") for item in evaluation.checks],
+            }
+        )
+        expected_gate = _verification_gate(evaluation)
+        outer_note_ref = refs_by_role["zotero_note_readback"]
+        outer_checks_ref = refs_by_role["verification_checks"]
+        outer_verification_ref = refs_by_role["reconciliation_verification"]
+        expected_inner_artifacts = (
+            refs_by_role["authorization_snapshot"],
+            outer_note_ref,
+            outer_checks_ref,
+        )
+        if (
+            canonical_json_bytes(verification)
+            != sidecar_members["verification.json"]
+            or sidecar_members["checks.json"] != expected_checks
+            or verification.run_id != bound.authorization.run_id
+            or verification.authorization_digest != bound.authorization_digest
+            or verification.target != bound.authorization.target
+            or verification.note_key != matched_note_keys[0]
+            or verification.verified != evaluation.verified
+            or verification.content_sha256 != evaluation.content_sha256
+            or verification.content_length != evaluation.content_length
+            or verification.checks != evaluation.checks
+            or verification.authorization
+            != refs_by_role["authorization_snapshot"]
+            or verification.note_snapshot != outer_note_ref
+            or verification.checks_snapshot != outer_checks_ref
+            or verification.artifacts != expected_inner_artifacts
+            or reconciliation.verification != outer_verification_ref
+            or verification.gate.status != expected_gate.status
+            or verification.gate.checks != expected_gate.checks
+            or verification.gate.blockers != expected_gate.blockers
+        ):
+            raise ZoteroReconciliationError(
+                "reconciliation_tampered",
+                "reconciliation verification fields do not match immutable snapshots",
+            )
+        expected_outcome = "verified" if evaluation.verified else "blocked"
+        expected_retry = False
+    if (
+        reconciliation.match_count != match_count
+        or reconciliation.matched_note_keys != matched_note_keys
+        or reconciliation.outcome != expected_outcome
+        or reconciliation.retry_confirmation_required != expected_retry
+        or reconciliation.gate.status != expected_gate.status
+        or reconciliation.gate.checks != expected_gate.checks
+        or reconciliation.gate.blockers != expected_gate.blockers
+        or (match_count == 1) != (reconciliation.verification is not None)
+    ):
+        raise ZoteroReconciliationError(
+            "reconciliation_tampered",
+            "reconciliation outcome does not match its immutable snapshots",
         )
     return reconciliation
 
@@ -425,18 +542,50 @@ def _existing_reconciliation(
             size_bytes=len(raw),
             media_type="application/json",
         )
-        updated_run = _updated_run(
-            loaded.run,
-            reconciliation_ref=reconciliation_ref,
-            gate=reconciliation.gate,
-            verified=reconciliation.outcome == "verified",
-        )
         try:
-            atomic_write_json(
-                loaded.manifest_path,
-                updated_run,
-                anchor=loaded.run_directory_anchor,
+            terminal_members = _read_closed_reconciliation_sidecar(
+                loaded,
+                reconciliation_path,
+                expected_roles={artifact.role for artifact in reconciliation.artifacts},
             )
+            with open_bound_authorization_guard(
+                loaded,
+                bound,
+            ) as authorization_guard, open_terminal_artifact_guard(
+                anchor,
+                main_path=reconciliation_path,
+                main_bytes=raw,
+                sidecar_path=reconciliation_dir,
+                sidecar_snapshot=tree_snapshot_from_bytes(terminal_members),
+                label="recovered reconciliation terminal",
+            ) as terminal_guard:
+                revalidated = _validate_reconciliation_record(
+                    run_dir,
+                    reconciliation_path,
+                    raw,
+                    bound=bound,
+                    loaded=loaded,
+                )
+                if revalidated != reconciliation:
+                    raise ZoteroReconciliationError(
+                        "reconciliation_tampered",
+                        "recovered reconciliation changed between validation and binding",
+                    )
+                updated_run = _updated_run(
+                    loaded.run,
+                    reconciliation_ref=reconciliation_ref,
+                    gate=revalidated.gate,
+                    verified=revalidated.outcome == "verified",
+                )
+                authorization_guard.verify()
+                terminal_guard.verify()
+                cas_update_run(
+                    loaded,
+                    updated_run,
+                    finalization_guards=(authorization_guard, terminal_guard),
+                )
+                terminal_guard.verify()
+                authorization_guard.verify()
         except Exception as exc:
             raise ZoteroReconciliationError(
                 "reconciliation_status_update_failed",
@@ -752,6 +901,7 @@ def _publish_reconciliation_locked(
                 max_bytes=V2_RESOURCE_POLICY.run_max_bytes,
                 staging_dir=staging,
                 replacements={loaded.manifest_path: canonical_json_bytes(updated_run)},
+                retained_replacement_paths=(loaded.manifest_path,),
             )
         except RunSizeLimitError as exc:
             raise ZoteroReconciliationError(
@@ -787,11 +937,24 @@ def _publish_reconciliation_locked(
                 ),
             ) from exc
         try:
-            atomic_write_json(
-                loaded.manifest_path,
-                updated_run,
-                anchor=loaded.run_directory_anchor,
-            )
+            with open_bound_authorization_guard(
+                loaded,
+                bound,
+            ) as authorization_guard, open_terminal_artifact_guard(
+                run_anchor,
+                main_path=reconciliation_path,
+                main_bytes=reconciliation_bytes,
+                sidecar_path=reconciliation_dir,
+                sidecar_snapshot=sidecar_snapshot,
+                label="reconciliation terminal",
+            ) as terminal_guard:
+                cas_update_run(
+                    loaded,
+                    updated_run,
+                    finalization_guards=(authorization_guard, terminal_guard),
+                )
+                terminal_guard.verify()
+                authorization_guard.verify()
         except Exception as exc:
             raise ZoteroReconciliationError(
                 "reconciliation_status_update_failed",

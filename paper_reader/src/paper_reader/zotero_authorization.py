@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,15 +28,26 @@ from paper_reader.contracts import (
     ZoteroPublicationTarget,
     ZoteroSourceIdentity,
 )
-from paper_reader.local_publish import _candidate_run_dir, _load_candidate
+from paper_reader.local_publish import (
+    _CandidateTreeGuard,
+    _candidate_run_dir,
+    _load_candidate,
+    _open_original_evidence_tree_guard,
+    revalidate_candidate_original_evidence,
+)
 from paper_reader.note import FORBIDDEN_RENDERED_HEADINGS, REQUIRED_SECTIONS
 from paper_reader.raw_schema import require_raw_schema_version
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import ExpectedRunArtifact, locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
+    HeldExactFileGuard,
+    ImmutableTreeSnapshot,
+    OwnedDirectoryAnchor,
+    OwnedPublishedFile,
     atomic_write_bytes,
     atomic_write_json,
+    cas_update_run,
     canonical_json_bytes,
     create_anchored_directory,
     anchored_entry_exists,
@@ -45,9 +56,12 @@ from paper_reader.storage import (
     random_token,
     remove_anchored_tree,
     open_anchored_directory,
+    open_anchored_regular_file,
     read_anchored_bytes,
     rfc3339_utc,
+    snapshot_directory_fd,
     tree_snapshot_from_bytes,
+    tree_snapshot_from_hashes,
     validate_directory_anchor,
 )
 from paper_reader.zotero_candidate import _artifact_ref, _captured_live_snapshots, _note_child_view
@@ -62,6 +76,7 @@ from paper_reader.zotero_lock import (
 from paper_reader.zotero_read import LocalApiZoteroReadProvider, ZoteroReadProvider
 from paper_reader.zotero_authorization_loader import (
     ZoteroAuthorizationBindingError,
+    _read_closed_authorization_sidecar,
     load_authorization_artifact,
 )
 from paper_reader.zotero_artifact_paths import (
@@ -129,6 +144,98 @@ class CandidateAuthorizationPreflight:
     skill_root: Path
     skill_root_device: int
     skill_root_inode: int
+
+
+@dataclass(slots=True)
+class _AuthorizationFinalizationGuard:
+    run_anchor: DirectoryAnchor
+    main_guard: HeldExactFileGuard
+    sidecar_anchor: OwnedDirectoryAnchor
+    expected_sidecar_snapshot: ImmutableTreeSnapshot
+
+    def close(self) -> None:
+        try:
+            self.main_guard.close()
+        finally:
+            self.sidecar_anchor.close()
+
+    def __enter__(self) -> _AuthorizationFinalizationGuard:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+    def verify(self) -> None:
+        try:
+            validate_directory_anchor(self.run_anchor)
+            self.main_guard.verify()
+            validate_directory_anchor(self.sidecar_anchor)
+            observed_sidecar = snapshot_directory_fd(
+                self.sidecar_anchor.descriptor,
+                max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+                max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+                max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+            )
+            validate_directory_anchor(self.sidecar_anchor)
+            self.main_guard.verify()
+            validate_directory_anchor(self.run_anchor)
+        except (OSError, ValueError) as exc:
+            raise ZoteroAuthorizationError(
+                "authorization_tampered",
+                "immutable authorization main or sidecar changed during finalization",
+            ) from exc
+        if observed_sidecar != self.expected_sidecar_snapshot:
+            raise ZoteroAuthorizationError(
+                "authorization_tampered",
+                "immutable authorization sidecar closed set changed during finalization",
+            )
+
+
+def _open_authorization_finalization_guard(
+    *,
+    run_anchor: DirectoryAnchor,
+    authorization_path: Path,
+    authorization_dir: Path,
+    authorization_bytes: bytes,
+    sidecar_snapshot: ImmutableTreeSnapshot,
+) -> _AuthorizationFinalizationGuard:
+    try:
+        sidecar_anchor = open_anchored_directory(run_anchor, authorization_dir)
+    except (OSError, ValueError) as exc:
+        raise ZoteroAuthorizationError(
+            "authorization_tampered",
+            "immutable authorization sidecar could not be held for finalization",
+        ) from exc
+    try:
+        main_file = open_anchored_regular_file(
+            run_anchor,
+            authorization_path,
+            expected_size=len(authorization_bytes),
+        )
+    except (OSError, ValueError) as exc:
+        sidecar_anchor.close()
+        raise ZoteroAuthorizationError(
+            "authorization_tampered",
+            "immutable authorization main could not be held for finalization",
+        ) from exc
+    guard = _AuthorizationFinalizationGuard(
+        run_anchor=run_anchor,
+        main_guard=HeldExactFileGuard(
+            anchor=run_anchor,
+            owned_file=main_file,
+            expected_bytes=authorization_bytes,
+            label="authorization main artifact",
+        ),
+        sidecar_anchor=sidecar_anchor,
+        expected_sidecar_snapshot=sidecar_snapshot,
+    )
+    try:
+        guard.verify()
+    except BaseException:
+        guard.close()
+        raise
+    return guard
 
 
 def _preflight_existing_authorization_schemas(
@@ -563,10 +670,29 @@ def _updated_run(
     )
 
 
+def _raise_after_authorization_commit_failure(cause: Exception) -> None:
+    """Fail closed after the authorization/run exchange is already durable."""
+
+    if isinstance(cause, ZoteroAuthorizationError):
+        raise cause
+    if isinstance(cause, LocalPublicationError):
+        raise ZoteroAuthorizationError(
+            cause.code,
+            str(cause),
+            data=cause.data,
+        ) from cause
+    raise ZoteroAuthorizationError(
+        "authorization_tampered",
+        "authorization finalization state changed before token return",
+    ) from cause
+
+
 def _recover_matching_orphan_authorization(
     loaded: LoadedRun,
     *,
     candidate_digest: str,
+    candidate_guard: _CandidateTreeGuard,
+    evidence_guard: _CandidateTreeGuard,
     reservations: tuple[ZoteroAuthorizationReservation, ...],
     required_reservation: ZoteroAuthorizationReservation | None = None,
 ) -> bool:
@@ -731,25 +857,57 @@ def _recover_matching_orphan_authorization(
                 "authorization_recovery_failed",
                 "failed to restore exact authorization commit marker",
             ) from exc
-    authorization_ref = _artifact_ref(
-        run_dir,
-        recovered.authorization_path,
-        recovered.authorization_path,
-        "write_authorization",
-        "application/json",
-    )
-    updated_run = _updated_run(
-        loaded.run,
-        authorization_ref=authorization_ref,
-        preflight=recovered.authorization.live_preflight,
-        gate=recovered.authorization.gate,
+    authorization_ref = ArtifactRef(
+        role="write_authorization",
+        path=recovered.authorization_path.relative_to(run_dir).as_posix(),
+        sha256=hashlib.sha256(recovered.authorization_bytes).hexdigest(),
+        size_bytes=len(recovered.authorization_bytes),
+        media_type="application/json",
     )
     try:
-        atomic_write_json(
-            loaded.manifest_path,
-            updated_run,
-            anchor=loaded.run_directory_anchor,
+        sidecar_members, _sidecar_digest = _read_closed_authorization_sidecar(
+            run_anchor,
+            recovered.authorization_path,
         )
+        with _open_authorization_finalization_guard(
+            run_anchor=run_anchor,
+            authorization_path=recovered.authorization_path,
+            authorization_dir=recovered.authorization_path.with_suffix(""),
+            authorization_bytes=recovered.authorization_bytes,
+            sidecar_snapshot=tree_snapshot_from_bytes(sidecar_members),
+        ) as authorization_guard:
+            revalidated = load_authorization_artifact(
+                loaded,
+                recovered.authorization_path,
+                require_bound=False,
+                raw_override=recovered.authorization_bytes,
+            )
+            if revalidated != recovered:
+                raise ZoteroAuthorizationError(
+                    "authorization_tampered",
+                    "recovered authorization changed between validation and binding",
+                )
+            updated_run = _updated_run(
+                loaded.run,
+                authorization_ref=authorization_ref,
+                preflight=revalidated.authorization.live_preflight,
+                gate=revalidated.authorization.gate,
+            )
+            authorization_guard.verify()
+            candidate_guard.verify()
+            evidence_guard.verify()
+            cas_update_run(
+                loaded,
+                updated_run,
+                finalization_guards=(
+                    authorization_guard,
+                    candidate_guard,
+                    evidence_guard,
+                ),
+            )
+            evidence_guard.verify()
+            candidate_guard.verify()
+            authorization_guard.verify()
     except Exception as exc:
         raise ZoteroAuthorizationError(
             "authorization_status_update_failed",
@@ -856,7 +1014,9 @@ def _authorize_zotero_candidate_once(
     run_dir = inspected.run_dir
     resolved_provider = provider or LocalApiZoteroReadProvider()
 
-    with _locked_parent_for_preflight(inspected) as parent_lock:
+    with ExitStack() as finalization_stack, _locked_parent_for_preflight(
+        inspected
+    ) as parent_lock:
         expected_candidate = ExpectedRunArtifact(
             path=inspected.candidate_path.relative_to(inspected.run_dir).as_posix(),
             sha256=inspected.candidate_digest,
@@ -915,6 +1075,46 @@ def _authorize_zotero_candidate_once(
                     "local_candidate_forbidden",
                     "local candidates cannot produce Zotero write authorization",
                 )
+            candidate_bytes_for_guard = canonical_json_bytes(candidate)
+            expected_candidate_members = {
+                "candidate.json": (
+                    len(candidate_bytes_for_guard),
+                    hashlib.sha256(candidate_bytes_for_guard).hexdigest(),
+                )
+            }
+            for artifact in candidate.artifacts:
+                artifact_path = run_dir / artifact.path
+                expected_candidate_members[
+                    artifact_path.relative_to(candidate_path.parent).as_posix()
+                ] = (artifact.size_bytes, artifact.sha256)
+            candidate_guard = finalization_stack.enter_context(
+                _CandidateTreeGuard(
+                    anchor=open_anchored_directory(
+                        run_anchor,
+                        candidate_path.parent,
+                    ),
+                    expected=tree_snapshot_from_hashes(
+                        expected_candidate_members
+                    ),
+                )
+            )
+            candidate_guard.verify()
+            try:
+                original_evidence = revalidate_candidate_original_evidence(
+                    loaded,
+                    candidate,
+                    verified,
+                )
+            except LocalPublicationError as exc:
+                raise ZoteroAuthorizationError(
+                    exc.code,
+                    str(exc),
+                    data=exc.data,
+                ) from exc
+            evidence_guard = finalization_stack.enter_context(
+                _open_original_evidence_tree_guard(loaded, original_evidence)
+            )
+            evidence_guard.verify()
             active_instant = _authorization_instant()
             _reject_active_authorization(
                 run_dir,
@@ -947,6 +1147,8 @@ def _authorize_zotero_candidate_once(
                 recovered = _recover_matching_orphan_authorization(
                     loaded,
                     candidate_digest=candidate_digest,
+                    candidate_guard=candidate_guard,
+                    evidence_guard=evidence_guard,
                     reservations=reservations,
                     required_reservation=active,
                 )
@@ -956,6 +1158,8 @@ def _authorize_zotero_candidate_once(
                 _recover_matching_orphan_authorization(
                     loaded,
                     candidate_digest=candidate_digest,
+                    candidate_guard=candidate_guard,
+                    evidence_guard=evidence_guard,
                     reservations=reservations,
                 )
             try:
@@ -970,6 +1174,10 @@ def _authorize_zotero_candidate_once(
                 allow_existing_main=False,
             )
             parent_bytes, children_bytes = _fresh_live_preflight(candidate, resolved_provider)
+            try:
+                revalidate_candidate_original_evidence(loaded, candidate, verified)
+            except LocalPublicationError as exc:
+                raise ZoteroAuthorizationError(exc.code, str(exc), data=exc.data) from exc
             grant_instant = _authorization_instant()
 
             if external_claim_id is None:
@@ -1108,12 +1316,14 @@ def _authorize_zotero_candidate_once(
                     preflight=preflight,
                     gate=gate,
                 )
+                updated_run_bytes = canonical_json_bytes(updated_run)
                 try:
                     enforce_projected_run_size(
                         run_dir,
                         max_bytes=V2_RESOURCE_POLICY.run_max_bytes,
                         staging_dir=staging,
-                        replacements={loaded.manifest_path: canonical_json_bytes(updated_run)},
+                        replacements={loaded.manifest_path: updated_run_bytes},
+                        retained_replacement_paths=(loaded.manifest_path,),
                     )
                 except RunSizeLimitError as exc:
                     raise ZoteroAuthorizationError(
@@ -1159,39 +1369,94 @@ def _authorize_zotero_candidate_once(
                         "immutable authorization publication failed",
                         data={"phase": publication_phase},
                     ) from exc
-                try:
-                    atomic_write_json(
-                        loaded.manifest_path,
-                        updated_run,
-                        anchor=loaded.run_directory_anchor,
-                    )
-                except Exception as exc:
-                    raise ZoteroAuthorizationError(
-                        "authorization_status_update_failed",
-                        "authorization tree is durable but run binding failed",
-                    ) from exc
-                if _authorization_instant() >= _parse_utc(authorization.expires_at):
-                    raise ZoteroAuthorizationError(
-                        "authorization_expired_before_return",
-                        (
-                            "authorization expired before its plaintext write token could "
-                            "be returned; do not write with this authorization"
-                        ),
-                        data={
-                            "authorization_path": str(authorization_path),
-                            "authorization_id": authorization.authorization_id,
-                            "authorization_digest": authorization_ref.sha256,
-                            "expires_at": authorization.expires_at,
-                        },
-                    )
-                return AuthorizedZoteroWrite(
-                    run_dir=run_dir,
+                with _open_authorization_finalization_guard(
+                    run_anchor=run_anchor,
                     authorization_path=authorization_path,
                     authorization_dir=authorization_dir,
-                    authorization=authorization,
-                    authorization_digest=authorization_ref.sha256,
-                    write_token=write_token,
-                )
+                    authorization_bytes=authorization_bytes,
+                    sidecar_snapshot=sidecar_snapshot,
+                ) as authorization_guard:
+                    try:
+                        written_run = cas_update_run(
+                            loaded,
+                            updated_run,
+                            hold_new=True,
+                            finalization_guards=(
+                                authorization_guard,
+                                candidate_guard,
+                                evidence_guard,
+                            ),
+                        )
+                    except Exception as exc:
+                        raise ZoteroAuthorizationError(
+                            "authorization_status_update_failed",
+                            "authorization tree is durable but run binding failed",
+                        ) from exc
+                    if not isinstance(written_run, OwnedPublishedFile):
+                        raise ZoteroAuthorizationError(
+                            "authorization_status_update_failed",
+                            "run binding did not retain the updated manifest identity",
+                        )
+                    with HeldExactFileGuard(
+                        anchor=run_anchor,
+                        owned_file=written_run,
+                        expected_bytes=updated_run_bytes,
+                        label="updated authorization run manifest",
+                    ) as updated_run_guard:
+                        try:
+                            updated_run_guard.verify()
+                            authorization_guard.verify()
+                            candidate_guard.verify()
+                            evidence_guard.verify()
+                            revalidate_candidate_original_evidence(
+                                loaded,
+                                candidate,
+                                verified,
+                            )
+                            evidence_guard.verify()
+                            candidate_guard.verify()
+                            authorization_guard.verify()
+                            updated_run_guard.verify()
+                        except (LocalPublicationError, OSError, ValueError) as exc:
+                            _raise_after_authorization_commit_failure(exc)
+                        if _authorization_instant() >= _parse_utc(
+                            authorization.expires_at
+                        ):
+                            raise ZoteroAuthorizationError(
+                                "authorization_expired_before_return",
+                                (
+                                    "authorization expired before its plaintext write "
+                                    "token could be returned; do not write with this "
+                                    "authorization"
+                                ),
+                                data={
+                                    "authorization_path": str(authorization_path),
+                                    "authorization_id": authorization.authorization_id,
+                                    "authorization_digest": authorization_ref.sha256,
+                                    "expires_at": authorization.expires_at,
+                                },
+                            )
+                        try:
+                            evidence_guard.verify()
+                            candidate_guard.verify()
+                            authorization_guard.verify()
+                            updated_run_guard.verify()
+                            verify_local_source(candidate.source.attachment)
+                            evidence_guard.verify()
+                            authorization_guard.verify()
+                            candidate_guard.verify()
+                            updated_run_guard.verify()
+                            evidence_guard.verify()
+                        except (LocalPublicationError, OSError, ValueError) as exc:
+                            _raise_after_authorization_commit_failure(exc)
+                        return AuthorizedZoteroWrite(
+                            run_dir=run_dir,
+                            authorization_path=authorization_path,
+                            authorization_dir=authorization_dir,
+                            authorization=authorization,
+                            authorization_digest=authorization_ref.sha256,
+                            write_token=write_token,
+                        )
             finally:
                 try:
                     remove_anchored_tree(

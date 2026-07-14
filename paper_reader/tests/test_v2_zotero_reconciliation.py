@@ -112,6 +112,31 @@ def _mutate_reconciliation_terminal(
                 raw=rewritten,
             )
         return
+    if case in {"authorization_field_ref", "children_field_ref"}:
+        source = reconciliation_path if reconciliation_path.exists() else record_path
+        payload = json.loads(source.read_bytes())
+        artifacts = {item["role"]: item for item in payload["artifacts"]}
+        field, wrong_role = {
+            "authorization_field_ref": (
+                "authorization",
+                "zotero_children_snapshot",
+            ),
+            "children_field_ref": (
+                "children_snapshot",
+                "authorization_snapshot",
+            ),
+        }[case]
+        payload[field] = copy.deepcopy(artifacts[wrong_role])
+        rewritten = canonical_json_bytes(payload)
+        record_path.write_bytes(rewritten)
+        if reconciliation_path.exists():
+            reconciliation_path.write_bytes(rewritten)
+            _rewrite_bound_terminal_ref(
+                reconciliation_path.parents[1],
+                role="zotero_reconciliation",
+                raw=rewritten,
+            )
+        return
     raise AssertionError(case)
 
 
@@ -396,6 +421,41 @@ def test_reconciliation_is_fixed_terminal_per_authorization(tmp_path: Path) -> N
     assert second.reconciliation.outcome == "not_found"
 
 
+def test_reconcile_does_not_bind_when_live_authorization_drifts_before_run_cas(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    authorization_path, _authorization = _authorized(tmp_path)
+    run_dir = authorization_path.parent.parent
+    run_before = (run_dir / "run.json").read_bytes()
+    provider = InMemoryZoteroProvider(children=[], notes={})
+    authorization_record = authorization_path.with_suffix("") / "record.json"
+    original_cas = module.cas_update_run
+    drifted = False
+
+    def drift_authorization_then_cas(loaded, value, **kwargs):
+        nonlocal drifted
+        if not drifted:
+            authorization_record.write_bytes(b"{}")
+            drifted = True
+        return original_cas(loaded, value, **kwargs)
+
+    monkeypatch.setattr(module, "cas_update_run", drift_authorization_then_cas)
+
+    with pytest.raises(module.ZoteroReconciliationError) as exc_info:
+        _reconcile(authorization_path, provider)
+
+    assert drifted is True
+    assert exc_info.value.code == "reconciliation_status_update_failed"
+    assert (run_dir / "run.json").read_bytes() == run_before
+    run = json.loads(run_before)
+    assert not any(
+        artifact["role"] == "zotero_reconciliation"
+        for artifact in run["artifacts"]
+    )
+
+
 _TERMINAL_SIDECAR_CASES = (
     "extra_file",
     "nested_directory",
@@ -403,6 +463,8 @@ _TERMINAL_SIDECAR_CASES = (
     "record_symlink",
     "record_hardlink",
     "role_filename_swap",
+    "authorization_field_ref",
+    "children_field_ref",
 )
 
 
@@ -420,21 +482,21 @@ def test_reconcile_replay_and_unbound_main_recovery_reject_tampered_closed_sidec
     if recovery_mode == "bound_replay":
         first = _reconcile(authorization_path, provider)
     else:
-        original_write = module.atomic_write_json
+        original_cas = module.cas_update_run
         failed = False
 
-        def fail_run_binding_once(path: Path, value, **kwargs):
+        def fail_run_binding_once(loaded, value, **kwargs):
             nonlocal failed
-            if Path(path).name == "run.json" and not failed:
+            if loaded.manifest_path.name == "run.json" and not failed:
                 failed = True
                 raise OSError("injected reconciliation run binding failure")
-            return original_write(path, value, **kwargs)
+            return original_cas(loaded, value, **kwargs)
 
-        monkeypatch.setattr(module, "atomic_write_json", fail_run_binding_once)
+        monkeypatch.setattr(module, "cas_update_run", fail_run_binding_once)
         with pytest.raises(module.ZoteroReconciliationError) as fault:
             _reconcile(authorization_path, provider)
         assert fault.value.code == "reconciliation_status_update_failed"
-        monkeypatch.setattr(module, "atomic_write_json", original_write)
+        monkeypatch.setattr(module, "cas_update_run", original_cas)
         reconciliation_path = (
             authorization_path.parent.parent
             / "reconciliations"
@@ -476,6 +538,8 @@ def test_reconcile_replay_and_unbound_main_recovery_reject_tampered_closed_sidec
         "record_symlink",
         "record_hardlink",
         "role_filename_swap",
+        "authorization_field_ref",
+        "children_field_ref",
     ],
 )
 def test_reconcile_sidecar_only_orphan_recovery_rejects_tampered_closed_sidecar(
@@ -486,18 +550,18 @@ def test_reconcile_sidecar_only_orphan_recovery_rejects_tampered_closed_sidecar(
     module = _module()
     authorization_path, authorization = _authorized(tmp_path)
     provider = InMemoryZoteroProvider(children=[], notes={})
-    original_write = module.atomic_write_json
+    original_cas = module.cas_update_run
 
-    def fail_run_binding(path: Path, value, **kwargs):
-        if Path(path).name == "run.json":
+    def fail_run_binding(loaded, value, **kwargs):
+        if loaded.manifest_path.name == "run.json":
             raise OSError("injected reconciliation run binding failure")
-        return original_write(path, value, **kwargs)
+        return original_cas(loaded, value, **kwargs)
 
-    monkeypatch.setattr(module, "atomic_write_json", fail_run_binding)
+    monkeypatch.setattr(module, "cas_update_run", fail_run_binding)
     with pytest.raises(module.ZoteroReconciliationError) as fault:
         _reconcile(authorization_path, provider)
     assert fault.value.code == "reconciliation_status_update_failed"
-    monkeypatch.setattr(module, "atomic_write_json", original_write)
+    monkeypatch.setattr(module, "cas_update_run", original_cas)
     reconciliation_path = (
         authorization_path.parent.parent
         / "reconciliations"
@@ -514,6 +578,154 @@ def test_reconcile_sidecar_only_orphan_recovery_rejects_tampered_closed_sidecar(
     class ProviderMustNotRun:
         def get_children(self, _parent_key: str):
             raise AssertionError("tampered terminal reconciliation reached provider")
+
+    with pytest.raises(module.ZoteroReconciliationError) as exc_info:
+        _reconcile(authorization_path, ProviderMustNotRun())
+
+    assert exc_info.value.code == "reconciliation_tampered"
+
+
+def test_reconcile_orphan_recovery_recomputes_outcome_from_immutable_snapshots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    authorization_path, authorization = _authorized(tmp_path)
+    located = _note_snapshot(authorization, requested_key="NOTE1")
+    readback = _note_snapshot(
+        authorization,
+        requested_key="NOTE1",
+        tags=[authorization.tags[0]],
+    )
+    provider = InMemoryZoteroProvider(
+        children=[located],
+        notes={"NOTE1": readback},
+    )
+    original_cas = module.cas_update_run
+    failed = False
+
+    def fail_run_binding_once(loaded, value, **kwargs):
+        nonlocal failed
+        if loaded.manifest_path.name == "run.json" and not failed:
+            failed = True
+            raise OSError("injected reconciliation run binding failure")
+        return original_cas(loaded, value, **kwargs)
+
+    monkeypatch.setattr(module, "cas_update_run", fail_run_binding_once)
+    with pytest.raises(module.ZoteroReconciliationError) as fault:
+        _reconcile(authorization_path, provider)
+    assert fault.value.code == "reconciliation_status_update_failed"
+    monkeypatch.setattr(module, "cas_update_run", original_cas)
+
+    reconciliation_path = (
+        authorization_path.parent.parent
+        / "reconciliations"
+        / f"{authorization.authorization_id}.json"
+    )
+    record_path = reconciliation_path.with_suffix("") / "record.json"
+    payload = json.loads(reconciliation_path.read_bytes())
+    assert payload["outcome"] == "blocked"
+    payload["outcome"] = "verified"
+    payload["gate"]["status"] = "passed"
+    payload["gate"]["blockers"] = []
+    forged = canonical_json_bytes(payload)
+    reconciliation_path.write_bytes(forged)
+    record_path.write_bytes(forged)
+
+    class ProviderMustNotRun:
+        def get_children(self, _parent_key: str):
+            raise AssertionError("orphan semantic validation reached provider")
+
+    with pytest.raises(module.ZoteroReconciliationError) as exc_info:
+        _reconcile(authorization_path, ProviderMustNotRun())
+
+    assert exc_info.value.code == "reconciliation_tampered"
+
+
+def test_reconcile_holds_terminal_main_until_run_binding_commits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    authorization_path, authorization = _authorized(tmp_path)
+    run_dir = authorization_path.parent.parent
+    reconciliation_path = (
+        run_dir / "reconciliations" / f"{authorization.authorization_id}.json"
+    )
+    provider = InMemoryZoteroProvider(children=[], notes={})
+    original_cas = module.cas_update_run
+    replaced = False
+
+    def replace_terminal_before_run_write(loaded, value, **kwargs):
+        nonlocal replaced
+        if not replaced:
+            reconciliation_path.rename(reconciliation_path.with_suffix(".detached"))
+            reconciliation_path.write_bytes(b"{}")
+            replaced = True
+        return original_cas(loaded, value, **kwargs)
+
+    monkeypatch.setattr(module, "cas_update_run", replace_terminal_before_run_write)
+
+    with pytest.raises(module.ZoteroReconciliationError):
+        _reconcile(authorization_path, provider)
+
+    assert replaced is True
+    run = json.loads((run_dir / "run.json").read_bytes())
+    assert not any(item["role"] == "zotero_reconciliation" for item in run["artifacts"])
+
+
+@pytest.mark.parametrize("inner_artifacts_case", ["empty", "duplicate"])
+def test_reconcile_replay_rejects_non_closed_inner_verification_artifacts(
+    inner_artifacts_case: str,
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    authorization_path, authorization = _authorized(tmp_path)
+    note = _note_snapshot(authorization, requested_key="NOTE1")
+    first = _reconcile(
+        authorization_path,
+        InMemoryZoteroProvider(children=[note], notes={"NOTE1": note}),
+    )
+    verification_path = first.reconciliation_dir / "verification.json"
+    verification_payload = json.loads(verification_path.read_bytes())
+    if inner_artifacts_case == "empty":
+        verification_payload["artifacts"] = []
+    else:
+        verification_payload["artifacts"] = [
+            verification_payload["authorization"],
+            verification_payload["authorization"],
+            verification_payload["note_snapshot"],
+            verification_payload["checks_snapshot"],
+        ]
+    verification_bytes = canonical_json_bytes(verification_payload)
+    verification_path.write_bytes(verification_bytes)
+
+    reconciliation_path = first.reconciliation_path
+    reconciliation_payload = json.loads(reconciliation_path.read_bytes())
+    updated_verification_ref = {
+        **reconciliation_payload["verification"],
+        "sha256": hashlib.sha256(verification_bytes).hexdigest(),
+        "size_bytes": len(verification_bytes),
+    }
+    reconciliation_payload["verification"] = updated_verification_ref
+    reconciliation_payload["artifacts"] = [
+        updated_verification_ref
+        if item["role"] == "reconciliation_verification"
+        else item
+        for item in reconciliation_payload["artifacts"]
+    ]
+    reconciliation_bytes = canonical_json_bytes(reconciliation_payload)
+    reconciliation_path.write_bytes(reconciliation_bytes)
+    (first.reconciliation_dir / "record.json").write_bytes(reconciliation_bytes)
+    _rewrite_bound_terminal_ref(
+        first.run_dir,
+        role="zotero_reconciliation",
+        raw=reconciliation_bytes,
+    )
+
+    class ProviderMustNotRun:
+        def get_children(self, _parent_key: str):
+            raise AssertionError("tampered reconciliation replay reached provider")
 
     with pytest.raises(module.ZoteroReconciliationError) as exc_info:
         _reconcile(authorization_path, ProviderMustNotRun())
@@ -674,17 +886,17 @@ def test_reconciliation_size_and_run_binding_faults_ignore_unbound_orphans(
     provider = InMemoryZoteroProvider(children=[], notes={})
     run_dir = authorization_path.parent.parent
     run_before = (run_dir / "run.json").read_bytes()
-    original_write = module.atomic_write_json
+    original_cas = module.cas_update_run
     failed = False
 
-    def fail_once(path: Path, value, **kwargs):
+    def fail_once(loaded, value, **kwargs):
         nonlocal failed
-        if Path(path).name == "run.json" and not failed:
+        if loaded.manifest_path.name == "run.json" and not failed:
             failed = True
             raise OSError("injected reconciliation run binding failure")
-        return original_write(path, value, **kwargs)
+        return original_cas(loaded, value, **kwargs)
 
-    monkeypatch.setattr(module, "atomic_write_json", fail_once)
+    monkeypatch.setattr(module, "cas_update_run", fail_once)
 
     with pytest.raises(Exception) as fault_error:
         _reconcile(authorization_path, provider)
@@ -706,3 +918,53 @@ def test_reconciliation_size_and_run_binding_faults_ignore_unbound_orphans(
     bound = [item for item in run["artifacts"] if item["role"] == "zotero_reconciliation"]
     assert len(bound) == 1
     assert run_dir / bound[0]["path"] == retry.reconciliation_path
+
+
+def test_reconciliation_orphan_recovery_does_not_bind_sidecar_drift_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    authorization_path, authorization = _authorized(tmp_path)
+    provider = InMemoryZoteroProvider(children=[], notes={})
+    run_dir = authorization_path.parent.parent
+    run_before = (run_dir / "run.json").read_bytes()
+    original_cas = module.cas_update_run
+    failed = False
+
+    def fail_binding_once(loaded, value, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("injected reconciliation run binding failure")
+        return original_cas(loaded, value, **kwargs)
+
+    monkeypatch.setattr(module, "cas_update_run", fail_binding_once)
+    with pytest.raises(Exception) as first_error:
+        _reconcile(authorization_path, provider)
+    assert getattr(first_error.value, "code", None) == "reconciliation_status_update_failed"
+    monkeypatch.setattr(module, "cas_update_run", original_cas)
+
+    reconciliation_dir = run_dir / "reconciliations" / authorization.authorization_id
+    original_validate = module._validate_reconciliation_record
+    drifted = False
+
+    def validate_then_drift(*args, **kwargs):
+        nonlocal drifted
+        result = original_validate(*args, **kwargs)
+        if not drifted:
+            (reconciliation_dir / "children.json").write_bytes(b"[{}]")
+            drifted = True
+        return result
+
+    monkeypatch.setattr(module, "_validate_reconciliation_record", validate_then_drift)
+    with pytest.raises(Exception) as retry_error:
+        _reconcile(authorization_path, provider)
+
+    assert drifted is True
+    assert getattr(retry_error.value, "code", None) == "reconciliation_status_update_failed"
+    assert (run_dir / "run.json").read_bytes() == run_before
+    run = json.loads((run_dir / "run.json").read_bytes())
+    assert not any(
+        item["role"] == "zotero_reconciliation" for item in run["artifacts"]
+    )

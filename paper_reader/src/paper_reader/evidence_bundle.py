@@ -40,9 +40,12 @@ from paper_reader.run_size import (
     projected_run_size,
 )
 from paper_reader.storage import (
+    HeldExactTreeGuard,
+    OwnedPublishedTree,
     atomic_publish_tree,
     atomic_write_bytes,
     atomic_write_json,
+    cas_update_run,
     canonical_json_bytes,
     create_anchored_directory,
     new_random_id,
@@ -617,6 +620,7 @@ def _prepare_verified_evidence_locked(
                 replacements={
                     loaded.manifest_path: canonical_json_bytes(updated_run),
                 },
+                retained_replacement_paths=(loaded.manifest_path,),
             )
             validate_directory_anchor(staging_anchor)
             current_size = next(
@@ -664,6 +668,7 @@ def _prepare_verified_evidence_locked(
                 replacements={
                     loaded.manifest_path: canonical_json_bytes(updated_run),
                 },
+                retained_replacement_paths=(loaded.manifest_path,),
             )
         except RunSizeLimitError as exc:
             raise EvidenceBundleError(
@@ -687,13 +692,23 @@ def _prepare_verified_evidence_locked(
             }
         )
         try:
-            atomic_publish_tree(
+            published = atomic_publish_tree(
                 staging,
                 destination,
                 anchor=loaded.run_directory_anchor,
                 expected_staging_anchor=staging_anchor,
                 expected_tree_snapshot=staging_snapshot,
+                hold_open_relative_file="evidence.json",
             )
+            if not isinstance(published, OwnedPublishedTree):
+                raise EvidenceBundleError(
+                    "evidence_publication_failed",
+                    "immutable evidence publication did not retain its held identity",
+                    data={
+                        "run_id": loaded.run.run_id,
+                        "evidence_dir": str(destination),
+                    },
+                )
         except Exception as exc:
             raise EvidenceBundleError(
                 "evidence_publication_failed",
@@ -702,11 +717,19 @@ def _prepare_verified_evidence_locked(
             ) from exc
         published_manifest = destination / "evidence.json"
         try:
-            atomic_write_json(
-                loaded.manifest_path,
-                updated_run,
-                anchor=loaded.run_directory_anchor,
-            )
+            with HeldExactTreeGuard(
+                published_tree=published,
+                expected_tree=staging_snapshot,
+                expected_held_bytes=canonical_json_bytes(manifest),
+                label="evidence bundle",
+            ) as published_guard:
+                published_guard.verify()
+                cas_update_run(
+                    loaded,
+                    updated_run,
+                    finalization_guards=(published_guard,),
+                )
+                published_guard.verify()
         except Exception as exc:
             raise EvidenceBundleError(
                 "evidence_status_update_failed",

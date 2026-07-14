@@ -734,24 +734,24 @@ def test_tampered_reservation_blocks_orphan_recovery_before_run_mutation(
 
     candidate_path, provider = _candidate_for_orphan(tmp_path)
     run_dir = candidate_path.parent.parent.parent
-    original_write = module.atomic_write_json
+    original_cas = module.cas_update_run
     failed = False
 
-    def fail_binding_once(path: Path, value, **kwargs):
+    def fail_binding_once(loaded, value, **kwargs):
         nonlocal failed
-        if Path(path).name == "run.json" and not failed:
+        if loaded.manifest_path.name == "run.json" and not failed:
             failed = True
             raise OSError("injected authorization run binding failure")
-        return original_write(path, value, **kwargs)
+        return original_cas(loaded, value, **kwargs)
 
-    monkeypatch.setattr(module, "atomic_write_json", fail_binding_once)
+    monkeypatch.setattr(module, "cas_update_run", fail_binding_once)
     with pytest.raises(Exception) as first_error:
         _authorize(candidate_path, provider, ttl_seconds=60)
     assert getattr(first_error.value, "code", None) == "authorization_status_update_failed"
     reservation_path = _reservation_paths(run_dir.parent.parent.parent)[0]
     reservation_path.write_bytes(b'{"schema_version":"tampered"}')
     run_before = (run_dir / "run.json").read_bytes()
-    monkeypatch.setattr(module, "atomic_write_json", original_write)
+    monkeypatch.setattr(module, "cas_update_run", original_cas)
 
     authorization_clock["now"] = NOW + timedelta(seconds=1)
     with pytest.raises(Exception) as retry_error:

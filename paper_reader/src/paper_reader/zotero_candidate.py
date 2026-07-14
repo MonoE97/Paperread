@@ -38,9 +38,12 @@ from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
+    HeldExactTreeGuard,
+    OwnedPublishedTree,
     atomic_publish_tree,
     atomic_write_bytes,
     atomic_write_json,
+    cas_update_run,
     canonical_json_bytes,
     create_anchored_directory,
     new_random_id,
@@ -173,7 +176,14 @@ def _note_child_view(snapshot: dict[str, Any]) -> tuple[str, str, str] | None:
     data = snapshot.get("data")
     if not isinstance(data, dict) or data.get("itemType") != "note":
         return None
-    key = str(snapshot.get("key") or data.get("key") or "").strip()
+    snapshot_key = str(snapshot.get("key") or "").strip()
+    data_key = str(data.get("key") or "").strip()
+    if snapshot_key and data_key and snapshot_key != data_key:
+        raise LocalPublicationError(
+            "invalid_live_children",
+            "live note child top-level and data keys disagree",
+        )
+    key = snapshot_key or data_key
     parent = str(data.get("parentItem", "")).strip()
     title, _headings = _parse_headings(str(data.get("note", "")))
     if not key:
@@ -566,6 +576,7 @@ def _build_zotero_candidate_locked(
                 max_bytes=V2_RESOURCE_POLICY.run_max_bytes,
                 staging_dir=staging,
                 replacements={loaded.manifest_path: canonical_json_bytes(updated_run)},
+                retained_replacement_paths=(loaded.manifest_path,),
             )
         except RunSizeLimitError as exc:
             raise LocalPublicationError(
@@ -577,24 +588,38 @@ def _build_zotero_candidate_locked(
             {**files, "candidate.json": candidate_bytes}
         )
         try:
-            atomic_publish_tree(
+            published = atomic_publish_tree(
                 staging,
                 candidate_dir,
                 anchor=loaded.run_directory_anchor,
                 expected_staging_anchor=staging_anchor,
                 expected_tree_snapshot=staging_snapshot,
+                hold_open_relative_file="candidate.json",
             )
+            if not isinstance(published, OwnedPublishedTree):
+                raise LocalPublicationError(
+                    "candidate_publication_failed",
+                    "immutable Zotero candidate publication did not retain its held identity",
+                )
         except Exception as exc:
             raise LocalPublicationError(
                 "candidate_publication_failed",
                 f"immutable Zotero candidate publication failed: {candidate_dir}: {exc}",
             ) from exc
         try:
-            atomic_write_json(
-                loaded.manifest_path,
-                updated_run,
-                anchor=loaded.run_directory_anchor,
-            )
+            with HeldExactTreeGuard(
+                published_tree=published,
+                expected_tree=staging_snapshot,
+                expected_held_bytes=candidate_bytes,
+                label="Zotero candidate",
+            ) as published_guard:
+                published_guard.verify()
+                cas_update_run(
+                    loaded,
+                    updated_run,
+                    finalization_guards=(published_guard,),
+                )
+                published_guard.verify()
         except Exception as exc:
             raise LocalPublicationError(
                 "candidate_status_update_failed",

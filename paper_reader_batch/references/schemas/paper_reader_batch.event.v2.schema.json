@@ -639,6 +639,51 @@
       "title": "RecoveredUncertainWrite",
       "type": "object"
     },
+    "RequestAbortedData": {
+      "additionalProperties": false,
+      "description": "Durable no-op journal marker for one rejected provisional request.",
+      "properties": {
+        "aborted_command": {
+          "minLength": 1,
+          "title": "Aborted Command",
+          "type": "string"
+        },
+        "aborted_request_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Aborted Request Fingerprint",
+          "type": "string"
+        },
+        "aborted_request_id": {
+          "title": "Aborted Request Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "request.aborted",
+          "default": "request.aborted",
+          "title": "Kind",
+          "type": "string"
+        },
+        "proposed_event_canonical_json": {
+          "minLength": 1,
+          "title": "Proposed Event Canonical Json",
+          "type": "string"
+        },
+        "proposed_event_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Proposed Event Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "aborted_request_id",
+        "aborted_command",
+        "aborted_request_fingerprint",
+        "proposed_event_sha256",
+        "proposed_event_canonical_json"
+      ],
+      "title": "RequestAbortedData",
+      "type": "object"
+    },
     "ResumedLocalPrepareLease": {
       "additionalProperties": false,
       "properties": {
@@ -1520,6 +1565,7 @@
           "local_prepare.lease_expired": "#/$defs/LeaseMutationData",
           "local_prepare.released": "#/$defs/LeaseMutationData",
           "local_prepare.renewed": "#/$defs/LeaseMutationData",
+          "request.aborted": "#/$defs/RequestAbortedData",
           "run.initialized": "#/$defs/RunInitializedData",
           "run.recovered": "#/$defs/RunRecoveredData",
           "worker.claimed": "#/$defs/ClaimedData",
@@ -1562,6 +1608,9 @@
         },
         {
           "$ref": "#/$defs/RunRecoveredData"
+        },
+        {
+          "$ref": "#/$defs/RequestAbortedData"
         },
         {
           "$ref": "#/$defs/WriteClaimedData"

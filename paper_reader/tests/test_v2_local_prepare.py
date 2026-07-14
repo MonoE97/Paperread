@@ -655,17 +655,17 @@ def test_prepare_run_update_fault_leaves_only_unbound_orphan_and_retry_is_safe(
     initialized = _invoke(["run", "init-local", str(source)])
     run_dir = Path(_result_payload(initialized)["data"]["run_dir"])
     run_before = (run_dir / "run.json").read_bytes()
-    original_write = evidence_bundle.atomic_write_json
+    original_cas = evidence_bundle.cas_update_run
     failed = False
 
-    def fail_once(path: Path, value, **kwargs):
+    def fail_once(loaded, value, **kwargs):
         nonlocal failed
-        if Path(path).name == "run.json" and not failed:
+        if loaded.manifest_path.name == "run.json" and not failed:
             failed = True
             raise OSError("injected failure after evidence tree publication")
-        return original_write(path, value, **kwargs)
+        return original_cas(loaded, value, **kwargs)
 
-    monkeypatch.setattr(evidence_bundle, "atomic_write_json", fail_once)
+    monkeypatch.setattr(evidence_bundle, "cas_update_run", fail_once)
 
     first = _invoke(["run", "prepare", str(run_dir), "--figure-limit", "0"])
 

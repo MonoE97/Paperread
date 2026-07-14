@@ -53,6 +53,80 @@ def test_uuid_random_ids_and_tokens_are_random_and_well_formed() -> None:
     assert storage.random_token() != storage.random_token()
 
 
+@pytest.mark.parametrize("owner_kind", ["file", "directory"])
+def test_owned_descriptor_is_detached_before_close_error(
+    owner_kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _storage_module()
+    if owner_kind == "file":
+        owner = storage.OwnedPublishedFile(
+            path=tmp_path / "artifact.json",
+            descriptor=101,
+            identity=(1, 2, 3, 4, 5, 1),
+            content_sha256="0" * 64,
+        )
+    else:
+        owner = storage.OwnedDirectoryAnchor(
+            path=tmp_path / "run",
+            descriptor=101,
+            device=1,
+            inode=2,
+        )
+
+    def fail_close(descriptor: int) -> None:
+        assert descriptor == 101
+        raise OSError("injected close failure")
+
+    monkeypatch.setattr(storage.os, "close", fail_close)
+
+    with pytest.raises(OSError, match="injected close failure"):
+        owner.close()
+
+    assert owner.descriptor == -1
+
+
+def test_owned_published_tree_closes_directory_when_file_close_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _storage_module()
+    owned_file = storage.OwnedPublishedFile(
+        path=tmp_path / "run" / "run.json",
+        descriptor=101,
+        identity=(1, 2, 3, 4, 5, 1),
+        content_sha256="0" * 64,
+    )
+    directory = storage.OwnedDirectoryAnchor(
+        path=tmp_path / "run",
+        descriptor=202,
+        device=1,
+        inode=2,
+    )
+    tree = storage.OwnedPublishedTree(
+        path=directory.path,
+        directory=directory,
+        held_file=owned_file,
+        held_relative_path="run.json",
+    )
+    closed: list[int] = []
+
+    def record_close(descriptor: int) -> None:
+        closed.append(descriptor)
+        if descriptor == 101:
+            raise OSError("injected file close failure")
+
+    monkeypatch.setattr(storage.os, "close", record_close)
+
+    with pytest.raises(OSError, match="injected file close failure"):
+        tree.close()
+
+    assert closed == [101, 202]
+    assert owned_file.descriptor == -1
+    assert directory.descriptor == -1
+
+
 @pytest.mark.parametrize(
     "value",
     ["", ".", "../note.md", "evidence/../note.md", "/tmp/note.md", "C:\\note.md", "a//b"],
@@ -115,6 +189,63 @@ def test_source_fingerprint_resolves_symlink_and_binds_bytes_and_inode(tmp_path:
     assert storage.source_matches_fingerprint(source, fingerprint) is True
     source.write_bytes(b"changed")
     assert storage.source_matches_fingerprint(source, fingerprint) is False
+
+
+def test_resolved_source_fingerprint_rejects_named_path_replacement_during_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _storage_module()
+    source = tmp_path / "paper.pdf"
+    detached = tmp_path / "detached.pdf"
+    original = b"a" * (1024 * 1024 + 17)
+    replacement = b"b" * len(original)
+    source.write_bytes(original)
+    original_pread = storage.os.pread
+    replaced = False
+
+    def racing_pread(descriptor: int, size: int, offset: int) -> bytes:
+        nonlocal replaced
+        chunk = original_pread(descriptor, size, offset)
+        if chunk and not replaced:
+            source.rename(detached)
+            replacement_fd = os.open(
+                source,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o644,
+            )
+            try:
+                os.write(replacement_fd, replacement)
+            finally:
+                os.close(replacement_fd)
+            replaced = True
+        return chunk
+
+    monkeypatch.setattr(storage.os, "pread", racing_pread)
+
+    with pytest.raises((RuntimeError, ValueError), match="source.*changed|stable regular"):
+        storage.fingerprint_resolved_source(source)
+
+    assert replaced is True
+    assert source.read_bytes() == replacement
+
+
+def test_resolved_source_fingerprint_rejects_oversize_before_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _storage_module()
+    source = tmp_path / "oversized.pdf"
+    with source.open("wb") as handle:
+        handle.truncate(storage.V2_RESOURCE_POLICY.local_pdf_max_bytes + 1)
+
+    def forbidden_pread(*_args, **_kwargs):
+        raise AssertionError("oversized source reached content read")
+
+    monkeypatch.setattr(storage.os, "pread", forbidden_pread)
+
+    with pytest.raises(ValueError, match="exceeds"):
+        storage.fingerprint_resolved_source(source)
 
 
 def test_alias_detection_catches_resolved_symlink_and_hardlink_aliases(tmp_path: Path) -> None:

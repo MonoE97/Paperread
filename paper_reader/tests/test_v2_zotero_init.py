@@ -4,6 +4,8 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import multiprocessing
+import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -17,6 +19,21 @@ from paper_reader.public_cli import app
 
 
 FIXTURE_PDF = Path(__file__).parent / "fixtures" / "minimal.pdf"
+
+
+def _initialize_fifo_in_child(bundle_path: str, skill_root: str, result_queue) -> None:
+    import paper_reader.zotero_lifecycle as lifecycle
+
+    try:
+        lifecycle.initialize_zotero_run(
+            Path(bundle_path),
+            expected_item_key="PARENT1",
+            skill_root=Path(skill_root),
+        )
+    except lifecycle.ZoteroLifecycleError as exc:
+        result_queue.put(exc.code)
+    else:
+        result_queue.put("unexpected_success")
 
 
 def _bundle(
@@ -150,6 +167,82 @@ def test_init_zotero_preserves_raw_bytes_and_binds_normalized_source_and_pdf(
         source["raw_discovery_bundle"],
         source["normalized_source"],
     ]
+
+
+def test_init_zotero_rehashes_locked_pdf_before_allocating_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.zotero_lifecycle as module
+
+    pdf_path = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, pdf_path)
+    original_bytes = pdf_path.read_bytes()
+    replacement = bytes([original_bytes[0] ^ 1]) + original_bytes[1:]
+    bundle_path = tmp_path / "discovery.json"
+    bundle_path.write_text(json.dumps(_bundle(pdf_path)), encoding="utf-8")
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+    original_build = module._build_validated_run
+    changed = False
+
+    def build_then_mutate(*args, **kwargs):
+        nonlocal changed
+        result = original_build(*args, **kwargs)
+        pdf_path.write_bytes(replacement)
+        changed = True
+        return result
+
+    monkeypatch.setattr(module, "_build_validated_run", build_then_mutate)
+
+    with pytest.raises(module.ZoteroLifecycleError) as exc_info:
+        module.initialize_zotero_run(
+            bundle_path,
+            expected_item_key="PARENT1",
+            skill_root=skill_root,
+        )
+
+    assert changed is True
+    assert exc_info.value.code == "zotero_pdf_unavailable"
+    assert not (skill_root / "runs").exists()
+
+
+def test_init_zotero_maps_prepublish_source_drift_to_pdf_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.zotero_lifecycle as module
+
+    pdf_path = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, pdf_path)
+    original_bytes = pdf_path.read_bytes()
+    replacement = bytes([original_bytes[0] ^ 1]) + original_bytes[1:]
+    bundle_path = tmp_path / "discovery.json"
+    bundle_path.write_text(json.dumps(_bundle(pdf_path)), encoding="utf-8")
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+    original_stage = module._stage_run
+    changed = False
+
+    def stage_then_mutate(*args, **kwargs):
+        nonlocal changed
+        result = original_stage(*args, **kwargs)
+        pdf_path.write_bytes(replacement)
+        changed = True
+        return result
+
+    monkeypatch.setattr(module, "_stage_run", stage_then_mutate)
+
+    with pytest.raises(module.ZoteroLifecycleError) as exc_info:
+        module.initialize_zotero_run(
+            bundle_path,
+            expected_item_key="PARENT1",
+            skill_root=skill_root,
+        )
+
+    assert changed is True
+    assert exc_info.value.code == "zotero_pdf_unavailable"
+    assert not tuple((skill_root / "runs").rglob("run.json"))
 
 
 def test_init_zotero_accepts_raw_mcp_selected_item_and_allocates_versioned_runs(
@@ -481,3 +574,89 @@ def test_init_zotero_run_size_gate_and_atomic_fault_leave_no_partial_run(
     assert fault_error.value.code == "initialization_failed"
     assert not any(path.is_file() for path in fault_root.rglob("*"))
     assert not any(path.name.endswith(".staging") for path in fault_root.rglob("*"))
+
+
+@pytest.mark.parametrize("alias_kind", ["symlink", "hardlink"])
+def test_init_zotero_rejects_discovery_bundle_alias_before_root_mutation(
+    alias_kind: str,
+    tmp_path: Path,
+) -> None:
+    import paper_reader.zotero_lifecycle as lifecycle
+
+    pdf_path = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, pdf_path)
+    original = tmp_path / "discovery-original.json"
+    original.write_text(json.dumps(_bundle(pdf_path)), encoding="utf-8")
+    alias = tmp_path / "discovery.json"
+    if alias_kind == "symlink":
+        alias.symlink_to(original)
+    else:
+        os.link(original, alias)
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+
+    with pytest.raises(lifecycle.ZoteroLifecycleError) as exc_info:
+        _initialize(alias, "PARENT1", skill_root)
+
+    assert exc_info.value.code == "discovery_bundle_unreadable"
+    assert not (skill_root / "runs").exists()
+
+
+def test_discovery_bundle_reader_enforces_cumulative_limit_even_if_opened_file_grows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.zotero_lifecycle as lifecycle
+
+    bundle_path = tmp_path / "discovery.json"
+    bundle_path.write_bytes(b"{}")
+    chunks = iter([b"1234", b"5"])
+    monkeypatch.setattr(lifecycle.os, "read", lambda _fd, _size: next(chunks, b""))
+
+    with pytest.raises(lifecycle.ZoteroLifecycleError) as exc_info:
+        lifecycle._read_stable_bundle_bytes(bundle_path, max_bytes=4)
+
+    assert exc_info.value.code == "run_size_limit_exceeded"
+    assert exc_info.value.data == {"run_size_bytes": 5, "max_bytes": 4}
+
+
+def test_init_zotero_rejects_fifo_without_blocking_or_mutating_root(tmp_path: Path) -> None:
+    fifo_path = tmp_path / "discovery.fifo"
+    os.mkfifo(fifo_path)
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+    context = multiprocessing.get_context("fork")
+    result_queue = context.Queue()
+    process = context.Process(
+        target=_initialize_fifo_in_child,
+        args=(str(fifo_path), str(skill_root), result_queue),
+    )
+
+    process.start()
+    process.join(timeout=2)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=2)
+        pytest.fail("discovery FIFO read blocked instead of failing closed")
+
+    assert process.exitcode == 0
+    assert result_queue.get(timeout=1) == "discovery_bundle_unreadable"
+    assert not (skill_root / "runs").exists()
+
+
+@pytest.mark.skipif(not Path("/dev/zero").exists(), reason="requires POSIX /dev/zero")
+def test_init_zotero_rejects_character_device_before_root_mutation(tmp_path: Path) -> None:
+    import paper_reader.zotero_lifecycle as lifecycle
+
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+
+    with pytest.raises(lifecycle.ZoteroLifecycleError) as exc_info:
+        lifecycle.initialize_zotero_run(
+            Path("/dev/zero"),
+            expected_item_key="PARENT1",
+            skill_root=skill_root,
+        )
+
+    assert exc_info.value.code == "discovery_bundle_unreadable"
+    assert not (skill_root / "runs").exists()

@@ -10,11 +10,16 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from paper_reader.candidate_integrity import LocalPublicationError
 from paper_reader.contracts import PaperReaderCandidate, PaperReaderCommandResult
 from paper_reader.note import render_note_html
 from paper_reader.note_hash import canonicalize_note_html_for_hash, note_html_sha256
 from paper_reader.public_cli import app
-from paper_reader.zotero_candidate import _markdown_literal_note_title, _rewrite_markdown_h1
+from paper_reader.zotero_candidate import (
+    _markdown_literal_note_title,
+    _note_child_view,
+    _rewrite_markdown_h1,
+)
 from paper_reader.zotero_live import _parse_headings
 
 from test_v2_review_package import _invoke, _result_payload, _write_summary_and_review
@@ -64,6 +69,16 @@ def _note(key: str, title: str, *, body: str = "existing body") -> dict[str, obj
             "dateModified": "2026-07-10T00:00:00Z",
         },
     }
+
+
+def test_note_child_view_rejects_conflicting_top_and_data_keys() -> None:
+    child = _note("NOTE1", "Existing note")
+    child["data"]["key"] = "NOTE2"
+
+    with pytest.raises(LocalPublicationError) as exc_info:
+        _note_child_view(child)
+
+    assert exc_info.value.code == "invalid_live_children"
 
 
 class InMemoryZoteroProvider:
@@ -416,17 +431,17 @@ def test_zotero_candidate_run_binding_fault_leaves_orphan_and_retry_binds_new_tr
     run_dir = _sealed_zotero_run(tmp_path)
     provider = InMemoryZoteroProvider()
     run_before = (run_dir / "run.json").read_bytes()
-    original_write = module.atomic_write_json
+    original_cas = module.cas_update_run
     failed = False
 
-    def fail_once(path: Path, value, **kwargs):
+    def fail_once(loaded, value, **kwargs):
         nonlocal failed
-        if Path(path).name == "run.json" and not failed:
+        if loaded.manifest_path.name == "run.json" and not failed:
             failed = True
             raise OSError("injected Zotero candidate run binding failure")
-        return original_write(path, value, **kwargs)
+        return original_cas(loaded, value, **kwargs)
 
-    monkeypatch.setattr(module, "atomic_write_json", fail_once)
+    monkeypatch.setattr(module, "cas_update_run", fail_once)
 
     with pytest.raises(Exception) as fault_error:
         _build(run_dir, provider)

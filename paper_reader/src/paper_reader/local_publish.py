@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import stat
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -24,9 +25,15 @@ from paper_reader.contracts import (
     LocalPublicationTarget,
     LocalSourceIdentity,
     PaperReaderCandidate,
+    PaperReaderReviewPackage,
     PaperReaderRun,
     ZoteroPublicationTarget,
     ZoteroSourceIdentity,
+)
+from paper_reader.evidence_manifest import (
+    BoundEvidence,
+    EvidenceManifestError,
+    load_bound_evidence,
 )
 from paper_reader.note_hash import canonicalize_note_html_for_hash, note_html_sha256
 from paper_reader.raw_schema import require_raw_schema_version
@@ -34,16 +41,26 @@ from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import ExpectedRunArtifact, locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
 from paper_reader.storage import (
+    HeldResolvedSourceGuard,
+    ImmutableTreeSnapshot,
+    OwnedDirectoryAnchor,
+    OwnedPublishedFile,
     PublishConflictError,
     TreeSnapshotLimitError,
     UnsafeStoragePathError,
     anchored_entry_exists,
     atomic_write_json,
+    cas_update_run,
     canonical_json_bytes,
+    open_anchored_regular_file,
+    open_anchored_directory,
+    open_resolved_source_guard,
     publish_bytes_no_replace,
     read_anchored_bytes,
     safe_relative_artifact_path,
     snapshot_anchored_tree,
+    snapshot_directory_fd,
+    stat_anchored_entry,
     tree_snapshot_from_hashes,
     validate_directory_anchor,
 )
@@ -54,6 +71,24 @@ from paper_reader.v2_loader import (
     _load_v2_run_from_anchor,
     load_v2_run,
 )
+
+
+_BASE_CANDIDATE_MEMBER_BY_ROLE = {
+    "run_snapshot": "run.json",
+    "source_snapshot": "source.json",
+    "evidence_manifest_snapshot": "evidence.json",
+    "summary_snapshot": "summary.json",
+    "review_snapshot": "review.json",
+    "review_package_snapshot": "review-package.json",
+    "review_validation": "validation.json",
+    "note_markdown": "note.md",
+    "note_html": "note.html",
+}
+_ZOTERO_CANDIDATE_MEMBER_BY_ROLE = {
+    "raw_discovery_bundle_snapshot": "discovery.raw.json",
+    "zotero_parent_snapshot": "parent.json",
+    "zotero_children_snapshot": "children.json",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +110,210 @@ class LocalCandidatePublicationPreflight:
     candidate_path: Path
     candidate_bytes: bytes
     candidate_digest: str
+
+
+@dataclass(slots=True)
+class _CandidateTreeGuard:
+    anchor: OwnedDirectoryAnchor
+    expected: ImmutableTreeSnapshot
+    failure_code: str = "candidate_tampered"
+    label: str = "candidate tree"
+
+    def close(self) -> None:
+        self.anchor.close()
+
+    def __enter__(self) -> _CandidateTreeGuard:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+    def verify(self) -> None:
+        try:
+            validate_directory_anchor(self.anchor)
+            observed = snapshot_directory_fd(
+                self.anchor.descriptor,
+                max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+                max_total_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+                max_members=V2_RESOURCE_POLICY.artifact_tree_max_members,
+                max_depth=V2_RESOURCE_POLICY.artifact_tree_max_depth,
+            )
+            validate_directory_anchor(self.anchor)
+        except (OSError, ValueError) as exc:
+            raise LocalPublicationError(
+                self.failure_code,
+                f"{self.label} identity became uncertain: {exc}",
+            ) from exc
+        if observed != self.expected:
+            raise LocalPublicationError(
+                self.failure_code,
+                f"{self.label} changed during local publication",
+            )
+
+
+def _open_original_evidence_tree_guard(
+    loaded: LoadedRun,
+    evidence: BoundEvidence,
+) -> _CandidateTreeGuard:
+    run_anchor = loaded.run_directory_anchor
+    if run_anchor is None:
+        raise LocalPublicationError(
+            "run_directory_changed",
+            "original evidence guard requires a locked run directory anchor",
+        )
+    bundle_dir = evidence.manifest_path.parent
+    members = {
+        evidence.manifest_path.relative_to(bundle_dir).as_posix(): (
+            len(evidence.manifest_bytes),
+            hashlib.sha256(evidence.manifest_bytes).hexdigest(),
+        )
+    }
+    for artifacts in evidence.artifacts_by_role.values():
+        for artifact in artifacts:
+            relative = artifact.path.relative_to(bundle_dir).as_posix()
+            if relative in members:
+                raise LocalPublicationError(
+                    "evidence_artifact_hash_mismatch",
+                    "original evidence bundle contains duplicate member paths",
+                )
+            members[relative] = (
+                len(artifact.raw_bytes),
+                hashlib.sha256(artifact.raw_bytes).hexdigest(),
+            )
+    try:
+        expected = tree_snapshot_from_hashes(members)
+        anchor = open_anchored_directory(run_anchor, bundle_dir)
+    except (OSError, ValueError) as exc:
+        raise LocalPublicationError(
+            "evidence_artifact_hash_mismatch",
+            f"original evidence bundle cannot be held safely: {exc}",
+        ) from exc
+    guard = _CandidateTreeGuard(
+        anchor=anchor,
+        expected=expected,
+        failure_code="evidence_artifact_hash_mismatch",
+        label="original evidence bundle",
+    )
+    try:
+        guard.verify()
+    except BaseException:
+        guard.close()
+        raise
+    return guard
+
+
+def _verify_held_source(guard: HeldResolvedSourceGuard) -> None:
+    try:
+        guard.verify()
+    except (OSError, ValueError) as exc:
+        raise LocalPublicationError(
+            "source_changed",
+            f"local PDF source changed during publication: {exc}",
+        ) from exc
+
+
+@dataclass(slots=True)
+class _CommittedFileGuard:
+    path: Path
+    anchor: DirectoryAnchor
+    descriptor: int
+    identity: tuple[int, int, int, int, int, int]
+    expected: bytes
+    expected_sha256: str
+    failure_code: str
+    anchor_failure_code: str
+    label: str
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+    def __enter__(self) -> _CommittedFileGuard:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+    def verify(self) -> None:
+        try:
+            validate_directory_anchor(self.anchor)
+        except UnsafeStoragePathError as exc:
+            raise LocalPublicationError(
+                self.anchor_failure_code,
+                f"{self.label} anchor identity became uncertain: {self.path}: {exc}",
+                data={"artifact_path": str(self.path)},
+            ) from exc
+        try:
+            opened_before = os.fstat(self.descriptor)
+            named_before = stat_anchored_entry(self.anchor, self.path)
+            chunks: list[bytes] = []
+            offset = 0
+            limit = len(self.expected)
+            while offset <= limit:
+                chunk = os.pread(
+                    self.descriptor,
+                    min(1024 * 1024, limit - offset + 1),
+                    offset,
+                )
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                offset += len(chunk)
+                if offset > limit:
+                    break
+            opened_after = os.fstat(self.descriptor)
+            named_after = stat_anchored_entry(self.anchor, self.path)
+        except (OSError, UnsafeStoragePathError) as exc:
+            try:
+                validate_directory_anchor(self.anchor)
+            except UnsafeStoragePathError as anchor_exc:
+                raise LocalPublicationError(
+                    self.anchor_failure_code,
+                    f"{self.label} anchor changed during finalization: "
+                    f"{self.path}: {anchor_exc}",
+                    data={"artifact_path": str(self.path)},
+                ) from anchor_exc
+            raise LocalPublicationError(
+                self.failure_code,
+                f"committed {self.label} identity became uncertain: {self.path}: {exc}",
+                data={"artifact_path": str(self.path)},
+            ) from exc
+        try:
+            validate_directory_anchor(self.anchor)
+        except UnsafeStoragePathError as exc:
+            raise LocalPublicationError(
+                self.anchor_failure_code,
+                f"{self.label} anchor changed during finalization: {self.path}: {exc}",
+                data={"artifact_path": str(self.path)},
+            ) from exc
+        identities = {
+            (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+                metadata.st_nlink,
+            )
+            for metadata in (opened_before, named_before, opened_after, named_after)
+        }
+        raw = b"".join(chunks)
+        if (
+            identities != {self.identity}
+            or not all(
+                stat.S_ISREG(metadata.st_mode)
+                for metadata in (opened_before, named_before, opened_after, named_after)
+            )
+            or self.identity[5] != 1
+            or raw != self.expected
+            or hashlib.sha256(raw).hexdigest() != self.expected_sha256
+        ):
+            raise LocalPublicationError(
+                self.failure_code,
+                f"committed {self.label} changed before publication finalized: {self.path}",
+                data={"artifact_path": str(self.path)},
+            )
 
 
 def _preflight_review_package_snapshot_schema(
@@ -121,6 +360,43 @@ def _preflight_review_package_snapshot_schema(
         artifact_path=package_path,
     )
     return package_ref, package_path, package_bytes
+
+
+def revalidate_candidate_original_evidence(
+    loaded: LoadedRun,
+    candidate: PaperReaderCandidate,
+    verified: dict[str, tuple[tuple[Path, bytes], ...]],
+) -> BoundEvidence:
+    review_package_path, review_package_bytes = verified["review_package_snapshot"][0]
+    require_raw_schema_version(
+        review_package_bytes,
+        expected="paper_reader.review-package.v2",
+        artifact_path=review_package_path,
+    )
+    try:
+        review_package = PaperReaderReviewPackage.model_validate_json(
+            review_package_bytes
+        )
+    except ValidationError as exc:
+        raise LocalPublicationError(
+            "candidate_tampered",
+            f"strict review package snapshot validation failed: {exc}",
+        ) from exc
+    _evidence_path, evidence_bytes = verified["evidence_manifest_snapshot"][0]
+    if (
+        canonical_json_bytes(review_package) != review_package_bytes
+        or review_package.run_id != candidate.run_id
+        or hashlib.sha256(evidence_bytes).hexdigest()
+        != review_package.evidence_digest
+    ):
+        raise LocalPublicationError(
+            "candidate_tampered",
+            "candidate review package/evidence snapshot binding mismatch",
+        )
+    try:
+        return load_bound_evidence(loaded, review_package.evidence_digest)
+    except EvidenceManifestError as exc:
+        raise LocalPublicationError(exc.code, str(exc)) from exc
 
 
 def _load_candidate(
@@ -200,6 +476,11 @@ def _load_candidate(
         raise LocalPublicationError("candidate_tampered", f"strict candidate validation failed: {exc}") from exc
     if canonical_json_bytes(candidate) != raw:
         raise LocalPublicationError("candidate_tampered", "candidate.json is not canonical JSON")
+    if candidate_dir != run_dir / "candidates" / candidate.candidate_id:
+        raise LocalPublicationError(
+            "candidate_tampered",
+            "candidate directory must be candidates/<candidate_id>",
+        )
     _preflight_review_package_snapshot_schema(
         run_dir,
         candidate_dir,
@@ -226,6 +507,11 @@ def _load_candidate(
         raise LocalPublicationError("not_implemented", "local publish accepts only local candidates")
 
     verified: dict[str, list[tuple[Path, bytes]]] = {}
+    expected_member_by_role = dict(_BASE_CANDIDATE_MEMBER_BY_ROLE)
+    if isinstance(candidate.source, ZoteroSourceIdentity) and isinstance(
+        candidate.target, ZoteroPublicationTarget
+    ):
+        expected_member_by_role.update(_ZOTERO_CANDIDATE_MEMBER_BY_ROLE)
     expected_members = {
         "candidate.json": (len(raw), hashlib.sha256(raw).hexdigest()),
     }
@@ -241,6 +527,12 @@ def _load_candidate(
         if not path.is_relative_to(candidate_dir):
             raise LocalPublicationError("candidate_tampered", "candidate artifact escapes its tree")
         relative_member = path.relative_to(candidate_dir).as_posix()
+        expected_member = expected_member_by_role.get(artifact.role)
+        if expected_member is None or relative_member != expected_member:
+            raise LocalPublicationError(
+                "candidate_tampered",
+                "candidate artifact role does not use its fixed sidecar path",
+            )
         if relative_member in expected_members:
             raise LocalPublicationError(
                 "candidate_tampered",
@@ -248,36 +540,16 @@ def _load_candidate(
             )
         expected_members[relative_member] = (artifact.size_bytes, artifact.sha256)
         verified.setdefault(artifact.role, []).append((path, content))
-    required = {
-        "run_snapshot",
-        "source_snapshot",
-        "evidence_manifest_snapshot",
-        "summary_snapshot",
-        "review_snapshot",
-        "review_package_snapshot",
-        "review_validation",
-        "note_markdown",
-        "note_html",
-    }
-    if isinstance(candidate.source, ZoteroSourceIdentity) and isinstance(
-        candidate.target, ZoteroPublicationTarget
+    if set(verified) != set(expected_member_by_role) or any(
+        len(items) != 1 for items in verified.values()
     ):
-        required.update(
-            {
-                "raw_discovery_bundle_snapshot",
-                "zotero_parent_snapshot",
-                "zotero_children_snapshot",
-            }
-        )
-    if any(len(verified.get(role, [])) != 1 for role in required):
         raise LocalPublicationError("candidate_tampered", "candidate artifact membership is incomplete")
     if candidate.evidence_manifest not in candidate.artifacts or candidate.sealed_review not in candidate.artifacts:
         raise LocalPublicationError("candidate_tampered", "candidate gate refs are not artifact members")
-    review_package_path, review_package_bytes = verified["review_package_snapshot"][0]
-    require_raw_schema_version(
-        review_package_bytes,
-        expected="paper_reader.review-package.v2",
-        artifact_path=review_package_path,
+    revalidate_candidate_original_evidence(
+        loaded,
+        candidate,
+        {role: tuple(items) for role, items in verified.items()},
     )
     if isinstance(candidate.target, LocalPublicationTarget):
         _note_path, note_bytes = verified["note_markdown"][0]
@@ -500,10 +772,38 @@ def _read_stable_regular_file(
             f"publication path changed while it was verified: {path}: {exc}",
         ) from exc
     identities = {
-        (before_path.st_dev, before_path.st_ino, before_path.st_size, before_path.st_mtime_ns, before_path.st_nlink),
-        (before_fd.st_dev, before_fd.st_ino, before_fd.st_size, before_fd.st_mtime_ns, before_fd.st_nlink),
-        (after_fd.st_dev, after_fd.st_ino, after_fd.st_size, after_fd.st_mtime_ns, after_fd.st_nlink),
-        (after_path.st_dev, after_path.st_ino, after_path.st_size, after_path.st_mtime_ns, after_path.st_nlink),
+        (
+            before_path.st_dev,
+            before_path.st_ino,
+            before_path.st_size,
+            before_path.st_mtime_ns,
+            before_path.st_ctime_ns,
+            before_path.st_nlink,
+        ),
+        (
+            before_fd.st_dev,
+            before_fd.st_ino,
+            before_fd.st_size,
+            before_fd.st_mtime_ns,
+            before_fd.st_ctime_ns,
+            before_fd.st_nlink,
+        ),
+        (
+            after_fd.st_dev,
+            after_fd.st_ino,
+            after_fd.st_size,
+            after_fd.st_mtime_ns,
+            after_fd.st_ctime_ns,
+            after_fd.st_nlink,
+        ),
+        (
+            after_path.st_dev,
+            after_path.st_ino,
+            after_path.st_size,
+            after_path.st_mtime_ns,
+            after_path.st_ctime_ns,
+            after_path.st_nlink,
+        ),
     }
     if (
         len(identities) != 1
@@ -517,33 +817,101 @@ def _read_stable_regular_file(
     return raw
 
 
-def _verify_exact_target(
-    target_path: Path,
+def _guard_committed_file(
+    path: Path,
     expected: bytes,
     expected_sha256: str,
     *,
     anchor: DirectoryAnchor,
-) -> bool:
-    if not anchored_entry_exists(anchor, target_path):
-        return False
-    raw = _read_stable_regular_file(
-        target_path,
-        conflict_code="publish_conflict",
-        anchor=anchor,
-        expected_size=len(expected),
-        max_bytes=len(expected),
-    )
-    if (
-        len(raw) != len(expected)
-        or hashlib.sha256(raw).hexdigest() != expected_sha256
-        or raw != expected
-    ):
-        raise LocalPublicationError(
-            "publish_conflict",
-            f"fixed local target contains bytes from another publication: {target_path}",
-            data={"target_path": str(target_path)},
+    failure_code: str,
+    anchor_failure_code: str,
+    label: str,
+    missing_ok: bool = False,
+) -> _CommittedFileGuard | None:
+    try:
+        owned = open_anchored_regular_file(
+            anchor,
+            path,
+            expected_size=len(expected),
         )
-    return True
+    except FileNotFoundError as exc:
+        if missing_ok:
+            try:
+                validate_directory_anchor(anchor)
+            except UnsafeStoragePathError as anchor_exc:
+                raise LocalPublicationError(
+                    anchor_failure_code,
+                    f"committed {label} anchor changed: {path}: {anchor_exc}",
+                    data={"artifact_path": str(path)},
+                ) from anchor_exc
+            return None
+        raise LocalPublicationError(
+            failure_code,
+            f"committed {label} disappeared before finalization: {path}",
+            data={"artifact_path": str(path)},
+        ) from exc
+    except (OSError, UnsafeStoragePathError) as exc:
+        try:
+            validate_directory_anchor(anchor)
+        except UnsafeStoragePathError as anchor_exc:
+            raise LocalPublicationError(
+                anchor_failure_code,
+                f"committed {label} anchor changed: {path}: {anchor_exc}",
+                data={"artifact_path": str(path)},
+            ) from anchor_exc
+        raise LocalPublicationError(
+            failure_code,
+            f"committed {label} cannot be held for finalization: {path}: {exc}",
+            data={"artifact_path": str(path)},
+        ) from exc
+    return _guard_storage_published_file(
+        owned,
+        path,
+        expected,
+        expected_sha256,
+        anchor=anchor,
+        failure_code=failure_code,
+        anchor_failure_code=anchor_failure_code,
+        label=label,
+    )
+
+
+def _guard_storage_published_file(
+    published: OwnedPublishedFile,
+    path: Path,
+    expected: bytes,
+    expected_sha256: str,
+    *,
+    anchor: DirectoryAnchor,
+    failure_code: str,
+    anchor_failure_code: str,
+    label: str,
+) -> _CommittedFileGuard:
+    if Path(os.path.abspath(published.path)) != Path(os.path.abspath(path)):
+        published.close()
+        raise LocalPublicationError(
+            failure_code,
+            f"storage publication returned a handle for a different {label}",
+            data={"artifact_path": str(path)},
+        )
+    descriptor = published.detach_descriptor()
+    guard = _CommittedFileGuard(
+        path=path,
+        anchor=anchor,
+        descriptor=descriptor,
+        identity=published.identity,
+        expected=expected,
+        expected_sha256=expected_sha256,
+        failure_code=failure_code,
+        anchor_failure_code=anchor_failure_code,
+        label=label,
+    )
+    try:
+        guard.verify()
+    except BaseException:
+        guard.close()
+        raise
+    return guard
 
 
 def _publish_or_recover_target(
@@ -552,25 +920,78 @@ def _publish_or_recover_target(
     content_sha256: str,
     *,
     anchor: DirectoryAnchor,
-) -> None:
-    if _verify_exact_target(target_path, note_bytes, content_sha256, anchor=anchor):
-        return
+) -> _CommittedFileGuard:
+    existing = _guard_committed_file(
+        target_path,
+        note_bytes,
+        content_sha256,
+        anchor=anchor,
+        failure_code="publish_conflict",
+        anchor_failure_code="invalid_local_target",
+        label="local target",
+        missing_ok=True,
+    )
+    if existing is not None:
+        return existing
     try:
-        publish_bytes_no_replace(note_bytes, target_path, anchor=anchor)
+        published = publish_bytes_no_replace(
+            note_bytes,
+            target_path,
+            anchor=anchor,
+            hold_open=True,
+        )
     except (PublishConflictError, FileExistsError):
-        _verify_exact_target(target_path, note_bytes, content_sha256, anchor=anchor)
+        conflict = _guard_committed_file(
+            target_path,
+            note_bytes,
+            content_sha256,
+            anchor=anchor,
+            failure_code="publish_conflict",
+            anchor_failure_code="invalid_local_target",
+            label="local target",
+            missing_ok=True,
+        )
+        if conflict is None:
+            raise LocalPublicationError(
+                "publish_failed",
+                f"conflicting local target disappeared before it could be guarded: {target_path}",
+                data={"target_path": str(target_path)},
+            )
+        return conflict
     except Exception as exc:
-        if _verify_exact_target(target_path, note_bytes, content_sha256, anchor=anchor):
-            return
+        recovered = _guard_committed_file(
+            target_path,
+            note_bytes,
+            content_sha256,
+            anchor=anchor,
+            failure_code="publish_conflict",
+            anchor_failure_code="invalid_local_target",
+            label="local target",
+            missing_ok=True,
+        )
+        if recovered is not None:
+            return recovered
         raise LocalPublicationError(
             "publish_failed",
             f"atomic local publication failed before commit: {target_path}: {exc}",
             data={"target_path": str(target_path)},
         ) from exc
-    if not _verify_exact_target(target_path, note_bytes, content_sha256, anchor=anchor):
-        raise LocalPublicationError(
-            "publish_failed",
-            f"atomic local publication did not create its target: {target_path}",
+    else:
+        if not isinstance(published, OwnedPublishedFile):
+            raise LocalPublicationError(
+                "publication_recovery_required",
+                "storage publication did not return its held target descriptor",
+                data={"target_path": str(target_path)},
+            )
+        return _guard_storage_published_file(
+            published,
+            target_path,
+            note_bytes,
+            content_sha256,
+            anchor=anchor,
+            failure_code="publication_recovery_required",
+            anchor_failure_code="invalid_local_target",
+            label="local target",
         )
 
 
@@ -608,21 +1029,20 @@ def _publish_or_verify_intent(
     target_path: Path,
     run_anchor: DirectoryAnchor,
     target_anchor: DirectoryAnchor,
-) -> None:
+) -> _CommittedFileGuard:
     if anchored_entry_exists(run_anchor, intent_path):
-        actual = _read_stable_regular_file(
+        existing = _guard_committed_file(
             intent_path,
-            conflict_code="publication_identity_conflict",
+            intent_bytes,
+            hashlib.sha256(intent_bytes).hexdigest(),
             anchor=run_anchor,
-            expected_size=len(intent_bytes),
-            max_bytes=len(intent_bytes),
+            failure_code="publication_identity_conflict",
+            anchor_failure_code="run_directory_changed",
+            label="local publication intent",
         )
-        if actual != intent_bytes:
-            raise LocalPublicationError(
-                "publication_identity_conflict",
-                f"run publication intent belongs to another candidate: {intent_path}",
-            )
-        return
+        assert existing is not None
+        existing.failure_code = "publication_recovery_required"
+        return existing
 
     if anchored_entry_exists(target_anchor, target_path):
         raise LocalPublicationError(
@@ -631,51 +1051,63 @@ def _publish_or_verify_intent(
             data={"target_path": str(target_path)},
         )
     try:
-        publish_bytes_no_replace(intent_bytes, intent_path, anchor=run_anchor)
-    except (PublishConflictError, FileExistsError):
-        actual = _read_stable_regular_file(
+        published = publish_bytes_no_replace(
+            intent_bytes,
             intent_path,
-            conflict_code="publication_identity_conflict",
             anchor=run_anchor,
-            expected_size=len(intent_bytes),
-            max_bytes=len(intent_bytes),
+            hold_open=True,
         )
-        if actual != intent_bytes:
+    except (PublishConflictError, FileExistsError):
+        conflict = _guard_committed_file(
+            intent_path,
+            intent_bytes,
+            hashlib.sha256(intent_bytes).hexdigest(),
+            anchor=run_anchor,
+            failure_code="publication_identity_conflict",
+            anchor_failure_code="run_directory_changed",
+            label="local publication intent",
+            missing_ok=True,
+        )
+        if conflict is None:
             raise LocalPublicationError(
-                "publication_identity_conflict",
-                f"run publication intent belongs to another candidate: {intent_path}",
+                "publication_intent_failed",
+                f"conflicting publication intent disappeared: {intent_path}",
             )
+        conflict.failure_code = "publication_recovery_required"
+        return conflict
     except Exception as exc:
-        if anchored_entry_exists(run_anchor, intent_path):
-            actual = _read_stable_regular_file(
-                intent_path,
-                conflict_code="publication_identity_conflict",
-                anchor=run_anchor,
-                expected_size=len(intent_bytes),
-                max_bytes=len(intent_bytes),
-            )
-            if actual == intent_bytes:
-                return
-            raise LocalPublicationError(
-                "publication_identity_conflict",
-                f"run publication intent belongs to another candidate: {intent_path}",
-            ) from exc
+        recovered = _guard_committed_file(
+            intent_path,
+            intent_bytes,
+            hashlib.sha256(intent_bytes).hexdigest(),
+            anchor=run_anchor,
+            failure_code="publication_identity_conflict",
+            anchor_failure_code="run_directory_changed",
+            label="local publication intent",
+            missing_ok=True,
+        )
+        if recovered is not None:
+            recovered.failure_code = "publication_recovery_required"
+            return recovered
         raise LocalPublicationError(
             "publication_intent_failed",
             f"atomic publication intent commit failed: {intent_path}: {exc}",
         ) from exc
-    actual = _read_stable_regular_file(
-        intent_path,
-        conflict_code="publication_identity_conflict",
-        anchor=run_anchor,
-        expected_size=len(intent_bytes),
-        max_bytes=len(intent_bytes),
-    )
-    if actual != intent_bytes:
+    if not isinstance(published, OwnedPublishedFile):
         raise LocalPublicationError(
-            "publication_identity_conflict",
-            f"run publication intent belongs to another candidate: {intent_path}",
+            "publication_recovery_required",
+            "storage publication did not return its held intent descriptor",
         )
+    return _guard_storage_published_file(
+        published,
+        intent_path,
+        intent_bytes,
+        hashlib.sha256(intent_bytes).hexdigest(),
+        anchor=run_anchor,
+        failure_code="publication_recovery_required",
+        anchor_failure_code="run_directory_changed",
+        label="local publication intent",
+    )
 
 
 def _receipt_bytes_and_path(
@@ -719,7 +1151,7 @@ def _publish_or_verify_receipt(
     candidate_digest: str,
     intent_ref: ArtifactRef,
     run_anchor: DirectoryAnchor,
-) -> tuple[Path, ArtifactRef]:
+) -> tuple[Path, ArtifactRef, _CommittedFileGuard]:
     receipt_bytes, receipt_path, receipt_ref = _receipt_bytes_and_path(
         run_dir=run_dir,
         candidate_path=candidate_path,
@@ -728,53 +1160,69 @@ def _publish_or_verify_receipt(
         intent_ref=intent_ref,
     )
     if anchored_entry_exists(run_anchor, receipt_path):
-        actual = _read_stable_regular_file(
+        guard = _guard_committed_file(
             receipt_path,
-            conflict_code="receipt_conflict",
+            receipt_bytes,
+            receipt_ref.sha256,
             anchor=run_anchor,
-            expected_size=len(receipt_bytes),
-            max_bytes=len(receipt_bytes),
+            failure_code="receipt_conflict",
+            anchor_failure_code="run_directory_changed",
+            label="local publication receipt",
         )
-        if actual != receipt_bytes:
-            raise LocalPublicationError(
-                "receipt_conflict",
-                f"deterministic local receipt contains different bytes: {receipt_path}",
-            )
+        assert guard is not None
+        guard.failure_code = "publication_recovery_required"
     else:
         try:
-            publish_bytes_no_replace(receipt_bytes, receipt_path, anchor=run_anchor)
-        except (PublishConflictError, FileExistsError):
-            actual = _read_stable_regular_file(
+            published = publish_bytes_no_replace(
+                receipt_bytes,
                 receipt_path,
-                conflict_code="receipt_conflict",
                 anchor=run_anchor,
-                expected_size=len(receipt_bytes),
-                max_bytes=len(receipt_bytes),
+                hold_open=True,
             )
-            if actual != receipt_bytes:
-                raise LocalPublicationError(
-                    "receipt_conflict",
-                    f"deterministic local receipt contains different bytes: {receipt_path}",
-                )
+        except (PublishConflictError, FileExistsError):
+            guard = _guard_committed_file(
+                receipt_path,
+                receipt_bytes,
+                receipt_ref.sha256,
+                anchor=run_anchor,
+                failure_code="receipt_conflict",
+                anchor_failure_code="run_directory_changed",
+                label="local publication receipt",
+            )
+            assert guard is not None
+            guard.failure_code = "publication_recovery_required"
         except Exception as exc:
-            if anchored_entry_exists(run_anchor, receipt_path):
-                actual = _read_stable_regular_file(
-                    receipt_path,
-                    conflict_code="receipt_conflict",
-                    anchor=run_anchor,
-                    expected_size=len(receipt_bytes),
-                    max_bytes=len(receipt_bytes),
-                )
-                if actual == receipt_bytes:
-                    pass
-                else:
-                    raise LocalPublicationError(
-                        "receipt_conflict",
-                        f"deterministic local receipt contains different bytes: {receipt_path}",
-                    ) from exc
-            else:
+            recovered = _guard_committed_file(
+                receipt_path,
+                receipt_bytes,
+                receipt_ref.sha256,
+                anchor=run_anchor,
+                failure_code="receipt_conflict",
+                anchor_failure_code="run_directory_changed",
+                label="local publication receipt",
+                missing_ok=True,
+            )
+            if recovered is None:
                 raise
-    return receipt_path, receipt_ref
+            guard = recovered
+            guard.failure_code = "publication_recovery_required"
+        else:
+            if not isinstance(published, OwnedPublishedFile):
+                raise LocalPublicationError(
+                    "publication_recovery_required",
+                    "storage publication did not return its held receipt descriptor",
+                )
+            guard = _guard_storage_published_file(
+                published,
+                receipt_path,
+                receipt_bytes,
+                receipt_ref.sha256,
+                anchor=run_anchor,
+                failure_code="publication_recovery_required",
+                anchor_failure_code="run_directory_changed",
+                label="local publication receipt",
+            )
+    return receipt_path, receipt_ref, guard
 
 
 def _lexical_candidate_manifest_path(candidate_input: Path) -> Path:
@@ -945,6 +1393,11 @@ def _publish_local_candidate_locked(
     assert isinstance(source, LocalSourceIdentity)
     assert isinstance(target, LocalPublicationTarget)
     verify_local_source(source)
+    original_evidence = revalidate_candidate_original_evidence(
+        loaded,
+        candidate,
+        verified,
+    )
     target_path = validate_local_target_location(target, source)
     _note_path, note_bytes = verified["note_markdown"][0]
     run_dir = loaded.manifest_path.parent
@@ -954,51 +1407,107 @@ def _publish_local_candidate_locked(
             "run_directory_changed",
             "local publication requires a locked run directory anchor",
         )
-    intent_bytes, intent_path, intent_ref = _intent_bytes_and_path(
-        run_dir=run_dir,
-        candidate=candidate,
-        candidate_digest=digest,
-    )
-    receipt_bytes, projected_receipt_path, projected_receipt_ref = _receipt_bytes_and_path(
-        run_dir=run_dir,
-        candidate_path=candidate_path,
-        candidate=candidate,
-        candidate_digest=digest,
-        intent_ref=intent_ref,
-    )
-    projected_run = _updated_run(
-        loaded,
-        intent_ref,
-        projected_receipt_ref,
-        candidate.gate,
+    expected_candidate_members = {
+        "candidate.json": (
+            len(canonical_json_bytes(candidate)),
+            hashlib.sha256(canonical_json_bytes(candidate)).hexdigest(),
+        )
+    }
+    for artifact in candidate.artifacts:
+        artifact_path = run_dir / artifact.path
+        expected_candidate_members[
+            artifact_path.relative_to(candidate_path.parent).as_posix()
+        ] = (artifact.size_bytes, artifact.sha256)
+    expected_candidate_snapshot = tree_snapshot_from_hashes(
+        expected_candidate_members
     )
     try:
-        enforce_projected_run_size(
-            run_dir,
-            max_bytes=V2_RESOURCE_POLICY.run_max_bytes,
-            replacements={
-                intent_path: intent_bytes,
-                projected_receipt_path: receipt_bytes,
-                loaded.manifest_path: canonical_json_bytes(projected_run),
-            },
+        source_guard_context = open_resolved_source_guard(
+            source.resolved_path,
+            max_bytes=V2_RESOURCE_POLICY.local_pdf_max_bytes,
+            expected_sha256=source.sha256,
+            expected_size=source.size_bytes,
+            expected_device=source.device,
+            expected_inode=source.inode,
         )
-    except RunSizeLimitError as exc:
+    except (OSError, ValueError) as exc:
         raise LocalPublicationError(
-            "run_size_limit_exceeded",
-            str(exc),
-            data={
-                "run_size_bytes": exc.actual_bytes,
-                "max_bytes": exc.max_bytes,
-            },
+            "source_changed",
+            f"local PDF source cannot be held for publication: {exc}",
         ) from exc
     try:
+        intent_bytes, intent_path, intent_ref = _intent_bytes_and_path(
+            run_dir=run_dir,
+            candidate=candidate,
+            candidate_digest=digest,
+        )
+        (
+            receipt_bytes,
+            projected_receipt_path,
+            projected_receipt_ref,
+        ) = _receipt_bytes_and_path(
+            run_dir=run_dir,
+            candidate_path=candidate_path,
+            candidate=candidate,
+            candidate_digest=digest,
+            intent_ref=intent_ref,
+        )
+        projected_run = _updated_run(
+            loaded,
+            intent_ref,
+            projected_receipt_ref,
+            candidate.gate,
+        )
+        try:
+            enforce_projected_run_size(
+                run_dir,
+                max_bytes=V2_RESOURCE_POLICY.run_max_bytes,
+                replacements={
+                    intent_path: intent_bytes,
+                    projected_receipt_path: receipt_bytes,
+                    loaded.manifest_path: canonical_json_bytes(projected_run),
+                },
+                retained_replacement_paths=(loaded.manifest_path,),
+            )
+        except RunSizeLimitError as exc:
+            raise LocalPublicationError(
+                "run_size_limit_exceeded",
+                str(exc),
+                data={
+                    "run_size_bytes": exc.actual_bytes,
+                    "max_bytes": exc.max_bytes,
+                },
+            ) from exc
         target_anchor_context = DirectoryAnchor.open(
             target_path.parent,
             manifest_path=target_path,
         )
-    except RunLoadError as exc:
-        raise LocalPublicationError("invalid_local_target", str(exc)) from exc
-    with target_anchor_context as target_anchor:
+    except BaseException as exc:
+        source_guard_context.close()
+        if isinstance(exc, RunLoadError):
+            raise LocalPublicationError("invalid_local_target", str(exc)) from exc
+        raise
+    with ExitStack() as stack:
+        source_guard = stack.enter_context(source_guard_context)
+        try:
+            candidate_tree_guard = stack.enter_context(
+                _CandidateTreeGuard(
+                    anchor=open_anchored_directory(run_anchor, candidate_path.parent),
+                    expected=expected_candidate_snapshot,
+                )
+            )
+        except (OSError, ValueError) as exc:
+            raise LocalPublicationError(
+                "candidate_tampered",
+                f"candidate tree cannot be held for publication: {exc}",
+            ) from exc
+        evidence_tree_guard = stack.enter_context(
+            _open_original_evidence_tree_guard(loaded, original_evidence)
+        )
+        target_anchor = stack.enter_context(target_anchor_context)
+        _verify_held_source(source_guard)
+        candidate_tree_guard.verify()
+        evidence_tree_guard.verify()
         if (
             target_anchor.device != target.parent_device
             or target_anchor.inode != target.parent_inode
@@ -1008,56 +1517,133 @@ def _publish_local_candidate_locked(
                 "local target parent identity changed",
             )
         validate_directory_anchor(run_anchor)
-        _publish_or_verify_intent(
+        intent_guard = _publish_or_verify_intent(
             intent_bytes=intent_bytes,
             intent_path=intent_path,
             target_path=target_path,
             run_anchor=run_anchor,
             target_anchor=target_anchor,
         )
-        _publish_or_recover_target(
-            target_path,
-            note_bytes,
-            candidate.content_sha256,
-            anchor=target_anchor,
-        )
-
-        try:
-            receipt_path, receipt_ref = _publish_or_verify_receipt(
-                run_dir=run_dir,
-                candidate_path=candidate_path,
-                candidate=candidate,
-                candidate_digest=digest,
-                intent_ref=intent_ref,
-                run_anchor=run_anchor,
+        with intent_guard:
+            _verify_held_source(source_guard)
+            candidate_tree_guard.verify()
+            evidence_tree_guard.verify()
+            target_guard = _publish_or_recover_target(
+                target_path,
+                note_bytes,
+                candidate.content_sha256,
+                anchor=target_anchor,
             )
-        except LocalPublicationError:
-            raise
-        except Exception as exc:
-            raise LocalPublicationError(
-                "publication_recovery_required",
-                f"target is committed but local receipt is incomplete: {exc}",
-                data={"target_path": str(target_path)},
-            ) from exc
-        try:
-            updated_run = _updated_run(loaded, intent_ref, receipt_ref, candidate.gate)
-            if updated_run != loaded.run:
-                atomic_write_json(
-                    loaded.manifest_path,
-                    updated_run,
-                    anchor=run_anchor,
-                )
-        except LocalPublicationError:
-            raise
-        except Exception as exc:
-            raise LocalPublicationError(
-                "publication_recovery_required",
-                f"target and receipt are committed but run status is incomplete: {exc}",
-                data={
-                    "target_path": str(target_path),
-                    "receipt_path": str(receipt_path),
-                },
-            ) from exc
+            with target_guard:
+                try:
+                    _verify_held_source(source_guard)
+                    candidate_tree_guard.verify()
+                    evidence_tree_guard.verify()
+                    intent_guard.verify()
+                    target_guard.verify()
+                    receipt_path, receipt_ref, receipt_guard = _publish_or_verify_receipt(
+                        run_dir=run_dir,
+                        candidate_path=candidate_path,
+                        candidate=candidate,
+                        candidate_digest=digest,
+                        intent_ref=intent_ref,
+                        run_anchor=run_anchor,
+                    )
+                except LocalPublicationError:
+                    raise
+                except Exception as exc:
+                    raise LocalPublicationError(
+                        "publication_recovery_required",
+                        f"target is committed but local receipt is incomplete: {exc}",
+                        data={"target_path": str(target_path)},
+                    ) from exc
+                with receipt_guard:
+                    try:
+                        _verify_held_source(source_guard)
+                        candidate_tree_guard.verify()
+                        evidence_tree_guard.verify()
+                        intent_guard.verify()
+                        target_guard.verify()
+                        receipt_guard.verify()
+                        updated_run = _updated_run(
+                            loaded,
+                            intent_ref,
+                            receipt_ref,
+                            candidate.gate,
+                        )
+                        expected_run_bytes = canonical_json_bytes(updated_run)
+                        if updated_run != loaded.run:
+                            written_run = cas_update_run(
+                                loaded,
+                                updated_run,
+                                hold_new=True,
+                                finalization_guards=(
+                                    source_guard,
+                                    candidate_tree_guard,
+                                    evidence_tree_guard,
+                                    intent_guard,
+                                    target_guard,
+                                    receipt_guard,
+                                ),
+                            )
+                            if not isinstance(written_run, OwnedPublishedFile):
+                                raise LocalPublicationError(
+                                    "publication_recovery_required",
+                                    "run compare-and-swap lost its held new identity",
+                                )
+                            run_guard = _guard_storage_published_file(
+                                written_run,
+                                loaded.manifest_path,
+                                expected_run_bytes,
+                                hashlib.sha256(expected_run_bytes).hexdigest(),
+                                anchor=run_anchor,
+                                failure_code="publication_recovery_required",
+                                anchor_failure_code="run_directory_changed",
+                                label="published run manifest",
+                            )
+                        else:
+                            run_guard = _guard_committed_file(
+                                loaded.manifest_path,
+                                expected_run_bytes,
+                                hashlib.sha256(expected_run_bytes).hexdigest(),
+                                anchor=run_anchor,
+                                failure_code="publication_recovery_required",
+                                anchor_failure_code="run_directory_changed",
+                                label="published run manifest",
+                            )
+                        assert run_guard is not None
+                        with run_guard:
+                            _verify_held_source(source_guard)
+                            candidate_tree_guard.verify()
+                            evidence_tree_guard.verify()
+                            intent_guard.verify()
+                            target_guard.verify()
+                            receipt_guard.verify()
+                            run_guard.verify()
+                            revalidate_candidate_original_evidence(
+                                loaded,
+                                candidate,
+                                verified,
+                            )
+                            evidence_tree_guard.verify()
+                            _verify_held_source(source_guard)
+                            candidate_tree_guard.verify()
+                            evidence_tree_guard.verify()
+                            intent_guard.verify()
+                            target_guard.verify()
+                            receipt_guard.verify()
+                            run_guard.verify()
+                    except Exception as exc:
+                        if isinstance(exc, LocalPublicationError):
+                            raise
+                        raise LocalPublicationError(
+                            "publication_recovery_required",
+                            f"target and receipt are committed but run status is incomplete: {exc}",
+                            data={
+                                "target_path": str(target_path),
+                                "receipt_path": str(receipt_path),
+                            },
+                        ) from exc
     return PublishedLocalCandidate(
         run_dir=run_dir,
         candidate_path=candidate_path,

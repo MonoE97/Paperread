@@ -9,7 +9,7 @@ Paper Reader `2.0.0` 是面向 Codex 或 Claude 的破坏式升级、自包含 s
 - `paper_reader/` 安装为 `paper_reader`，负责单篇深度阅读。
 - `paper_reader_batch/` 安装为 `paper_reader_batch`，负责批量调度和轻量报告。
 
-采用 clean install：把对应 source 目录复制到全新的目标 skill 目录，并在安装后的 skill root 中运行命令。不要覆盖 V1 安装。V1、无版本和未知版本 run 只作为未修改的历史文件保留；V2 不自动发现或迁移它们，显式读取时以 `unsupported_run_schema` 只读拒绝。
+采用 clean install：只把对应 skill source 中已由 Git 跟踪的文件导出到 staging 目录，先验证 release bundle，再移动到全新的目标 skill 目录。不要递归复制工作中的 source 目录；其中可能包含 ignored `.venv`、cache 或 `runs/` 状态。不要覆盖 V1 安装。V1、无版本和未知版本 run 只作为未修改的历史文件保留；V2 不自动发现或迁移它们，显式读取时以 `unsupported_run_schema` 只读拒绝。
 
 CLI 负责准备不可变 artifacts、校验 gate、渲染笔记和记录 batch 状态；agent 仍然负责阅读抽取出的 context，并写出严格的 `paper_reader.summary.v2` / `paper_reader.review.v2` 输入。
 
@@ -17,7 +17,7 @@ CLI 负责准备不可变 artifacts、校验 gate、渲染笔记和记录 batch 
 
 ## 安装
 
-复制 skill 前先安装 `uv`。可使用官方 installer 或包管理器；常见方式：
+staging skill 前先安装 `uv`。可使用官方 installer 或包管理器；常见方式：
 
 ```bash
 # 方式 A：standalone installer
@@ -37,61 +37,58 @@ Windows 和其他包管理器安装方式见官方 `uv` 安装文档：<https://
 uv python install 3.13
 ```
 
-Codex personal 单篇 skill：
+先设置一次仓库根目录，再使用下面的 tracked-file staging helper。它会在 `uv sync` 创建安装目录自己的运行状态之前验证 staging tree：
 
 ```bash
-install_dir="${CODEX_HOME:-$HOME/.codex}/skills/paper_reader"
-test ! -e "$install_dir" || { echo "target exists: $install_dir"; exit 1; }
-mkdir -p "$(dirname "$install_dir")"
-cp -R /path/to/paper_reader/paper_reader "$install_dir"
-cd "$install_dir"
-uv sync --locked
-uv run paper_reader --version
-uv run paper_reader --help
+set -eu
+repo="/path/to/Paperread"
+
+install_tracked_skill() {
+  source_name="$1"
+  install_dir="$2"
+  command_name="$3"
+  test ! -e "$install_dir" || { echo "target exists: $install_dir"; return 1; }
+  install_parent="$(dirname "$install_dir")"
+  mkdir -p "$install_parent"
+  stage_dir="$(mktemp -d "$install_parent/.${source_name}.install.XXXXXX")"
+  git -C "$repo" archive --format=tar "HEAD:${source_name}" | tar -xf - -C "$stage_dir"
+  (
+    cd "$stage_dir"
+    uv run --no-project --python 3.13 python scripts/validate-skill.py . --release-bundle
+  )
+  mv "$stage_dir" "$install_dir"
+  (
+    cd "$install_dir"
+    uv sync --locked
+    uv run "$command_name" --version
+    uv run "$command_name" --help
+  )
+}
 ```
 
-Codex personal batch skill：
+source 必须是 Git checkout，并且 `HEAD:<source_name>` 必须存在。该流程只安装 committed `HEAD` tree 中的文件，不包含 working tree 或 index 中尚未 commit 的改动；安装前必须先形成目标 release commit。
+
+Codex personal skills：
 
 ```bash
-install_dir="${CODEX_HOME:-$HOME/.codex}/skills/paper_reader_batch"
-test ! -e "$install_dir" || { echo "target exists: $install_dir"; exit 1; }
-mkdir -p "$(dirname "$install_dir")"
-cp -R /path/to/paper_reader/paper_reader_batch "$install_dir"
-cd "$install_dir"
-uv sync --locked
-uv run paper_reader_batch --version
-uv run paper_reader_batch --help
+install_tracked_skill paper_reader \
+  "${CODEX_HOME:-$HOME/.codex}/skills/paper_reader" paper_reader
+install_tracked_skill paper_reader_batch \
+  "${CODEX_HOME:-$HOME/.codex}/skills/paper_reader_batch" paper_reader_batch
 ```
 
-Claude Code personal 单篇 skill：
+Claude Code personal skills：
 
 ```bash
-install_dir="$HOME/.claude/skills/paper_reader"
-test ! -e "$install_dir" || { echo "target exists: $install_dir"; exit 1; }
-mkdir -p "$(dirname "$install_dir")"
-cp -R /path/to/paper_reader/paper_reader "$install_dir"
-cd "$install_dir"
-uv sync --locked
-uv run paper_reader --version
-uv run paper_reader --help
+install_tracked_skill paper_reader \
+  "$HOME/.claude/skills/paper_reader" paper_reader
+install_tracked_skill paper_reader_batch \
+  "$HOME/.claude/skills/paper_reader_batch" paper_reader_batch
 ```
 
-Claude Code personal batch skill：
+如果目标 `paper_reader/` 或 `paper_reader_batch/` 目录已经存在，先停止，不要继续安装。Paper Reader 2.0 要求 clean install 到新目录。旧安装可以在其他位置只读保留。staging validation 失败时，隐藏 staging 目录会保留供检查，但绝不会提升为目标安装目录。
 
-```bash
-install_dir="$HOME/.claude/skills/paper_reader_batch"
-test ! -e "$install_dir" || { echo "target exists: $install_dir"; exit 1; }
-mkdir -p "$(dirname "$install_dir")"
-cp -R /path/to/paper_reader/paper_reader_batch "$install_dir"
-cd "$install_dir"
-uv sync --locked
-uv run paper_reader_batch --version
-uv run paper_reader_batch --help
-```
-
-如果目标 `paper_reader/` 或 `paper_reader_batch/` 目录已经存在，先停止，不要直接覆盖复制。Paper Reader 2.0 要求 clean install 到新目录；盲目 `cp -R` 可能混合 V1/V2，或生成无法发现的嵌套目录。旧安装可以在其他位置只读保留。
-
-第一次运行 `uv sync --locked` 会根据对应 skill root 的 `uv.lock` 初始化安装后的本地环境。更新已复制的 skill 目录后，也应重新运行一次。
+第一次运行 `uv sync --locked` 会根据对应 skill root 的 `uv.lock` 初始化安装后的本地环境。安装新导出的 revision 后，也应重新运行一次。
 
 ## Zotero MCP 设置
 
@@ -208,7 +205,7 @@ uv run paper_reader maintenance extract-pdf tests/fixtures/minimal.pdf
 uv run python scripts/validate-skill.py .
 ```
 
-维护者在认为 `paper_reader/` 已自包含前，还应把它复制到仓库外的临时目录，并在复制后的目录中运行同一组验证。
+维护者在认为 `paper_reader/` 已自包含前，还应按上面的方式在仓库外构建 tracked-file staging 目录，在 `uv sync` 前运行 `uv run --no-project --python 3.13 python scripts/validate-skill.py . --release-bundle`，然后在该目录运行同一组验证。
 
 在安装后的目录或源码 `paper_reader_batch/` 目录中运行：
 
@@ -220,7 +217,7 @@ uv run paper_reader_batch --help
 uv run python scripts/validate-skill.py .
 ```
 
-维护者在认为 `paper_reader_batch/` 已自包含前，也应把它复制到仓库外的临时目录，并在复制后的目录中运行同一组验证。
+维护者在认为 `paper_reader_batch/` 已自包含前，也应按上面的方式在仓库外构建 tracked-file staging 目录，在 `uv sync` 前运行 `uv run --no-project --python 3.13 python scripts/validate-skill.py . --release-bundle`，然后在该目录运行同一组验证。
 
 ## 安全边界
 

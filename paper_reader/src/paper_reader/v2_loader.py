@@ -225,6 +225,7 @@ def _load_v2_run_from_anchor(
             manifest_stat.st_ino,
             manifest_stat.st_size,
             manifest_stat.st_mtime_ns,
+            manifest_stat.st_ctime_ns,
             manifest_stat.st_nlink,
         )
         after_identity = (
@@ -232,16 +233,33 @@ def _load_v2_run_from_anchor(
             manifest_after.st_ino,
             manifest_after.st_size,
             manifest_after.st_mtime_ns,
+            manifest_after.st_ctime_ns,
             manifest_after.st_nlink,
         )
-        named_identity = (
+        named_before_identity = (
+            named_before.st_dev,
+            named_before.st_ino,
+            named_before.st_size,
+            named_before.st_mtime_ns,
+            named_before.st_ctime_ns,
+            named_before.st_nlink,
+        )
+        named_after_identity = (
             named_after.st_dev,
             named_after.st_ino,
             named_after.st_size,
             named_after.st_mtime_ns,
+            named_after.st_ctime_ns,
             named_after.st_nlink,
         )
-        if before_identity != after_identity or after_identity != named_identity:
+        if len(
+            {
+                before_identity,
+                after_identity,
+                named_before_identity,
+                named_after_identity,
+            }
+        ) != 1:
             raise RunLoadError(
                 "run_manifest_unsafe",
                 f"run manifest changed while it was read: {manifest_path}",

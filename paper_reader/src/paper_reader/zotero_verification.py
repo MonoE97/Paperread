@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from contextlib import contextmanager
@@ -26,11 +27,13 @@ from paper_reader.storage import (
     anchored_entry_exists,
     atomic_write_bytes,
     atomic_write_json,
+    cas_update_run,
     canonical_json_bytes,
     create_anchored_directory,
     new_random_id,
     new_uuid,
     open_anchored_directory,
+    open_terminal_artifact_guard,
     read_anchored_bytes,
     remove_anchored_tree,
     rfc3339_utc,
@@ -45,6 +48,7 @@ from paper_reader.zotero_authorization_loader import (
     ZoteroAuthorizationBindingError,
     authorization_manifest_path,
     load_bound_authorization,
+    open_bound_authorization_guard,
     preflight_authorization_schema_versions,
 )
 from paper_reader.zotero_artifact_paths import (
@@ -247,10 +251,10 @@ def _validate_verification_record(
             "verification_tampered",
             "verification sidecar record differs from its main commit marker",
         )
-    roles: set[str] = set()
+    refs_by_role: dict[str, ArtifactRef] = {}
     for artifact in verification.artifacts:
         expected_filename = _VERIFICATION_MEMBER_BY_ROLE.get(artifact.role)
-        if expected_filename is None or artifact.role in roles:
+        if expected_filename is None or artifact.role in refs_by_role:
             raise ZoteroVerificationError(
                 "verification_tampered",
                 "verification sidecar artifact roles changed",
@@ -274,20 +278,68 @@ def _validate_verification_record(
                 "verification_tampered",
                 "verification refs do not bind the exact closed sidecar members",
             )
-        roles.add(artifact.role)
-    if roles != set(_VERIFICATION_MEMBER_BY_ROLE):
+        refs_by_role[artifact.role] = artifact
+    if set(refs_by_role) != set(_VERIFICATION_MEMBER_BY_ROLE):
         raise ZoteroVerificationError(
             "verification_tampered",
             "verification sidecar artifact roles changed",
         )
     if (
-        verification.authorization not in verification.artifacts
-        or verification.note_snapshot not in verification.artifacts
-        or verification.checks_snapshot not in verification.artifacts
+        verification.authorization
+        != refs_by_role["authorization_snapshot"]
+        or verification.note_snapshot
+        != refs_by_role["zotero_note_readback"]
+        or verification.checks_snapshot
+        != refs_by_role["verification_checks"]
     ):
         raise ZoteroVerificationError(
             "verification_tampered",
-            "verification refs are not members of the immutable sidecar",
+            "verification named refs do not match their exact immutable sidecar roles",
+        )
+    if sidecar_members["authorization.json"] != bound.authorization_bytes:
+        raise ZoteroVerificationError(
+            "verification_tampered",
+            "verification authorization snapshot differs from the bound authorization",
+        )
+    try:
+        note_snapshot = json.loads(sidecar_members["note.json"])
+        if (
+            not isinstance(note_snapshot, dict)
+            or canonical_json_bytes(note_snapshot) != sidecar_members["note.json"]
+        ):
+            raise ValueError("note snapshot is not one canonical JSON object")
+        evaluation = evaluate_note_snapshot(
+            note_snapshot,
+            authorization=bound.authorization,
+            note_key=note_key,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ZoteroVerificationError(
+            "verification_tampered",
+            f"verification note snapshot cannot be reevaluated: {exc}",
+        ) from exc
+    expected_checks_payload = canonical_json_bytes(
+        {
+            "format": "paper_reader.verification-checks.v2-internal",
+            "authorization_digest": bound.authorization_digest,
+            "note_key": note_key,
+            "checks": [item.model_dump(mode="json") for item in evaluation.checks],
+        }
+    )
+    expected_gate = _verification_gate(evaluation)
+    if (
+        sidecar_members["checks.json"] != expected_checks_payload
+        or verification.verified != evaluation.verified
+        or verification.content_sha256 != evaluation.content_sha256
+        or verification.content_length != evaluation.content_length
+        or verification.checks != evaluation.checks
+        or verification.gate.status != expected_gate.status
+        or verification.gate.checks != expected_gate.checks
+        or verification.gate.blockers != expected_gate.blockers
+    ):
+        raise ZoteroVerificationError(
+            "verification_tampered",
+            "verification derived fields do not match its immutable snapshots",
         )
     return verification
 
@@ -417,18 +469,50 @@ def _existing_verification(
             size_bytes=len(raw),
             media_type="application/json",
         )
-        updated_run = _updated_run(
-            loaded.run,
-            verification_ref=verification_ref,
-            gate=verification.gate,
-            verified=verification.verified,
-        )
         try:
-            atomic_write_json(
-                loaded.manifest_path,
-                updated_run,
-                anchor=loaded.run_directory_anchor,
+            terminal_members = _read_closed_verification_sidecar(
+                loaded,
+                verification_path,
             )
+            with open_bound_authorization_guard(
+                loaded,
+                bound,
+            ) as authorization_guard, open_terminal_artifact_guard(
+                anchor,
+                main_path=verification_path,
+                main_bytes=raw,
+                sidecar_path=verification_dir,
+                sidecar_snapshot=tree_snapshot_from_bytes(terminal_members),
+                label="recovered verification terminal",
+            ) as terminal_guard:
+                revalidated = _validate_verification_record(
+                    run_dir,
+                    verification_path,
+                    raw,
+                    bound=bound,
+                    note_key=note_key,
+                    loaded=loaded,
+                )
+                if revalidated != verification:
+                    raise ZoteroVerificationError(
+                        "verification_tampered",
+                        "recovered verification changed between validation and binding",
+                    )
+                updated_run = _updated_run(
+                    loaded.run,
+                    verification_ref=verification_ref,
+                    gate=revalidated.gate,
+                    verified=revalidated.verified,
+                )
+                authorization_guard.verify()
+                terminal_guard.verify()
+                cas_update_run(
+                    loaded,
+                    updated_run,
+                    finalization_guards=(authorization_guard, terminal_guard),
+                )
+                terminal_guard.verify()
+                authorization_guard.verify()
         except Exception as exc:
             raise ZoteroVerificationError(
                 "verification_status_update_failed",
@@ -586,6 +670,7 @@ def publish_verification_locked(
                 max_bytes=V2_RESOURCE_POLICY.run_max_bytes,
                 staging_dir=staging,
                 replacements={loaded.manifest_path: canonical_json_bytes(updated_run)},
+                retained_replacement_paths=(loaded.manifest_path,),
             )
         except RunSizeLimitError as exc:
             raise ZoteroVerificationError(
@@ -621,11 +706,24 @@ def publish_verification_locked(
                 ),
             ) from exc
         try:
-            atomic_write_json(
-                loaded.manifest_path,
-                updated_run,
-                anchor=loaded.run_directory_anchor,
-            )
+            with open_bound_authorization_guard(
+                loaded,
+                bound,
+            ) as authorization_guard, open_terminal_artifact_guard(
+                run_anchor,
+                main_path=verification_path,
+                main_bytes=verification_bytes,
+                sidecar_path=verification_dir,
+                sidecar_snapshot=sidecar_snapshot,
+                label="verification terminal",
+            ) as terminal_guard:
+                cas_update_run(
+                    loaded,
+                    updated_run,
+                    finalization_guards=(authorization_guard, terminal_guard),
+                )
+                terminal_guard.verify()
+                authorization_guard.verify()
         except Exception as exc:
             raise ZoteroVerificationError(
                 "verification_status_update_failed",

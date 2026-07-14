@@ -2,7 +2,7 @@
 
 ## 项目目标
 
-本项目维护一个自包含的 paper_reader skill repo。可安装运行产物是两个 skill source：`paper_reader/` 复制到 Codex 或 Claude 的 skills 目录并命名为 `paper_reader` 后，用户应能在安装后的 skill root 内运行 `uv sync --locked`、`uv run paper_reader ...`，使用 Zotero 标题工作流和本地 PDF path 工作流；`paper_reader_batch/` 复制并命名为 `paper_reader_batch` 后，用户应能运行 `uv run paper_reader_batch ...`，把多篇论文派发给 `$paper_reader`，对 Zotero-backed items 默认走 verified `zotero_write`，并生成 batch report。仓库根目录只承担维护文档、发布说明和规划记录职责，不是运行时 Python project。
+本项目维护一个自包含的 paper_reader skill repo。可安装运行产物是两个 skill source：从 committed revision 只导出 `paper_reader/` 的 tracked files，验证 release bundle 后安装到 Codex 或 Claude 的 skills 目录并命名为 `paper_reader`，用户应能在安装后的 skill root 内运行 `uv sync --locked`、`uv run paper_reader ...`，使用 Zotero 标题工作流和本地 PDF path 工作流；`paper_reader_batch/` 同样只从 committed revision 导出 tracked files、验证并命名为 `paper_reader_batch` 后，用户应能运行 `uv run paper_reader_batch ...`，把多篇论文派发给 `$paper_reader`，对 Zotero-backed items 默认走 verified `zotero_write`，并生成 batch report。仓库根目录只承担维护文档、发布说明和规划记录职责，不是运行时 Python project。
 
 ## Paper Reader 2.0 约束（released runtime contract）
 
@@ -52,9 +52,11 @@
 ### Batch journal 与 lease
 
 - `events/<20-digit-seq>.json` append-only hash-chain 是唯一 source of truth；`state.json` 只是 reconstructable snapshot。任何 gap、hash mismatch 或非法 event 都返回 `journal_corrupt` 并禁止 mutation。
+- Event 的完整 `.writing` / digest `.tmp` 只表示 provisional intent，绝不进入 reducer truth；只有 originating request 可在 committed-prefix state 上完成 final source/closure/freshness precommit validation 后原子提升为 `<20-digit-seq>.json`。任何 proposal 在 staging 前必须证明自身与派生 abort marker 都不超过 JSON artifact limit。校验失败时，必须先在原 proposal 的同一 sequence 以 no-replace + parent `fsync` 提交 deterministic `request.aborted` no-op marker；marker 内嵌并 hash 绑定原 proposal 的 canonical event、request id、command 与 fingerprint，主 journal 因而永久返回 `request_aborted`。Loader 必须以单次顺序 prefix replay 校验 marker 内嵌 proposal 的 command、request/event identity、domain identity 与 reducer legality，pending marker 也必须在 promotion 前通过同一校验。原 proposal staging 只能在 marker committed 后成为 exact inert residue，并通过 held no-follow descriptor 清空为 zero-byte logical tombstone；exact aborted origin 可在返回 `request_aborted` 前只清理与自身 canonical event digest 绑定的 residue，其他请求只有通过完整 pre-recovery/pre-mutation closure 后才可做该内部清理，任何被拒绝的 unrelated request 必须保持 residue bytes/mtime 不变。无法解析为完整 pending event 的 current-next `.writing` 同样不是事实源：通过全部 live closure 的新 transaction 必须在自身 staging/commit 前以 held descriptor 将 exact inode/raw 清空并 reload，校验失败的请求不得触碰它。任何 `.aborted.*` sidecar 都不是事实源；event/transition namespace 必须在 materialize/sort 前有界枚举，staging/residue 数量与 aggregate reads 必须有硬上限，committed event canonical bytes aggregate 上限固定为 256 MiB。新 transaction 在任何 side effect 前必须为 proposal tombstone 与 abort marker 预留两个 event-directory entries；已有 pending proposal 在 promotion/recovery 前必须重新校验 marker entry 与 committed-byte headroom。唯一的非空 exact marker prefix `.writing` 必须在 held inode 上续写、`fsync` 并提升，禁止另建 marker 后遗留 partial entry。Final event rename 之后只允许 structural guard，禁止用时钟或外部 closure 反判已经 committed 的 event。
+- `state.json` repair transition 必须同时绑定 manifest、journal head、old/new SHA-256 与 size，并用 `.run.lock` secret HMAC；invalid/noncanonical V2 snapshot 的 exchange/retired-leaf crash 必须可恢复，V1/unversioned/unknown snapshot 仍在 mutation 前只读拒绝。
 - 每次 transaction 在 `.run.lock` 下校验 manifest SHA、journal、request id/fingerprint 与 lease token，按 durable atomic ordering 写 content-addressed result、event，再替换 snapshot。Named `.lock` 在 POSIX 上必须先持有 lock parent 的稳定 ancestor guard，再 flock parent directory 与 named inode，防止 lock 或整个 parent pathname replacement 形成第二个临界区；需要跨 coordinator crash 延续原子边界时，child 必须继承 named + parent + ancestor descriptor bundle 到 durable marker 发布完成。Stale snapshot 必须 replay journal；orphan result 必须忽略。
-- Manifest builder 与默认 `run init` 尚未拥有 run journal 时，必须使用 skill-root 内、受全局 no-follow lock 保护的持久化 request receipt；receipt 先绑定 exact UUID、request fingerprint 与预留目标，crash/replay 只能恢复该 exact target，禁止扫描 runs 猜测。
-- Worker 与 local-prepare lease 默认 900 seconds。Worker 支持 claim/prompt/renew/finish/release/retry；`worker prompt` 只读且不 dispatch LLM。Local-prepare 支持 claim/renew/finish/release/run；`local-prepare run` 只可通过显式 `--paper-reader-root` 调用 V2 grouped local init/prepare，不 import 单篇 package、不做 LLM/Zotero 工作。Worker claim/prompt/renew/finish 与 local-prepare claim/run/finish 必须在各自副作用前重新绑定当前 PDF path、size、SHA-256、device 和 inode；stale lease token / source drift 必须拒绝。Worker failed/blocked 只可显式 retry，local prepare failed 只可用新 request id/new attempt 显式 run，同一 resolved PDF 必须保持 same-PDF mutual exclusion。
+- Manifest builder 与默认 `run init` 尚未拥有 run journal 时，必须使用 skill-root 内、受全局 no-follow lock 保护的持久化 request receipt；receipt 先绑定 exact UUID、request fingerprint 与预留目标，crash/replay 只能恢复该 exact target，禁止扫描 runs 猜测。任何 output 首次发布前必须用实际 JSON artifact limit 同时预检 output、reserved receipt 与 committed receipt 的 canonical bytes；任一超限必须在 receipt/target publication 前以 `resource_limit` 只读失败，同 request 重试不得退化为 `receipt_corrupt`。
+- Worker 与 local-prepare lease 默认 900 seconds。Worker 支持 claim/prompt/renew/finish/release/retry；`worker prompt` 只读且不 dispatch LLM。Local-prepare 支持 claim/renew/finish/release/run；`local-prepare run` 只可通过显式 `--paper-reader-root` 调用 V2 grouped local init/prepare，不 import 单篇 package、不做 LLM/Zotero 工作。每个 worker/local-prepare claim event 至多绑定一个 PDF；worker 可在同一 limit 内跳过后续 PDF 并用非 PDF item 填满，其余 PDF 通过独立 claim 获得并发。Worker claim/prompt/renew/finish 与 local-prepare claim/run/finish 必须在各自副作用前重新绑定当前 PDF path、size、SHA-256、device 和 inode；stale lease token / source drift 必须拒绝。Worker failed/blocked 只可显式 retry，local prepare failed 只可用新 request id/new attempt 显式 run，同一 resolved PDF 必须保持 same-PDF mutual exclusion。
 - `local-prepare run` 的内部协调状态固定在 `results/local-prepare/.coordination/.attempts/<attempt_id>.json` 与 `results/local-prepare/.coordination/<request_id>/{coordinator.lock,record.json,init.started,init.stdout,prepare.started,prepare.stdout}`；`*.started` 只在对应 child 真正启动后出现。Record 先发布，HMAC attempt owner 绑定 request-directory device/inode；在任何 child reservation/spawn 前，还必须用 derived internal request id 提交 `local_prepare.coordination_reserved` journal event，把 external request/fingerprint 与该目录 identity 锚定进 source of truth。Journal binding 已存在时，整个 coordination tree、owner、record 或目录 identity 的缺失/替换只能 fail closed，禁止重建。Child launcher 必须先核对目录 identity、fork gated executor，再原子发布 HMAC started marker，最后放行 exact argv；supervisor 在 marker 前崩溃时 executor 只读确认 marker 缺失并退出，marker 后崩溃时 executor 仍执行一次。Reservation 之后、runner spawn 之前必须在 authoritative run lock 内再次校验 PDF path/bytes/device/inode 与完整 `paper_reader_root` identity。Child 继承 `.run.lock` descriptor bundle、stdout flock 与 child-owned timeout；仅 reservation、没有 started/stdout 的崩溃可安全重试，started 但无 strict stdout 是 `coordination_uncertain` 且禁止二发。Init timeout 固定 60 seconds，prepare 默认 600 seconds；首次 side effect 前剩余 lease 至少为 `60 + prepare_timeout + 60` seconds，prepare 前至少为 `prepare_timeout + 60` seconds。Expired local attempt 若无 execution marker 才可 requeue；已有/无法排除 execution side effect 时 `run recover` 必须续租同一 claim/attempt 供恢复，绝不能分配 attempt 2。
 - Worker/local release 只允许在外部 side effect 与单篇 artifact 产生前，并必须显式 `--acknowledge-no-side-effects`；缺少确认、已有 result 或 identity 过期时只读拒绝，不能把可能已执行的工作重新排队。
 - Write claim 每次只返回一个 candidate，并生成绑定 writer/item 的 `claim_id`、`lease_token` 与 `write_attempt_id`；lease 默认 120 seconds。固定顺序是 claim -> preview immutable candidate（此时 authorization 尚不存在）-> 展示目标并取得用户 explicit real-write intent -> external agent 调 single `$paper_reader zotero authorize`，authorization 只绑定 external claim id + candidate digest + `write_attempt_id` -> batch `write begin` 独立校验当前 `claim_id`、`lease_token`、`write_attempt_id` 与 candidate digest。Begin 要求 authorization 至少剩余 30 seconds，并在返回精确 MCP envelope 前原子消费 nonce、提交 `write.started`。同 request id 只返回 `replayed=true`，不得再次发送；新 request id 也不能创建第二次 start。
@@ -107,7 +109,7 @@ Do not add `README.md`, `INSTALLATION_GUIDE.md`, `QUICK_REFERENCE.md`, or `CHANG
 - Python 环境必须用 `uv` 管理。
 - 默认在 `paper_reader/` 内执行命令，使用 `uv run`。
 - 修改 batch runtime 时默认在 `paper_reader_batch/` 内执行命令，使用 `uv run`。
-- 首次使用或复制安装后，先在安装后的 skill root 运行 `uv --version` 确认 `uv` 可用，再运行 `uv sync --locked` 初始化本地环境。
+- 首次使用或 tracked-file clean install 后，先在安装后的 skill root 运行 `uv --version` 确认 `uv` 可用，再运行 `uv sync --locked` 初始化本地环境。
 - 如果 `uv sync --locked` 找不到 Python `>=3.13`，在 skill root 运行 `uv python install 3.13` 后重试。
 - Zotero-backed workflow 需要 Zotero Desktop 和 `zotero-mcp-plugin`：按 <https://github.com/cookjohn/zotero-mcp#readme> 下载 `.xpi`，在 Zotero 里通过 `Tools -> Add-ons` 安装，启用 `Preferences -> Zotero MCP Plugin` integrated server；默认 Streamable HTTP endpoint 是 `http://127.0.0.1:23120/mcp`。
 - 缺少项目依赖时在 `paper_reader/` 内使用 `uv add` 或 `uv add --dev`，不使用 `pip install`、`conda install` 或全局安装。
@@ -129,7 +131,7 @@ Do not add `README.md`, `INSTALLATION_GUIDE.md`, `QUICK_REFERENCE.md`, or `CHANG
 - Historical run/output artifacts 永远视为用户数据；本次 V1 runtime 删除未触碰、移动、迁移或重新索引任何历史产物。
 - `.DS_Store`、虚拟环境、缓存、本地预览文件、PDF 分析目录、生成笔记和本地 `docs/` scratch 必须被 `.gitignore` 忽略。
 - `docs/` 不是发布内容；不要重新引入 tracked `docs/` 规划文档或根文档 validator，除非用户明确要求恢复公开文档树。
-- 2.0 安装文档采用 clean install：复制两个独立 skill source 到全新目标目录，禁止覆盖旧安装。旧安装目录可只读保留，但不得被 V2 自动发现、迁移或索引。
+- 2.0 安装文档采用 clean install：只从 committed revision 导出两个独立 skill source 的 tracked files，在 `uv sync` 前以 `--release-bundle` 验证 staging tree，再移动到全新目标目录；禁止递归复制含 `.venv`、cache 或 `runs/` 的 working source，也禁止覆盖旧安装。旧安装目录可只读保留，但不得被 V2 自动发现、迁移或索引。
 
 ## Zotero 边界
 
@@ -170,7 +172,7 @@ uv run python scripts/validate-skill.py .
 
 涉及根 README、中文 README、AGENTS 或安装说明时，必须运行与修改范围对应的 skill-root 验证命令；仓库根目录不维护单独的根文档 validator。
 
-V2 发布前必须把 `paper_reader/` 和 `paper_reader_batch/` 分别复制到仓库外临时目录并在复制后的目录中运行同一组 skill-root 验证，证明两个 skill source 都自包含。
+V2 发布前必须从待发布的 committed revision 把 `paper_reader/` 和 `paper_reader_batch/` 的 tracked files 分别导出到仓库外 staging 目录；在 `uv sync` 前运行 portable validator 的 `--release-bundle` 模式，再在 staging/安装目录中运行同一组 skill-root 验证，证明两个 skill source 都自包含且未夹带运行状态。
 
 ## 写入规则
 

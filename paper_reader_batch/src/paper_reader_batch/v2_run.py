@@ -15,8 +15,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from paper_reader_batch.v2_contracts import (
     BatchEvent,
     BatchState,
+    ClaimedData,
     COMMAND_RESULT_SCHEMA_VERSION,
     EventCommandResultSnapshot,
+    FinishedData,
+    LeaseMutationData,
     PdfManifestItem,
     RecoveredLease,
     RecoveredUncertainWrite,
@@ -260,7 +263,7 @@ def _initial_items(manifest) -> list[StateItem]:
 
 def _safe_read_matches(path: Path, expected: bytes) -> bool:
     try:
-        return read_bytes(path) == expected
+        return read_bytes(path, max_bytes=len(expected)) == expected
     except BatchRuntimeError as exc:
         if exc.code in {"artifact_unreadable", "storage_missing"}:
             return False
@@ -276,7 +279,10 @@ def initialize_run(
     initialized_at: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
-    manifest, manifest_raw, manifest_sha256 = load_manifest(manifest_path, validate_sources=True)
+    manifest, manifest_raw, manifest_sha256 = load_manifest(
+        manifest_path,
+        validate_sources=False,
+    )
     root = normalized_absolute_path(skill_root)
     with open_directory_fd(root, create=False):
         pass
@@ -452,6 +458,7 @@ def initialize_run(
             plan_factory=plan_factory,
             publish=publish,
             inspect=inspect,
+            validate_input=lambda: validate_manifest_sources(manifest),
             fault=fault,
         )
     except ValidationError as exc:  # pragma: no cover - strict plan constructors normally catch directly
@@ -490,7 +497,12 @@ def recover_run(
     now: str | None = None,
     fault: FaultHook | None = None,
 ) -> RequestOutcome:
-    from paper_reader_batch.v2_journal import ProposedTransition, append_transaction, load_run_view
+    from paper_reader_batch.v2_journal import (
+        ProposedTransition,
+        append_transaction,
+        load_run_view,
+        load_request_preflight,
+    )
     from paper_reader_batch.v2_local_prepare import local_prepare_attempt_has_execution_side_effects
 
     def parse_timestamp(value: str) -> datetime:
@@ -499,11 +511,20 @@ def recover_run(
         except (ValueError, IndexError) as exc:
             raise BatchRuntimeError("invalid_timestamp", f"invalid recovery timestamp: {value}") from exc
 
-    canonical_request_id = validate_request_id(request_id)
+    preflight, canonical_request_id, existing_recover_event = load_request_preflight(
+        run_dir,
+        request_id=request_id,
+        command="run.recover",
+    )
     if (
         type(reconciliation_timeout_seconds) is not int
         or not 1 <= reconciliation_timeout_seconds <= _MAX_RECONCILIATION_TIMEOUT_SECONDS
     ):
+        if existing_recover_event is not None:
+            raise BatchRuntimeError(
+                "idempotency_conflict",
+                "run recover request id is already bound to different input",
+            )
         raise BatchRuntimeError(
             "invalid_timeout",
             (
@@ -517,9 +538,17 @@ def recover_run(
         from paper_reader_batch.v2_artifacts import paper_reader_root_identity
 
         normalized_paper_reader_root = normalized_absolute_path(paper_reader_root)
-        bound_paper_reader_root_identity = paper_reader_root_identity(
-            normalized_paper_reader_root
-        )
+        try:
+            bound_paper_reader_root_identity = paper_reader_root_identity(
+                normalized_paper_reader_root
+            )
+        except BatchRuntimeError as exc:
+            if existing_recover_event is not None:
+                raise BatchRuntimeError(
+                    "idempotency_conflict",
+                    "run recover request id is already bound to different input",
+                ) from exc
+            raise
 
     def uncertain_reconciliation_write(view) -> RecoveredUncertainWrite | None:
         uncertain = [item for item in view.state.items if item.write_status == "uncertain"]
@@ -593,15 +622,6 @@ def recover_run(
             write_started_event_sha256=item.write_started_event_sha256,
         )
 
-    preflight = load_run_view(run_dir)
-    existing_recover_event = next(
-        (
-            event
-            for event in preflight.events
-            if event.request_id == canonical_request_id
-        ),
-        None,
-    )
     if existing_recover_event is not None:
         preflight_reconciliation_write = (
             existing_recover_event.data.reconciliation_write
@@ -645,6 +665,164 @@ def recover_run(
             lease_token_sha256=lease.lease_token_sha256,
             expires_at=lease.expires_at,
         )
+
+    def blocked_uncertain_identity(
+        view,
+        item: StateItem,
+    ) -> tuple[str, str, str, int, str, str] | None:
+        if not (
+            item.local_prepare_status == "blocked"
+            and item.local_prepare_failure_code == "coordination_uncertain"
+            and item.local_prepare_lease is None
+        ):
+            return None
+        identity = (
+            item.local_prepare_last_actor_id,
+            item.local_prepare_last_claim_id,
+            item.local_prepare_last_attempt_id,
+            item.local_prepare_last_lease_token_sha256,
+            item.local_prepare_last_expires_at,
+        )
+        if not all(identity) or item.local_prepare_attempt_count < 1:
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                f"coordination-uncertain item lacks its durable attempt identity: {item.item_id}",
+            )
+
+        actor_id, claim_id, attempt_id, token_sha256, state_expires_at = identity
+        coordination_binding = (
+            item.local_prepare_coordination_request_id,
+            item.local_prepare_coordination_fingerprint,
+            item.local_prepare_coordination_device,
+            item.local_prepare_coordination_inode,
+        )
+        if not all(value is not None for value in coordination_binding):
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                f"coordination-uncertain item lacks its exact coordinator binding: {item.item_id}",
+            )
+        if not local_prepare_attempt_has_execution_side_effects(
+            view,
+            item_id=item.item_id,
+            claim_id=claim_id,
+            attempt_id=attempt_id,
+        ):
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                f"coordination-uncertain item has no durable execution evidence: {item.item_id}",
+            )
+        previous_expires_at: str | None = None
+        saw_claim = False
+        for event in view.events:
+            data = event.data
+            if isinstance(data, ClaimedData) and data.kind == "local_prepare.claimed":
+                for assignment in data.assignments:
+                    if assignment.item_id != item.item_id or assignment.attempt_id != attempt_id:
+                        continue
+                    if saw_claim or (
+                        assignment.actor_id != actor_id
+                        or assignment.claim_id != claim_id
+                        or assignment.attempt_number != item.local_prepare_attempt_count
+                        or assignment.lease_token_sha256 != token_sha256
+                    ):
+                        raise BatchRuntimeError(
+                            "journal_corrupt",
+                            f"coordination-uncertain claim identity is inconsistent: {item.item_id}",
+                        )
+                    saw_claim = True
+                    previous_expires_at = assignment.expires_at
+            elif (
+                isinstance(data, LeaseMutationData)
+                and data.kind == "local_prepare.renewed"
+                and data.item_id == item.item_id
+                and data.attempt_id == attempt_id
+            ):
+                if not saw_claim or data.expires_at is None or (
+                    data.actor_id != actor_id
+                    or data.claim_id != claim_id
+                    or data.attempt_number != item.local_prepare_attempt_count
+                    or data.lease_token_sha256 != token_sha256
+                ):
+                    raise BatchRuntimeError(
+                        "journal_corrupt",
+                        f"coordination-uncertain renewal identity is inconsistent: {item.item_id}",
+                    )
+                if (
+                    data.issued_at != event.occurred_at
+                    or parse_timestamp(event.occurred_at) >= parse_timestamp(previous_expires_at)
+                    or parse_timestamp(data.expires_at) <= parse_timestamp(previous_expires_at)
+                ):
+                    raise BatchRuntimeError(
+                        "journal_corrupt",
+                        f"coordination-uncertain renewal timing is inconsistent: {item.item_id}",
+                    )
+                previous_expires_at = data.expires_at
+            elif isinstance(data, RunRecoveredData):
+                for resumed in data.resumed_local_prepare_leases:
+                    if resumed.item_id != item.item_id or resumed.attempt_id != attempt_id:
+                        continue
+                    if not saw_claim or (
+                        resumed.actor_id != actor_id
+                        or resumed.claim_id != claim_id
+                        or resumed.attempt_number != item.local_prepare_attempt_count
+                        or resumed.lease_token_sha256 != token_sha256
+                        or resumed.previous_expires_at != previous_expires_at
+                        or resumed.issued_at != event.occurred_at
+                        or parse_timestamp(event.occurred_at)
+                        < parse_timestamp(resumed.previous_expires_at)
+                        or parse_timestamp(resumed.expires_at)
+                        <= parse_timestamp(resumed.issued_at)
+                    ):
+                        raise BatchRuntimeError(
+                            "journal_corrupt",
+                            f"coordination-uncertain recovery identity or timing is inconsistent: {item.item_id}",
+                        )
+                    previous_expires_at = resumed.expires_at
+        if not saw_claim or previous_expires_at is None:
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                f"coordination-uncertain item has no authoritative claim expiry: {item.item_id}",
+            )
+        if previous_expires_at != state_expires_at:
+            raise BatchRuntimeError(
+                "journal_corrupt",
+                f"coordination-uncertain state expiry differs from journal: {item.item_id}",
+            )
+        return (
+            actor_id,
+            claim_id,
+            attempt_id,
+            item.local_prepare_attempt_count,
+            token_sha256,
+            previous_expires_at,
+        )
+
+    def attempt_was_coordination_uncertain(view, item: StateItem) -> bool:
+        lease = item.local_prepare_lease
+        if lease is None:
+            return False
+        for event in view.events:
+            data = event.data
+            if not (
+                isinstance(data, FinishedData)
+                and data.kind == "local_prepare.finished"
+                and data.item_id == item.item_id
+                and data.attempt_id == lease.attempt_id
+                and data.failure_code == "coordination_uncertain"
+            ):
+                continue
+            if (
+                data.actor_id != lease.actor_id
+                or data.claim_id != lease.claim_id
+                or data.attempt_number != lease.attempt_number
+                or data.lease_token_sha256 != lease.lease_token_sha256
+            ):
+                raise BatchRuntimeError(
+                    "journal_corrupt",
+                    f"coordination-uncertain finish identity is inconsistent: {item.item_id}",
+                )
+            return True
+        return False
 
     def result_for(data: RunRecoveredData) -> dict[str, Any]:
         result = {
@@ -755,14 +933,43 @@ def recover_run(
         ).replace("+00:00", "Z")
         for item in view.state.items:
             lease = item.local_prepare_lease
-            if lease is None or parse_timestamp(lease.expires_at) > current:
+            if lease is None:
+                uncertain_identity = blocked_uncertain_identity(view, item)
+                if uncertain_identity is None:
+                    continue
+                (
+                    actor_id,
+                    claim_id,
+                    attempt_id,
+                    attempt_number,
+                    lease_token_sha256,
+                    previous_expires_at,
+                ) = uncertain_identity
+                if parse_timestamp(previous_expires_at) > current:
+                    continue
+                resumed_local.append(
+                    ResumedLocalPrepareLease(
+                        item_id=item.item_id,
+                        actor_id=actor_id,
+                        claim_id=claim_id,
+                        attempt_id=attempt_id,
+                        attempt_number=attempt_number,
+                        lease_token_sha256=lease_token_sha256,
+                        previous_expires_at=previous_expires_at,
+                        issued_at=transaction_time,
+                        expires_at=resumed_expires_at,
+                    )
+                )
                 continue
-            if local_prepare_attempt_has_execution_side_effects(
+            if parse_timestamp(lease.expires_at) > current:
+                continue
+            has_execution_side_effects = local_prepare_attempt_has_execution_side_effects(
                 view,
                 item_id=item.item_id,
                 claim_id=lease.claim_id,
                 attempt_id=lease.attempt_id,
-            ):
+            )
+            if has_execution_side_effects or attempt_was_coordination_uncertain(view, item):
                 resumed_local.append(
                     ResumedLocalPrepareLease(
                         item_id=item.item_id,

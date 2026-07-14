@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import os
+import stat
+import sys
 import tomllib
 from pathlib import Path
 
@@ -12,6 +15,15 @@ FORBIDDEN_DOC_NAMES = {
     "INSTALLATION_GUIDE.md",
     "QUICK_REFERENCE.md",
     "CHANGELOG.md",
+}
+RUNTIME_STATE_PARTS = {
+    ".mypy_cache",
+    ".paper_reader_batch",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "runs",
 }
 REQUIRED_PATHS = [
     "SKILL.md",
@@ -117,9 +129,89 @@ def _validate_release_metadata(root: Path, errors: list[str]) -> None:
                 errors.append("uv.lock paper-reader-batch package must be the editable skill root")
 
 
-def validate_skill(skill_root: Path) -> list[str]:
+def _validate_release_bundle_state(root: Path, errors: list[str]) -> None:
+    try:
+        root_metadata = os.lstat(root)
+    except OSError as exc:
+        errors.append(f"cannot inspect release bundle root: {exc}")
+        return
+    if stat.S_ISLNK(root_metadata.st_mode):
+        errors.append("symlink is forbidden in a release bundle: .")
+        return
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        errors.append("special file is forbidden in a release bundle: .")
+        return
+
+    def record_walk_error(exc: OSError) -> None:
+        failed = Path(exc.filename) if exc.filename is not None else root
+        try:
+            relative = failed.relative_to(root).as_posix()
+        except ValueError:
+            relative = "."
+        errors.append(f"cannot inspect release bundle directory: {relative}")
+
+    for current_root, dirnames, filenames in os.walk(
+        root,
+        topdown=True,
+        onerror=record_walk_error,
+        followlinks=False,
+    ):
+        current_path = Path(current_root)
+        for dirname in sorted(tuple(dirnames)):
+            path = current_path / dirname
+            relative = path.relative_to(root).as_posix()
+            try:
+                metadata = os.lstat(path)
+            except OSError as exc:
+                errors.append(f"cannot inspect release bundle entry: {relative}: {exc}")
+                dirnames.remove(dirname)
+                continue
+            if stat.S_ISLNK(metadata.st_mode):
+                errors.append(f"symlink is forbidden in a release bundle: {relative}")
+                dirnames.remove(dirname)
+            elif not stat.S_ISDIR(metadata.st_mode):
+                errors.append(f"special file is forbidden in a release bundle: {relative}")
+                dirnames.remove(dirname)
+            elif dirname in RUNTIME_STATE_PARTS:
+                errors.append(f"runtime state is forbidden in a release bundle: {relative}")
+                dirnames.remove(dirname)
+        for filename in sorted(filenames):
+            path = current_path / filename
+            relative = path.relative_to(root).as_posix()
+            try:
+                metadata = os.lstat(path)
+            except OSError as exc:
+                errors.append(f"cannot inspect release bundle entry: {relative}: {exc}")
+                continue
+            if stat.S_ISLNK(metadata.st_mode):
+                errors.append(f"symlink is forbidden in a release bundle: {relative}")
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                errors.append(f"special file is forbidden in a release bundle: {relative}")
+                continue
+            if (
+                filename not in RUNTIME_STATE_PARTS
+                and filename != ".DS_Store"
+                and not filename.endswith(".pyc")
+            ):
+                continue
+            errors.append(
+                f"runtime state is forbidden in a release bundle: {relative}"
+            )
+
+
+def validate_skill(skill_root: Path, *, release_bundle: bool = False) -> list[str]:
     errors: list[str] = []
-    root = skill_root.resolve()
+    root = (
+        Path(os.path.abspath(os.fspath(skill_root.expanduser())))
+        if release_bundle
+        else skill_root.resolve()
+    )
+
+    if release_bundle:
+        _validate_release_bundle_state(root, errors)
+        if errors:
+            return errors
 
     for relative_path in REQUIRED_PATHS:
         if not (root / relative_path).exists():
@@ -145,12 +237,16 @@ def validate_skill(skill_root: Path) -> list[str]:
         errors.append("paper_reader_batch package version must be 2.0.0")
 
     _validate_release_metadata(root, errors)
-
-    for path in root.rglob("*"):
-        if any(part in {".venv", "__pycache__", ".pytest_cache"} for part in path.parts):
-            continue
-        if path.is_file() and path.name in FORBIDDEN_DOC_NAMES:
-            errors.append(f"forbidden in-skill doc file: {path.relative_to(root)}")
+    for current_root, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        dirnames[:] = sorted(
+            dirname for dirname in dirnames if dirname not in RUNTIME_STATE_PARTS
+        )
+        current_path = Path(current_root)
+        for filename in sorted(filenames):
+            if filename in FORBIDDEN_DOC_NAMES:
+                errors.append(
+                    f"forbidden in-skill doc file: {(current_path / filename).relative_to(root)}"
+                )
 
     return errors
 
@@ -158,12 +254,17 @@ def validate_skill(skill_root: Path) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate the portable paper_reader_batch skill bundle.")
     parser.add_argument("skill_root", nargs="?", default=".", help="Path to the batch skill root")
+    parser.add_argument(
+        "--release-bundle",
+        action="store_true",
+        help="Reject runtime state that may exist in a working or installed skill root",
+    )
     args = parser.parse_args()
 
-    errors = validate_skill(Path(args.skill_root))
+    errors = validate_skill(Path(args.skill_root), release_bundle=args.release_bundle)
     if errors:
         for error in errors:
-            print(f"ERROR: {error}")
+            print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
     print("Batch skill bundle is valid.")

@@ -231,6 +231,9 @@ def test_unexpected_extract_pdf_failure_uses_safe_top_level_result(
 ) -> None:
     pdf_extract = importlib.import_module("paper_reader.pdf_extract")
     sensitive_path = tmp_path / "sensitive-paper.pdf"
+    sensitive_path.write_bytes(
+        (Path(__file__).parent / "fixtures" / "minimal.pdf").read_bytes()
+    )
 
     def explode(*_args, **_kwargs):
         raise RuntimeError("sensitive extraction detail")
@@ -490,3 +493,174 @@ def test_grouped_maintenance_extract_pdf_emits_one_v2_result() -> None:
     payload = _result_payload(result)
     assert payload["command"] == "maintenance extract-pdf"
     assert payload["data"]["extraction"]["page_count"] == 1
+
+
+def test_maintenance_extract_pdf_rejects_source_above_v2_size_cap(tmp_path: Path) -> None:
+    from paper_reader.resource_policy import V2_RESOURCE_POLICY
+
+    oversized_pdf = tmp_path / "oversized.pdf"
+    with oversized_pdf.open("wb") as handle:
+        handle.truncate(V2_RESOURCE_POLICY.local_pdf_max_bytes + 1)
+
+    result = _invoke(["maintenance", "extract-pdf", str(oversized_pdf)])
+
+    assert result.exit_code == 1
+    payload = _result_payload(result)
+    assert payload["code"] == "source_too_large"
+    assert payload["data"] == {
+        "size_bytes": V2_RESOURCE_POLICY.local_pdf_max_bytes + 1,
+        "max_size_bytes": V2_RESOURCE_POLICY.local_pdf_max_bytes,
+    }
+
+
+def test_maintenance_extract_pdf_rejects_pdf_above_v2_page_cap(tmp_path: Path) -> None:
+    import fitz
+
+    from paper_reader.resource_policy import V2_RESOURCE_POLICY
+
+    oversized_pdf = tmp_path / "too-many-pages.pdf"
+    document = fitz.open()
+    try:
+        for _ in range(V2_RESOURCE_POLICY.pdf_max_pages + 1):
+            document.new_page()
+        document.save(oversized_pdf)
+    finally:
+        document.close()
+
+    result = _invoke(["maintenance", "extract-pdf", str(oversized_pdf)])
+
+    assert result.exit_code == 1
+    payload = _result_payload(result)
+    assert payload["code"] == "pdf_page_limit_exceeded"
+    assert payload["data"] == {
+        "page_count": V2_RESOURCE_POLICY.pdf_max_pages + 1,
+        "max_pages": V2_RESOURCE_POLICY.pdf_max_pages,
+    }
+
+
+def test_maintenance_extract_pdf_uses_checked_bytes_when_path_is_replaced_before_extraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fitz
+
+    pdf_extract = importlib.import_module("paper_reader.pdf_extract")
+    source = tmp_path / "source.pdf"
+    source.write_bytes(
+        (Path(__file__).parent / "fixtures" / "minimal.pdf").read_bytes()
+    )
+    replacement = tmp_path / "replacement.pdf"
+    document = fitz.open()
+    try:
+        for _ in range(501):
+            document.new_page()
+        document.save(replacement)
+    finally:
+        document.close()
+    original_extract_pdf = pdf_extract.extract_pdf
+
+    def replace_then_extract(*args, **kwargs):
+        replacement.replace(source)
+        return original_extract_pdf(*args, **kwargs)
+
+    monkeypatch.setattr(pdf_extract, "extract_pdf", replace_then_extract)
+
+    result = _invoke(["maintenance", "extract-pdf", str(source)])
+
+    assert result.exit_code == 1
+    payload = _result_payload(result)
+    assert payload["code"] == "source_changed"
+    with fitz.open(source) as replaced_document:
+        assert replaced_document.page_count == 501
+
+
+def test_maintenance_extract_pdf_does_not_reopen_oversized_path_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from paper_reader.resource_policy import V2_RESOURCE_POLICY
+
+    pdf_extract = importlib.import_module("paper_reader.pdf_extract")
+    source = tmp_path / "source.pdf"
+    source.write_bytes(
+        (Path(__file__).parent / "fixtures" / "minimal.pdf").read_bytes()
+    )
+    replacement = tmp_path / "oversized.pdf"
+    with replacement.open("wb") as handle:
+        handle.truncate(V2_RESOURCE_POLICY.local_pdf_max_bytes + 1)
+    original_extract_pdf = pdf_extract.extract_pdf
+
+    def replace_then_extract(*args, **kwargs):
+        replacement.replace(source)
+        return original_extract_pdf(*args, **kwargs)
+
+    monkeypatch.setattr(pdf_extract, "extract_pdf", replace_then_extract)
+
+    result = _invoke(["maintenance", "extract-pdf", str(source)])
+
+    assert result.exit_code == 1
+    payload = _result_payload(result)
+    assert payload["code"] == "source_changed"
+    assert source.stat().st_size == V2_RESOURCE_POLICY.local_pdf_max_bytes + 1
+
+
+def test_maintenance_extract_pdf_passes_v2_text_budget_and_reports_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from paper_reader.pdf_extract import ExtractedTextLimitError
+    from paper_reader.resource_policy import V2_RESOURCE_POLICY
+
+    fixture = Path(__file__).parent / "fixtures" / "minimal.pdf"
+    pdf_extract = importlib.import_module("paper_reader.pdf_extract")
+    observed_kwargs: dict[str, object] = {}
+
+    def text_budget_exceeded(*_args, **kwargs):
+        observed_kwargs.update(kwargs)
+        raise ExtractedTextLimitError(
+            actual_chars=V2_RESOURCE_POLICY.extracted_text_max_chars + 1,
+            max_chars=V2_RESOURCE_POLICY.extracted_text_max_chars,
+        )
+
+    monkeypatch.setattr(pdf_extract, "extract_pdf", text_budget_exceeded)
+
+    result = _invoke(["maintenance", "extract-pdf", str(fixture)])
+
+    assert result.exit_code == 1
+    payload = _result_payload(result)
+    assert observed_kwargs["max_chars"] == V2_RESOURCE_POLICY.extracted_text_max_chars
+    assert payload["code"] == "extracted_text_limit_exceeded"
+    assert payload["data"] == {
+        "extracted_chars": V2_RESOURCE_POLICY.extracted_text_max_chars + 1,
+        "max_chars": V2_RESOURCE_POLICY.extracted_text_max_chars,
+    }
+
+
+def test_maintenance_extract_pdf_rejects_max_pages_above_v2_cap() -> None:
+    from paper_reader.resource_policy import V2_RESOURCE_POLICY
+
+    fixture = Path(__file__).parent / "fixtures" / "minimal.pdf"
+    result = _invoke(
+        [
+            "maintenance",
+            "extract-pdf",
+            str(fixture),
+            "--max-pages",
+            str(V2_RESOURCE_POLICY.pdf_max_pages + 1),
+        ]
+    )
+
+    assert result.exit_code != 0
+    payload = _result_payload(result)
+    assert payload["code"] == "invalid_command_usage"
+
+
+def test_zotero_workflow_routes_original_input_and_forbids_unbound_secondary_capture() -> None:
+    reference = (
+        Path(__file__).parents[1] / "references" / "zotero-workflow.md"
+    ).read_text(encoding="utf-8")
+
+    assert 'uv run paper_reader route "<original user input>"' in reference
+    assert "secondary_contexts" not in reference
+    assert "immutable evidence ingestion" in reference
+    assert "evidence.json" in reference
+    assert "must not be written into the run" in reference

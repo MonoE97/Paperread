@@ -429,17 +429,17 @@ def test_review_run_update_fault_leaves_unbound_orphan_and_retry_binds_new_packa
     run_dir, evidence_digest = _prepared_run(tmp_path)
     _write_summary_and_review(run_dir, evidence_digest)
     run_before = (run_dir / "run.json").read_bytes()
-    original_write = review_package.atomic_write_json
+    original_cas = review_package.cas_update_run
     failed = False
 
-    def fail_once(path: Path, value, **kwargs):
+    def fail_once(loaded, value, **kwargs):
         nonlocal failed
-        if Path(path).name == "run.json" and not failed:
+        if loaded.manifest_path.name == "run.json" and not failed:
             failed = True
             raise OSError("injected failure after review package publication")
-        return original_write(path, value, **kwargs)
+        return original_cas(loaded, value, **kwargs)
 
-    monkeypatch.setattr(review_package, "atomic_write_json", fail_once)
+    monkeypatch.setattr(review_package, "cas_update_run", fail_once)
 
     first = _invoke(["review", "seal", str(run_dir)])
 

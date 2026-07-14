@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
+import stat
 import sys
+from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 import click
 import typer
@@ -11,6 +14,7 @@ from typer.core import TyperGroup
 
 from paper_reader import __version__
 from paper_reader.contracts import PaperReaderCommandResult
+from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.routing import RoutingError, route_input
 from paper_reader.storage import canonical_json_bytes, rfc3339_utc
 from paper_reader.v2_loader import RunLoadError, load_v2_run
@@ -23,6 +27,88 @@ _RESULT_EMITTED: ContextVar[bool] = ContextVar(
 _PUBLIC_GROUPS = frozenset(
     {"run", "review", "candidate", "local", "zotero", "maintenance"}
 )
+
+
+class _MaintenancePdfSizeLimitError(ValueError):
+    def __init__(self, *, actual_bytes: int, max_bytes: int) -> None:
+        super().__init__(f"PDF exceeds {max_bytes} bytes")
+        self.actual_bytes = actual_bytes
+        self.max_bytes = max_bytes
+
+
+class _MaintenancePdfSourceChanged(ValueError):
+    pass
+
+
+def _maintenance_pdf_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+@contextmanager
+def _held_maintenance_pdf_bytes(
+    pdf_path: Path,
+    *,
+    max_bytes: int,
+) -> Iterator[tuple[Path, bytes]]:
+    resolved = pdf_path.expanduser().resolve(strict=True)
+    descriptor = os.open(
+        resolved,
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        opened_before = os.fstat(descriptor)
+        named_before = os.stat(resolved, follow_symlinks=False)
+        expected_identity = _maintenance_pdf_identity(opened_before)
+        if (
+            not stat.S_ISREG(opened_before.st_mode)
+            or not stat.S_ISREG(named_before.st_mode)
+            or _maintenance_pdf_identity(named_before) != expected_identity
+        ):
+            raise _MaintenancePdfSourceChanged(
+                "PDF pathname does not bind the held regular file"
+            )
+        if opened_before.st_size > max_bytes:
+            raise _MaintenancePdfSizeLimitError(
+                actual_bytes=opened_before.st_size,
+                max_bytes=max_bytes,
+            )
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            raw = stream.read(max_bytes + 1)
+        if len(raw) > max_bytes:
+            raise _MaintenancePdfSizeLimitError(
+                actual_bytes=len(raw),
+                max_bytes=max_bytes,
+            )
+        opened_after_read = os.fstat(descriptor)
+        if (
+            len(raw) != opened_before.st_size
+            or _maintenance_pdf_identity(opened_after_read) != expected_identity
+        ):
+            raise _MaintenancePdfSourceChanged(
+                "PDF changed while its bounded bytes were captured"
+            )
+        yield resolved, raw
+        opened_after = os.fstat(descriptor)
+        named_after = os.stat(resolved, follow_symlinks=False)
+        if (
+            _maintenance_pdf_identity(opened_after) != expected_identity
+            or _maintenance_pdf_identity(named_after) != expected_identity
+        ):
+            raise _MaintenancePdfSourceChanged(
+                "PDF pathname or held file changed during extraction"
+            )
+    finally:
+        os.close(descriptor)
 
 
 def _command_from_args(raw_args: Sequence[str]) -> str:
@@ -785,14 +871,88 @@ def zotero_reconcile(authorization: Path) -> None:
 @maintenance_app.command("extract-pdf")
 def maintenance_extract_pdf(
     pdf_path: Path,
-    max_pages: int | None = typer.Option(None, "--max-pages", min=1),
+    max_pages: int | None = typer.Option(
+        None,
+        "--max-pages",
+        min=1,
+        max=V2_RESOURCE_POLICY.pdf_max_pages,
+    ),
 ) -> None:
     """Run the existing pure PDF text extractor under the V2 result envelope."""
-    from paper_reader.pdf_extract import extract_pdf
+    import fitz
+
+    from paper_reader.pdf_extract import (
+        ExtractedTextLimitError,
+        PdfPageLimitError,
+        extract_pdf,
+    )
 
     try:
-        extraction = extract_pdf(pdf_path, max_pages=max_pages)
-    except (FileNotFoundError, ValueError):
+        with _held_maintenance_pdf_bytes(
+            pdf_path,
+            max_bytes=V2_RESOURCE_POLICY.local_pdf_max_bytes,
+        ) as (resolved_pdf, pdf_bytes):
+            extraction = extract_pdf(
+                resolved_pdf,
+                max_pages=max_pages,
+                max_chars=V2_RESOURCE_POLICY.extracted_text_max_chars,
+                hard_max_pages=V2_RESOURCE_POLICY.pdf_max_pages,
+                _verified_pdf_bytes=pdf_bytes,
+            )
+    except _MaintenancePdfSizeLimitError as exc:
+        message = "PDF exceeds the V2 source-size limit"
+        _finish(
+            "maintenance extract-pdf",
+            ok=False,
+            code="source_too_large",
+            data={
+                "size_bytes": exc.actual_bytes,
+                "max_size_bytes": exc.max_bytes,
+            },
+            message=message,
+            diagnostic=message,
+        )
+        return
+    except PdfPageLimitError as exc:
+        message = "PDF exceeds the V2 page-count limit"
+        _finish(
+            "maintenance extract-pdf",
+            ok=False,
+            code="pdf_page_limit_exceeded",
+            data={
+                "page_count": exc.actual_pages,
+                "max_pages": exc.max_pages,
+            },
+            message=message,
+            diagnostic=message,
+        )
+        return
+    except ExtractedTextLimitError as exc:
+        message = "PDF exceeds the V2 extracted-text limit"
+        _finish(
+            "maintenance extract-pdf",
+            ok=False,
+            code="extracted_text_limit_exceeded",
+            data={
+                "extracted_chars": exc.actual_chars,
+                "max_chars": exc.max_chars,
+            },
+            message=message,
+            diagnostic=message,
+        )
+        return
+    except _MaintenancePdfSourceChanged:
+        message = "PDF source changed during bounded extraction"
+        _finish(
+            "maintenance extract-pdf",
+            ok=False,
+            code="source_changed",
+            data={"pdf_path": str(pdf_path)},
+            message=message,
+            diagnostic=message,
+        )
+        return
+    except (FileNotFoundError, OSError, fitz.FileDataError, ValueError):
         message = "PDF extraction failed for the requested input"
         _finish(
             "maintenance extract-pdf",

@@ -170,6 +170,20 @@ def test_parallel_dispatch_declares_claim_bound_authorization_handoff() -> None:
         assert phrase in text
 
 
+def test_batch_claim_docs_limit_each_event_to_one_pdf() -> None:
+    for path in [SKILL, BATCH_WORKFLOW, PARALLEL_DISPATCH]:
+        text = read(path)
+        for phrase in [
+            "at most one PDF item per journal event",
+            "independent claims",
+            "non-PDF items",
+            "skips later PDFs",
+            "fills remaining event capacity",
+            "returns one eligible PDF",
+        ]:
+            assert phrase in text
+
+
 def test_batch_authorization_requires_paired_external_identity() -> None:
     for path in [SKILL, BATCH_WORKFLOW, PARALLEL_DISPATCH]:
         text = read(path)

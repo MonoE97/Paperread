@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
+import paper_reader_batch.v2_json as v2_json
 from paper_reader_batch.v2_contracts import (
     MANIFEST_SCHEMA_VERSION,
     BatchManifest,
@@ -39,6 +40,18 @@ from paper_reader_batch.v2_receipts import FaultHook, RequestOutcome, RequestRec
 
 DEFAULT_CONCURRENCY = 3
 DEFAULT_WRITE_POLICY = "zotero_write"
+MAX_PDF_SOURCE_BYTES = 256 * 1024 * 1024
+PDF_READ_CHUNK_BYTES = 1024 * 1024
+
+
+def _require_manifest_json_within_limit(raw: bytes) -> None:
+    max_bytes = v2_json.MAX_JSON_ARTIFACT_BYTES
+    if len(raw) > max_bytes:
+        raise BatchRuntimeError(
+            "resource_limit",
+            "manifest exceeds the JSON artifact limit",
+            details={"size_bytes": len(raw), "max_bytes": max_bytes},
+        )
 
 
 def _normalized_output(path: Path) -> Path:
@@ -70,7 +83,23 @@ def _pdf_source(path: Path) -> PdfSource:
         flags |= os.O_NOFOLLOW
     try:
         path_before = os.lstat(resolved)
+        if not stat.S_ISREG(path_before.st_mode):
+            raise BatchRuntimeError(
+                "invalid_pdf",
+                f"PDF input is not a regular file: {resolved}",
+            )
+        if path_before.st_size > MAX_PDF_SOURCE_BYTES:
+            raise BatchRuntimeError(
+                "source_too_large",
+                f"PDF input exceeds {MAX_PDF_SOURCE_BYTES} bytes: {resolved}",
+                details={
+                    "size_bytes": path_before.st_size,
+                    "max_bytes": MAX_PDF_SOURCE_BYTES,
+                },
+            )
         descriptor = os.open(resolved, flags)
+    except BatchRuntimeError:
+        raise
     except OSError as exc:
         raise BatchRuntimeError("source_unreadable", f"cannot open PDF: {resolved}") from exc
     digest = hashlib.sha256()
@@ -81,14 +110,46 @@ def _pdf_source(path: Path) -> PdfSource:
             before.st_ino,
         ):
             raise BatchRuntimeError("invalid_pdf", f"PDF input is not a regular file: {resolved}")
+        if before.st_size > MAX_PDF_SOURCE_BYTES:
+            raise BatchRuntimeError(
+                "source_too_large",
+                f"PDF input exceeds {MAX_PDF_SOURCE_BYTES} bytes: {resolved}",
+                details={
+                    "size_bytes": before.st_size,
+                    "max_bytes": MAX_PDF_SOURCE_BYTES,
+                },
+            )
         first = os.read(descriptor, 5)
         if first != b"%PDF-":
             raise BatchRuntimeError("invalid_pdf", f"file does not have a PDF signature: {resolved}")
         digest.update(first)
+        total_bytes = len(first)
+        if total_bytes > MAX_PDF_SOURCE_BYTES:
+            raise BatchRuntimeError(
+                "source_too_large",
+                f"PDF input grew beyond {MAX_PDF_SOURCE_BYTES} bytes while reading: {resolved}",
+                details={
+                    "size_bytes": total_bytes,
+                    "max_bytes": MAX_PDF_SOURCE_BYTES,
+                },
+            )
         while True:
-            chunk = os.read(descriptor, 1024 * 1024)
+            chunk = os.read(
+                descriptor,
+                min(PDF_READ_CHUNK_BYTES, MAX_PDF_SOURCE_BYTES - total_bytes + 1),
+            )
             if not chunk:
                 break
+            total_bytes += len(chunk)
+            if total_bytes > MAX_PDF_SOURCE_BYTES:
+                raise BatchRuntimeError(
+                    "source_too_large",
+                    f"PDF input grew beyond {MAX_PDF_SOURCE_BYTES} bytes while reading: {resolved}",
+                    details={
+                        "size_bytes": total_bytes,
+                        "max_bytes": MAX_PDF_SOURCE_BYTES,
+                    },
+                )
             digest.update(chunk)
         after = os.fstat(descriptor)
         path_after = os.lstat(resolved)
@@ -198,6 +259,7 @@ def _create_manifest(
         except ValidationError as exc:
             raise BatchRuntimeError("invalid_manifest", "manifest failed strict validation") from exc
         artifact_bytes = canonical_json_bytes(manifest)
+        _require_manifest_json_within_limit(artifact_bytes)
         artifact_sha256 = sha256_bytes(artifact_bytes)
         return {
             "manifest": manifest.model_dump(mode="json"),
@@ -213,11 +275,14 @@ def _create_manifest(
         manifest_payload = plan.get("manifest")
         if not isinstance(manifest_payload, dict):
             raise BatchRuntimeError("receipt_corrupt", "manifest receipt plan is invalid")
-        return canonical_json_bytes(manifest_payload)
+        raw = canonical_json_bytes(manifest_payload)
+        _require_manifest_json_within_limit(raw)
+        return raw
 
     def inspect(candidate: Path, plan: dict[str, Any]) -> bool:
+        expected = expected_bytes(plan)
         try:
-            return read_bytes(candidate) == expected_bytes(plan)
+            return read_bytes(candidate, max_bytes=len(expected)) == expected
         except BatchRuntimeError as exc:
             if exc.code in {"artifact_unreadable", "storage_missing"}:
                 return False

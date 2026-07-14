@@ -238,8 +238,7 @@
         {
           "type": "null"
         }
-      ],
-      "default": null
+      ]
     },
     "schema_version": {
       "const": "paper_reader_batch.local-prepare-result.v2",
@@ -275,7 +274,8 @@
     "lease_token_sha256",
     "status",
     "source",
-    "paper_reader_root"
+    "paper_reader_root",
+    "paper_reader_run_directory"
   ],
   "title": "LocalPrepareResult",
   "type": "object"
