@@ -93,9 +93,9 @@ Do not add `README.md`, `INSTALLATION_GUIDE.md`, `QUICK_REFERENCE.md`, or `CHANG
 - Local PDF path and directory path inputs always route before Zotero text。已存在 `.pdf` -> `local_pdf`；已存在目录 -> `local_pdf_directory` 并交给 `$paper_reader_batch`；看起来像 path 但不存在 -> `unsupported_local_path`；只有其他非 path 文本才可成为 `zotero_title`。Existing local paths are not Zotero title fragments。
 - Local PDF output is local-only：不搜索 Zotero、不做同名/同 DOI duplicate check、不创建 Zotero candidate/authorization、不进入 batch write lane。首次目标仍是 `<pdf_stem>_analysis/` 与 `<pdf_stem>_note.md`，重复运行只可分配 `_v2`、`_v3` 等新路径，禁止覆盖。
 - Zotero title workflow 的 V2 run 默认位于安装后 skill root 的 `runs/YYYY-MM-DD/<title-slug>/`；batch run 默认位于 batch skill root 的 `runs/YYYY-MM-DD/<batch-slug>/`。两个 skill root 相互独立，batch 只能索引 `$paper_reader` 的 immutable artifacts，不能复制单篇 schema、模板、证据规则或 gate。
-- V2 evidence 由 immutable `evidence/<evidence_id>/` 拥有；`context.md`、`section_context.md`、`figure_context.md` 与 secondary capture 必须通过 `evidence.json` membership 和 hash 解析。`section_context.md` 只用于导航，不是 canonical evidence source。
+- V2 evidence 由 immutable `evidence/<evidence_id>/` 拥有；`context.md`、`section_context.md` 与 `figure_context.md` 必须通过 `evidence.json` membership 和 hash 解析。`section_context.md` 只用于导航，不是 canonical evidence source。任何未来可用的 secondary capture 同样必须先进入该 immutable membership；当前 grouped runtime 尚无 immutable secondary-capture ingestion。
 - 最终 `evidence_summary` locator 必须使用 canonical 格式：`context.md page <N>`、`context.md page <N> section <Section Name>`、`context.md page <N> section <Section Name> table_candidate <N>` 或 `figure_context.md <figure_id>`。裸 `context.md` / `figure_context.md`、散文式 locator、`section_context.md` 和 secondary context 路径都必须阻断 review sealing / candidate build。
-- 微信公众号、新闻稿、博客等网页只作为 secondary context capture，用于 cross-check 和补充背景；`evidence_summary` 只能引用 canonical PDF / figure evidence。Secondary context must not cite secondary context in `evidence_summary`。
+- `scripts/capture-secondary-url.mjs` 当前只产生未绑定诊断材料，不得参与 review 或 candidate 构建；微信公众号、新闻稿、博客等网页只有在未来经过 immutable evidence ingestion 后才可用于 cross-check。`evidence_summary` 始终只能引用 canonical PDF / figure evidence。
 
 ## 阅读笔记语言规则
 
@@ -173,6 +173,7 @@ uv run python scripts/validate-skill.py .
 涉及根 README、中文 README、AGENTS 或安装说明时，必须运行与修改范围对应的 skill-root 验证命令；仓库根目录不维护单独的根文档 validator。
 
 V2 发布前必须从待发布的 committed revision 把 `paper_reader/` 和 `paper_reader_batch/` 的 tracked files 分别导出到仓库外 staging 目录；在 `uv sync` 前运行 portable validator 的 `--release-bundle` 模式，再在 staging/安装目录中运行同一组 skill-root 验证，证明两个 skill source 都自包含且未夹带运行状态。
+Batch 的 local-prepare 集成测试必须通过显式 `PAPER_READER_TEST_ROOT=/path/to/separately-staged/paper_reader` 支持非 sibling staging；不得把仓库 sibling 布局当作发布合同。
 
 ## 写入规则
 

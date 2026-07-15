@@ -303,6 +303,9 @@ def test_batch_v2_schema_contract_is_exhaustive() -> None:
     ]:
         assert stale_schema not in text
 
+    assert "Earlier V2 results that predate that field remain readable" not in text
+    assert "missing required V2 fields are rejected" in text
+
 
 def test_root_docs_describe_two_installable_skill_sources() -> None:
     if not (REPO_ROOT / "README.md").exists():
@@ -377,6 +380,15 @@ def test_root_readmes_use_independent_skill_roots_and_distinguish_write_recovery
 
         assert "unexpired started claim" in text
         assert "expired started claim" in text
+
+
+def test_release_verification_uses_an_explicit_separately_staged_reader_root() -> None:
+    if not (REPO_ROOT / "README.md").exists():
+        pytest.skip("root documentation is validated only in the source repository")
+
+    for text in [read(REPO_ROOT / "README.md"), read(REPO_ROOT / "README.zh-CN.md")]:
+        assert "PAPER_READER_TEST_ROOT" in text
+        assert "uv run pytest" in text
 
 
 def test_batch_project_version_is_2_0_0() -> None:

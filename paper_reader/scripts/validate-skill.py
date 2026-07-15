@@ -29,6 +29,29 @@ FORBIDDEN_V1_RUNTIME_CALLABLES = {
         "prepare_pdf_bundle",
     },
 }
+FORBIDDEN_V1_RUNTIME_MODULES = {
+    "src/paper_reader/cli.py",
+    "src/paper_reader/gate.py",
+    "src/paper_reader/local_candidate.py",
+    "src/paper_reader/local_gate.py",
+    "src/paper_reader/local_publication.py",
+    "src/paper_reader/note_table_migration.py",
+    "src/paper_reader/review.py",
+    "src/paper_reader/write_candidate.py",
+    "src/paper_reader/write_payload.py",
+    "src/paper_reader/zotero_details.py",
+}
+ACTIVE_SCHEMA_PATHS = {
+    "references/schemas/paper_reader.run.v2.schema.json",
+    "references/schemas/paper_reader.summary.v2.schema.json",
+    "references/schemas/paper_reader.review.v2.schema.json",
+    "references/schemas/paper_reader.review-package.v2.schema.json",
+    "references/schemas/paper_reader.candidate.v2.schema.json",
+    "references/schemas/paper_reader.write-authorization.v2.schema.json",
+    "references/schemas/paper_reader.verification.v2.schema.json",
+    "references/schemas/paper_reader.reconciliation.v2.schema.json",
+    "references/schemas/paper_reader.command-result.v2.schema.json",
+}
 RUNTIME_STATE_PARTS = {
     ".mypy_cache",
     ".pytest_cache",
@@ -143,9 +166,15 @@ def _read_toml(path: Path, label: str, errors: list[str]) -> dict | None:
         return None
 
 
-def _validate_release_metadata(root: Path, errors: list[str]) -> None:
+def _validate_release_metadata(
+    root: Path,
+    errors: list[str],
+    regular_required_paths: set[str],
+) -> None:
     pyproject_path = root / "pyproject.toml"
-    if pyproject_path.exists() and (pyproject := _read_toml(pyproject_path, "pyproject.toml", errors)):
+    if "pyproject.toml" in regular_required_paths and (
+        pyproject := _read_toml(pyproject_path, "pyproject.toml", errors)
+    ):
         project = pyproject.get("project")
         if not isinstance(project, dict):
             errors.append("pyproject.toml must contain [project]")
@@ -159,7 +188,9 @@ def _validate_release_metadata(root: Path, errors: list[str]) -> None:
                 errors.append("pyproject paper_reader entrypoint must be paper_reader.public_cli:app")
 
     lock_path = root / "uv.lock"
-    if lock_path.exists() and (lock := _read_toml(lock_path, "uv.lock", errors)):
+    if "uv.lock" in regular_required_paths and (
+        lock := _read_toml(lock_path, "uv.lock", errors)
+    ):
         packages = lock.get("package")
         matches = (
             [item for item in packages if isinstance(item, dict) and item.get("name") == "paper-reader"]
@@ -176,11 +207,63 @@ def _validate_release_metadata(root: Path, errors: list[str]) -> None:
                 errors.append("uv.lock paper-reader package must be the editable skill root")
 
 
-def _validate_no_v1_runtime_callables(root: Path, errors: list[str]) -> None:
-    for relative_path, forbidden_names in FORBIDDEN_V1_RUNTIME_CALLABLES.items():
-        source_path = root / relative_path
-        if not source_path.is_file():
+def _validate_required_files(root: Path, errors: list[str]) -> set[str]:
+    regular_paths: set[str] = set()
+    for relative_path in REQUIRED_PATHS:
+        try:
+            metadata = os.lstat(root / relative_path)
+        except FileNotFoundError:
+            errors.append(f"missing required path: {relative_path}")
+        except OSError as exc:
+            errors.append(f"cannot inspect required path: {relative_path}: {exc}")
+        else:
+            if stat.S_ISREG(metadata.st_mode):
+                regular_paths.add(relative_path)
+            else:
+                errors.append(f"required path is not a regular file: {relative_path}")
+    return regular_paths
+
+
+def _validate_no_v1_runtime_modules(root: Path, errors: list[str]) -> None:
+    for relative_path in sorted(FORBIDDEN_V1_RUNTIME_MODULES):
+        try:
+            os.lstat(root / relative_path)
+        except FileNotFoundError:
             continue
+        except OSError as exc:
+            errors.append(f"cannot inspect forbidden V1 runtime module: {relative_path}: {exc}")
+        else:
+            errors.append(f"forbidden V1 runtime module: {relative_path}")
+
+
+def _validate_active_schema_namespace(root: Path, errors: list[str]) -> None:
+    schema_root = root / "references/schemas"
+    active_names = {Path(relative_path).name for relative_path in ACTIVE_SCHEMA_PATHS}
+    try:
+        with os.scandir(schema_root) as iterator:
+            entry_names = sorted(entry.name for entry in iterator)
+    except OSError as exc:
+        errors.append(f"cannot inspect schema directory: {exc}")
+        return
+    for entry_name in entry_names:
+        relative_path = f"references/schemas/{entry_name}"
+        if entry_name in active_names:
+            continue
+        if entry_name.endswith(".schema.json"):
+            errors.append(f"unexpected schema file: {relative_path}")
+        else:
+            errors.append(f"unexpected schema namespace entry: {relative_path}")
+
+
+def _validate_no_v1_runtime_callables(
+    root: Path,
+    errors: list[str],
+    regular_required_paths: set[str],
+) -> None:
+    for relative_path, forbidden_names in FORBIDDEN_V1_RUNTIME_CALLABLES.items():
+        if relative_path not in regular_required_paths:
+            continue
+        source_path = root / relative_path
         try:
             module = ast.parse(source_path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError, UnicodeDecodeError) as exc:
@@ -281,12 +364,10 @@ def validate_skill(skill_root: Path, *, release_bundle: bool = False) -> list[st
         if errors:
             return errors
 
-    for relative_path in REQUIRED_PATHS:
-        if not (root / relative_path).exists():
-            errors.append(f"missing required path: {relative_path}")
+    regular_required_paths = _validate_required_files(root, errors)
 
     skill_md = root / "SKILL.md"
-    if skill_md.exists():
+    if "SKILL.md" in regular_required_paths:
         try:
             metadata = parse_frontmatter(skill_md)
         except ValueError as exc:
@@ -301,11 +382,16 @@ def validate_skill(skill_root: Path, *, release_bundle: bool = False) -> list[st
                 errors.append("frontmatter description must be non-empty")
 
     init_py = root / "src/paper_reader/__init__.py"
-    if init_py.exists() and '__version__ = "2.0.0"' not in init_py.read_text(encoding="utf-8"):
+    if (
+        "src/paper_reader/__init__.py" in regular_required_paths
+        and '__version__ = "2.0.0"' not in init_py.read_text(encoding="utf-8")
+    ):
         errors.append("paper_reader package version must be 2.0.0")
 
-    _validate_release_metadata(root, errors)
-    _validate_no_v1_runtime_callables(root, errors)
+    _validate_release_metadata(root, errors, regular_required_paths)
+    _validate_no_v1_runtime_modules(root, errors)
+    _validate_active_schema_namespace(root, errors)
+    _validate_no_v1_runtime_callables(root, errors, regular_required_paths)
     for current_root, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
         dirnames[:] = sorted(
             dirname for dirname in dirnames if dirname not in RUNTIME_STATE_PARTS

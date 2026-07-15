@@ -46,8 +46,48 @@ from paper_reader_batch.v2_manifest import create_pdf_paths_manifest
 from paper_reader_batch.v2_run import initialize_run
 
 
-PAPER_READER_ROOT = Path(__file__).resolve().parents[2] / "paper_reader"
+def _paper_reader_test_root() -> Path:
+    configured = os.environ.get("PAPER_READER_TEST_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return Path(__file__).resolve().parents[2] / "paper_reader"
+
+
+PAPER_READER_ROOT = _paper_reader_test_root()
 FIXTURE_PDF = PAPER_READER_ROOT / "tests" / "fixtures" / "minimal.pdf"
+
+
+def test_local_prepare_integration_root_can_be_an_explicit_non_sibling(
+    tmp_path: Path,
+) -> None:
+    configured = tmp_path / "separately-staged-paper-reader"
+    configured.mkdir()
+    environment = os.environ.copy()
+    environment["PAPER_READER_TEST_ROOT"] = str(configured)
+    script = """
+import json
+import runpy
+import sys
+
+namespace = runpy.run_path(sys.argv[1])
+print(json.dumps({
+    "root": str(namespace["PAPER_READER_ROOT"]),
+    "fixture": str(namespace["FIXTURE_PDF"]),
+}))
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(Path(__file__).resolve())],
+        check=True,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "root": str(configured.resolve()),
+        "fixture": str(configured.resolve() / "tests/fixtures/minimal.pdf"),
+    }
 
 
 def test_held_started_marker_rejects_bytes_beyond_exact_payload(tmp_path: Path) -> None:

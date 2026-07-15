@@ -559,6 +559,34 @@ def test_root_readmes_use_tracked_release_staging_instead_of_recursive_source_co
         assert "--release-bundle" in text
 
 
+def test_root_docs_do_not_claim_unbound_secondary_capture_can_affect_notes() -> None:
+    agents_path = REPO_ROOT / "AGENTS.md"
+    if not agents_path.exists():
+        pytest.skip("root documentation is validated only in the source repository")
+
+    english = read(REPO_ROOT / "README.md")
+    chinese = read(REPO_ROOT / "README.zh-CN.md")
+    agents = read(agents_path)
+
+    assert "unbound diagnostic material only" in english
+    assert "must not participate in review or candidate construction" in english
+    assert "仅是未绑定的诊断材料" in chinese
+    assert "不得参与 review 或 candidate 构建" in chinese
+    assert "当前 grouped runtime 尚无 immutable secondary-capture ingestion" in agents
+    assert "不得参与 review 或 candidate 构建" in agents
+
+
+def test_root_readmes_state_the_actual_posix_runtime_support_boundary() -> None:
+    if not (REPO_ROOT / "README.md").exists():
+        pytest.skip("root documentation is validated only in the source repository")
+
+    english = read(REPO_ROOT / "README.md")
+    chinese = read(REPO_ROOT / "README.zh-CN.md")
+
+    assert "supports macOS and Linux; on Windows, use WSL" in english
+    assert "支持 macOS 和 Linux；Windows 请使用 WSL" in chinese
+
+
 def test_single_validator_tracks_v2_runtime_and_schemas() -> None:
     validator = read(VALIDATE_SCRIPT)
 

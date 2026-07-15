@@ -17,6 +17,8 @@ Do not put a `README.md` inside `paper_reader/` or `paper_reader_batch/`; skills
 
 ## Install
 
+The Paper Reader 2.0 runtime currently supports macOS and Linux; on Windows, use WSL. The tracked-file installation helper below requires a POSIX shell.
+
 Install `uv` before staging the skill. Use the official installer or a package manager; common options are:
 
 ```bash
@@ -174,7 +176,7 @@ paper_reader supports two inputs:
 
 Local PDF path and directory path inputs skip Zotero lookup and duplicate checks. Existing local paths are not Zotero title fragments; directory paths belong to `paper_reader_batch manifest from-pdf-folder`, which is non-recursive unless `--recursive` is explicit.
 
-Both workflows use full-PDF extraction by default. Final `evidence_summary` locators must use one of these canonical forms: `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, and secondary context paths are invalid. `section_context.md` is only a navigation aid. Secondary web context captured through `scripts/capture-secondary-url.mjs` is cross-check material only and must not cite secondary context in `evidence_summary`.
+Both workflows use full-PDF extraction by default. Final `evidence_summary` locators must use one of these canonical forms: `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, and secondary context paths are invalid. `section_context.md` is only a navigation aid. In the current grouped runtime, output from `scripts/capture-secondary-url.mjs` is unbound diagnostic material only: because no immutable secondary-capture ingestion command exists, it must not participate in review or candidate construction and cannot be cited in `evidence_summary`.
 
 paper_reader_batch supports four batch inputs: Zotero collection inventories, multiple Zotero titles, local PDF folders, and multiple PDF paths. It normalizes them into a strict manifest and uses an append-only hash-chain journal as authority; `state.json` is only a reconstructable snapshot. Worker and local-prepare leases default to 900 seconds, and the serial write claim defaults to 120 seconds. Zotero-backed items use `zotero_write` by default, while PDF items never enter the write queue. After durable `write.started`, a crash is uncertain and is never resent: `run recover --paper-reader-root ...` delegates read-only single-paper reconciliation, then records `written`, `retry_confirmation_required`, or `blocked`. Pass `--write-policy prepare_only` for dry-run. A pure local-PDF report uses `effective_write_policy=local_only`; each per-paper result is extracted from the single-paper note's `30 秒结论` row, falling back to `tldr` then `one_sentence_summary` without resummarizing.
 
@@ -215,6 +217,12 @@ uv run pytest
 uv run paper_reader_batch --version
 uv run paper_reader_batch --help
 uv run python scripts/validate-skill.py .
+```
+
+The local-prepare integration tests exercise a real, separately staged `paper_reader`. If that root is not the repository sibling, bind it explicitly rather than relying on discovery:
+
+```bash
+PAPER_READER_TEST_ROOT="/path/to/separately-staged/paper_reader" uv run pytest
 ```
 
 Maintainers should also build a tracked-file staging directory outside the repository as shown above, run `uv run --no-project --python 3.13 python scripts/validate-skill.py . --release-bundle` before `uv sync`, and then run the same verification set there before treating `paper_reader_batch/` as self-contained.

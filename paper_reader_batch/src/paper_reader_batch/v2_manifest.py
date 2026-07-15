@@ -454,9 +454,35 @@ def create_zotero_collection_manifest(
     if not isinstance(inventory, dict) or not isinstance(inventory.get("collection"), dict):
         raise BatchRuntimeError("invalid_inventory", "inventory must contain a collection object")
     collection = inventory["collection"]
-    collection_key = str(collection.get("key") or "").strip()
-    collection_name = str(collection.get("name") or "").strip()
-    if not collection_query.strip() or collection_query.strip() not in {collection_key, collection_name}:
+
+    def optional_string_field(value: Any, *, field: str) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise BatchRuntimeError(
+                "invalid_inventory",
+                f"inventory {field} must be a non-empty string when present",
+            )
+        return value.strip()
+
+    def required_string_field(value: Any, *, field: str) -> str:
+        normalized = optional_string_field(value, field=field)
+        if normalized is None:
+            raise BatchRuntimeError(
+                "invalid_inventory",
+                f"inventory {field} must be a non-empty string",
+            )
+        return normalized
+
+    collection_key = optional_string_field(collection.get("key"), field="collection.key")
+    collection_name = optional_string_field(collection.get("name"), field="collection.name")
+    if collection_key is None and collection_name is None:
+        raise BatchRuntimeError(
+            "invalid_inventory",
+            "inventory collection must contain a non-empty key or name",
+        )
+    normalized_query = collection_query.strip()
+    if not normalized_query or normalized_query not in {collection_key, collection_name}:
         raise BatchRuntimeError(
             "collection_mismatch",
             f"collection query does not match inventory key/name: {collection_query}",
@@ -469,10 +495,9 @@ def create_zotero_collection_manifest(
     for index, raw_item in enumerate(raw_items, start=1):
         if not isinstance(raw_item, dict):
             raise BatchRuntimeError("invalid_inventory", f"inventory item {index} is not an object")
-        item_key = str(raw_item.get("item_key") or raw_item.get("key") or "").strip()
-        title = str(raw_item.get("title") or "").strip()
-        if not item_key or not title:
-            raise BatchRuntimeError("invalid_inventory", f"inventory item {index} lacks item key/title")
+        raw_item_key = raw_item.get("item_key") if "item_key" in raw_item else raw_item.get("key")
+        item_key = required_string_field(raw_item_key, field=f"items[{index}].item_key")
+        title = required_string_field(raw_item.get("title"), field=f"items[{index}].title")
         items.append(
             ZoteroItemManifestItem(
                 item_id=f"{index:03d}",
@@ -492,13 +517,13 @@ def create_zotero_collection_manifest(
             description=collection_name or collection_key,
             source_sha256=inventory_sha256,
             collection_key=collection_key,
-            collection_name=collection_name or None,
+            collection_name=collection_name,
         ),
         items=items,
         input_fingerprint={
             "inventory_path": str(inventory_path),
             "inventory_sha256": inventory_sha256,
-            "collection_query": collection_query.strip(),
+            "collection_query": normalized_query,
         },
         output=output,
         request_id=request_id,

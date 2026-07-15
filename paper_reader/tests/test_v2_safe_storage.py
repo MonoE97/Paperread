@@ -1425,7 +1425,8 @@ def test_anchored_tree_publication_never_follows_replaced_parent(
 
     def swap_then_rename(*args, **kwargs) -> None:
         nonlocal swapped
-        if not swapped:
+        source_name = args[1]
+        if not swapped and source_name == staging.name:
             swapped = True
             anchor_path.rename(detached)
             anchor_path.symlink_to(outside, target_is_directory=True)
@@ -1602,7 +1603,7 @@ def test_anchored_tree_publication_preserves_unknown_child_swap_during_rename(
         **kwargs,
     ) -> None:
         nonlocal injected
-        if not injected:
+        if not injected and source_name == staging.name:
             injected = True
             staging_fd = storage_module.os.open(
                 source_name,

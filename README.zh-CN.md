@@ -17,6 +17,8 @@ CLI 负责准备不可变 artifacts、校验 gate、渲染笔记和记录 batch 
 
 ## 安装
 
+Paper Reader 2.0 运行时目前支持 macOS 和 Linux；Windows 请使用 WSL。下面的 tracked-file 安装 helper 需要 POSIX shell。
+
 staging skill 前先安装 `uv`。可使用官方 installer 或包管理器；常见方式：
 
 ```bash
@@ -174,7 +176,7 @@ paper_reader 支持两类输入：
 
 本地 PDF path 和目录 path 输入会跳过 Zotero 搜索和去重检查。已存在的本地路径不是 Zotero 标题片段；目录路径交给 `paper_reader_batch manifest from-pdf-folder`，默认不递归，只有显式传 `--recursive` 才递归。
 
-两个工作流默认都会抽取完整 PDF。最终 `evidence_summary` locator 必须使用以下 canonical 格式之一：`context.md page <N>`、`context.md page <N> section <Section Name>`、`context.md page <N> section <Section Name> table_candidate <N>` 或 `figure_context.md <figure_id>`。裸 `context.md` / `figure_context.md`、`page 3 method section` 这类散文式 locator、`section_context.md` 和 secondary context 路径都无效。`section_context.md` 只作为导航辅助。通过 `scripts/capture-secondary-url.mjs` 抓取的 secondary web context 只用于 cross-check，不能在 `evidence_summary` 中作为证据引用。
+两个工作流默认都会抽取完整 PDF。最终 `evidence_summary` locator 必须使用以下 canonical 格式之一：`context.md page <N>`、`context.md page <N> section <Section Name>`、`context.md page <N> section <Section Name> table_candidate <N>` 或 `figure_context.md <figure_id>`。裸 `context.md` / `figure_context.md`、`page 3 method section` 这类散文式 locator、`section_context.md` 和 secondary context 路径都无效。`section_context.md` 只作为导航辅助。在当前 grouped runtime 中，`scripts/capture-secondary-url.mjs` 的输出仅是未绑定的诊断材料：由于尚无 immutable secondary-capture ingestion 命令，它不得参与 review 或 candidate 构建，也不能在 `evidence_summary` 中作为证据引用。
 
 paper_reader_batch 支持四类批量输入：Zotero collection inventory、多个 Zotero 标题、本地 PDF 文件夹、多个 PDF path。它归一化为严格 manifest，并以 append-only hash-chain journal 为事实源；`state.json` 只是可重建 snapshot。Worker/local-prepare lease 默认 900 秒，串行 write claim 默认 120 秒。Zotero-backed items 默认 `zotero_write`，PDF items 永远不进入 write queue。`write.started` 持久化后发生 crash 时状态只能 uncertain，不能重发；`run recover --paper-reader-root ...` 会委托单篇只读 reconciliation，再记录 `written`、`retry_confirmation_required` 或 `blocked`。Dry-run 显式传 `--write-policy prepare_only`。纯本地 PDF report 使用 `effective_write_policy=local_only`；每篇结果从单篇 note 的 `30 秒结论` 提取，缺失时依次 fallback 到 `tldr`、`one_sentence_summary`，batch 不重新总结。
 
@@ -215,6 +217,12 @@ uv run pytest
 uv run paper_reader_batch --version
 uv run paper_reader_batch --help
 uv run python scripts/validate-skill.py .
+```
+
+local-prepare 集成测试会调用真实、单独 staging 的 `paper_reader`。如果该 root 不是仓库 sibling，必须显式绑定，而不是依赖目录发现：
+
+```bash
+PAPER_READER_TEST_ROOT="/path/to/separately-staged/paper_reader" uv run pytest
 ```
 
 维护者在认为 `paper_reader_batch/` 已自包含前，也应按上面的方式在仓库外构建 tracked-file staging 目录，在 `uv sync` 前运行 `uv run --no-project --python 3.13 python scripts/validate-skill.py . --release-bundle`，然后在该目录运行同一组验证。

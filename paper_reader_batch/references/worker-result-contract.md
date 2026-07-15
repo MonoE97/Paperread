@@ -32,7 +32,7 @@ Failed/blocked `paper_reader_batch.worker-result.v2` still binds manifest/item, 
 
 ## Local Prepare Fallback Result
 
-`paper_reader_batch.local-prepare-result.v2` binds manifest/item, exact local-prepare attempt and lease token, source absolute path/size/SHA-256, the stable device/inode identity of the returned run directory, returned `paper_reader.run.v2`, evidence id/digest and the explicit `--paper-reader-root` identity. New `prepared` results must carry the stable directory identity before worker prompt/finish can mutate state. Earlier V2 results that predate that field remain readable during journal/report replay, but cannot authorize a new worker mutation. `prepared` means the V2 run validates and the referenced evidence is complete. Recovery by glob, filename stem, mtime, stdout parsing or a historical manifest is forbidden.
+`paper_reader_batch.local-prepare-result.v2` binds manifest/item, exact local-prepare attempt and lease token, source absolute path/size/SHA-256, the stable device/inode identity of the returned run directory, returned `paper_reader.run.v2`, evidence id/digest and the explicit `--paper-reader-root` identity. Every `prepared` result must carry the stable directory identity before worker prompt/finish can mutate state; missing required V2 fields are rejected during journal/report replay as well as new mutation. No compatibility reader or field fallback exists. `prepared` means the V2 run validates and the referenced evidence is complete. Recovery by glob, filename stem, mtime, stdout parsing or a historical manifest is forbidden.
 
 ## Verified Zotero Write Result
 

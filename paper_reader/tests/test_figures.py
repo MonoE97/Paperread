@@ -4,17 +4,153 @@ import base64
 import fitz
 import pytest
 
+from paper_reader import evidence_figures
 from paper_reader.figures import (
     _detect_captions,
     assess_image_quality,
     classify_figure_evidence_tier,
     extract_figures,
 )
+from paper_reader.resource_policy import V2_RESOURCE_POLICY
+from paper_reader.storage import open_directory_anchor
 from paper_reader.workflow import build_figure_context_markdown
 
 
 def _selected(payload: dict) -> list[dict]:
     return payload["selected_figures"]
+
+
+def _seal_source_tree(source_root: Path, arxiv_id: str) -> None:
+    from paper_reader import arxiv_source
+    from paper_reader.storage import snapshot_anchored_tree
+
+    with open_directory_anchor(source_root) as anchor:
+        snapshot = snapshot_anchored_tree(
+            anchor,
+            max_file_bytes=V2_RESOURCE_POLICY.arxiv_expanded_max_bytes,
+            max_total_bytes=V2_RESOURCE_POLICY.arxiv_expanded_max_bytes,
+            max_members=V2_RESOURCE_POLICY.arxiv_max_members,
+        )
+    (source_root / arxiv_source.CACHE_COMPLETION_MARKER_NAME).write_bytes(
+        arxiv_source._cache_completion_bytes(
+            arxiv_id=arxiv_id,
+            payload_snapshot=snapshot,
+        )
+    )
+
+
+def test_prepare_figure_artifacts_canonicalizes_temporary_directory_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owned_scratch = tmp_path / "owned-scratch"
+    owned_scratch.mkdir()
+    scratch_alias = tmp_path / "scratch-alias"
+    scratch_alias.symlink_to(owned_scratch, target_is_directory=True)
+    observed_output_dirs: list[Path] = []
+
+    class AliasTemporaryDirectory:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> str:
+            return str(scratch_alias)
+
+        def __exit__(self, *_exc_info: object) -> None:
+            pass
+
+    def fake_extract_figures(
+        _source_path: Path,
+        output_dir: Path,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        observed_output_dirs.append(output_dir)
+        output_dir.mkdir(parents=True)
+        return {"candidate_count": 0, "selected_figures": []}
+
+    monkeypatch.setattr(
+        evidence_figures.tempfile,
+        "TemporaryDirectory",
+        AliasTemporaryDirectory,
+    )
+    monkeypatch.setattr(evidence_figures, "extract_figures", fake_extract_figures)
+
+    staging_root = tmp_path / "staging-root"
+    with open_directory_anchor(staging_root, create=True) as staging_anchor:
+        result = evidence_figures.prepare_figure_artifacts(
+            source_path=tmp_path / "paper.pdf",
+            staging=staging_root / "evidence",
+            staging_anchor=staging_anchor,
+            future_dir=tmp_path / "run" / "evidence",
+            run_dir=tmp_path / "run",
+            figure_limit=1,
+            preview_pages=None,
+            complete=False,
+        )
+
+    assert result.degraded is False
+    assert observed_output_dirs == [owned_scratch.resolve(strict=True) / "figures"]
+
+
+def test_prepare_figure_artifacts_rejects_bound_source_hash_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_extract_figures(
+        _source_path: Path,
+        output_dir: Path,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        output_dir.mkdir(parents=True)
+        image_path = output_dir / "source.png"
+        image_path.write_bytes(b"tampered")
+        return {
+            "candidate_count": 1,
+            "selected_figures": [
+                {
+                    "figure_id": "source-1",
+                    "caption": "Figure 1",
+                    "caption_confidence": 1.0,
+                    "caption_bbox": [0.0, 0.0, 1.0, 1.0],
+                    "bbox": [0.0, 0.0, 1.0, 1.0],
+                    "page": 1,
+                    "area": 1.0,
+                    "image_path": str(image_path),
+                    "priority_score": 1.0,
+                    "source": "arxiv-source",
+                    "extraction_strategy": "deterministic",
+                    "extraction_confidence": 1.0,
+                    "fallback_reason": None,
+                    "needs_fallback": False,
+                    "visual_quality": {
+                        "width": 1,
+                        "height": 1,
+                        "status": "ok",
+                        "warnings": [],
+                    },
+                    "artifact_size_bytes": len(b"tampered"),
+                    "artifact_sha256": "0" * 64,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(evidence_figures, "extract_figures", fake_extract_figures)
+    staging_root = tmp_path / "staging-root"
+    with open_directory_anchor(staging_root, create=True) as staging_anchor:
+        result = evidence_figures.prepare_figure_artifacts(
+            source_path=tmp_path / "paper.pdf",
+            staging=staging_root / "evidence",
+            staging_anchor=staging_anchor,
+            future_dir=tmp_path / "run" / "evidence",
+            run_dir=tmp_path / "run",
+            figure_limit=1,
+            preview_pages=None,
+            complete=True,
+        )
+
+    assert result.degraded is True
+    assert result.artifacts == ()
+    assert not (staging_root / "evidence" / "figures" / "source.png").exists()
 
 
 def test_classify_figure_evidence_tier_marks_source_pdf_as_pixel_verified() -> None:
@@ -1690,6 +1826,7 @@ def test_combined_source_and_pdf_candidate_cap_is_checked_before_source_material
     source_root.mkdir()
     for index in range(150):
         (source_root / f"source-{index:03d}.png").write_bytes(b"candidate")
+    _seal_source_tree(source_root, "2501.00001")
 
     page = type("FakePage", (), {"rect": fitz.Rect(0, 0, 400, 600)})()
 
@@ -1738,7 +1875,10 @@ def test_combined_source_and_pdf_candidate_cap_is_checked_before_source_material
     def forbidden_render(*_args: object, **_kwargs: object) -> list[dict]:
         pytest.fail("combined candidate cap was checked only after source rendering")
 
-    monkeypatch.setattr("paper_reader.arxiv_source.shutil.copy2", forbidden_copy)
+    monkeypatch.setattr(
+        "paper_reader.arxiv_source.publish_bytes_no_replace",
+        forbidden_copy,
+    )
     monkeypatch.setattr(
         "paper_reader.figures.arxiv_source.render_source_figure_pdfs",
         forbidden_render,
@@ -1767,6 +1907,7 @@ def test_source_over_arxiv_cap_remains_structured_before_source_materialization(
     source_root.mkdir()
     for index in range(1_001):
         (source_root / f"source-{index:04d}.png").write_bytes(b"candidate")
+    _seal_source_tree(source_root, "2501.00001")
 
     monkeypatch.setattr(
         "paper_reader.figures.arxiv_source.resolve_arxiv_id",
@@ -1780,7 +1921,10 @@ def test_source_over_arxiv_cap_remains_structured_before_source_materialization(
     def forbidden_copy(*_args: object, **_kwargs: object) -> None:
         pytest.fail("source over arXiv cap reached copy2")
 
-    monkeypatch.setattr("paper_reader.arxiv_source.shutil.copy2", forbidden_copy)
+    monkeypatch.setattr(
+        "paper_reader.arxiv_source.publish_bytes_no_replace",
+        forbidden_copy,
+    )
 
     with pytest.raises(figures.FigureCandidateLimitError) as exc_info:
         extract_figures(

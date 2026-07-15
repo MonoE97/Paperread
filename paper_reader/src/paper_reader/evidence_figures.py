@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import stat
 import tempfile
 from dataclasses import dataclass
@@ -215,7 +217,7 @@ def prepare_figure_artifacts(
 
     try:
         with tempfile.TemporaryDirectory(prefix="paper-reader-figures-") as scratch_text:
-            scratch = Path(scratch_text)
+            scratch = Path(scratch_text).resolve(strict=True)
             scratch_figures = scratch / "figures"
             figures_payload = extract_figures(
                 source_path,
@@ -257,15 +259,37 @@ def prepare_figure_artifacts(
                     before.st_ino,
                     before.st_size,
                     before.st_mtime_ns,
+                    before.st_ctime_ns,
                     before.st_nlink,
                 ) != (
                     after.st_dev,
                     after.st_ino,
                     after.st_size,
                     after.st_mtime_ns,
+                    after.st_ctime_ns,
                     after.st_nlink,
-                ):
+                ) or len(image_bytes) != before.st_size:
                     raise ValueError(f"figure image changed while copied: {image_path}")
+                artifact_size = item.get("artifact_size_bytes")
+                artifact_sha256 = item.get("artifact_sha256")
+                if artifact_size is not None or artifact_sha256 is not None:
+                    if (
+                        type(artifact_size) is not int
+                        or artifact_size < 0
+                        or type(artifact_sha256) is not str
+                        or re.fullmatch(r"[0-9a-f]{64}", artifact_sha256) is None
+                    ):
+                        raise ValueError(
+                            f"figure artifact binding is invalid: {image_path}"
+                        )
+                    if (
+                        before.st_size != artifact_size
+                        or len(image_bytes) != artifact_size
+                        or hashlib.sha256(image_bytes).hexdigest() != artifact_sha256
+                    ):
+                        raise ValueError(
+                            f"figure artifact does not match its bound size/hash: {image_path}"
+                        )
                 relative_image = image_path.relative_to(figures_root)
                 staged_image = staging / "figures" / relative_image
                 atomic_write_bytes(

@@ -611,6 +611,207 @@ def _open_directory_path_nofollow(path: Path) -> int:
         raise
 
 
+def _open_directory_component(
+    parent_descriptor: int,
+    component: str,
+    *,
+    create: bool,
+    mode: int,
+    error_context: str,
+) -> int:
+    try:
+        child = os.open(component, _DIRECTORY_OPEN_FLAGS, dir_fd=parent_descriptor)
+    except FileNotFoundError:
+        if not create:
+            raise
+        return _create_directory_entry_no_replace(
+            parent_descriptor,
+            component,
+            mode=mode,
+            error_context=error_context,
+        )
+    try:
+        opened = os.fstat(child)
+        named = os.stat(
+            component,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(named.st_mode)
+            or not _same_entry(opened, named)
+        ):
+            raise UnsafeStoragePathError(
+                f"directory component changed {error_context}: {component}"
+            )
+        return child
+    except BaseException:
+        os.close(child)
+        raise
+
+
+def _create_directory_entry_no_replace(
+    parent_descriptor: int,
+    component: str,
+    *,
+    mode: int,
+    error_context: str,
+) -> int:
+    """Create and bind one directory entry without a predictable mkdir/open gap.
+
+    POSIX has no mkdir-and-open primitive.  Create a high-entropy sibling,
+    bind its descriptor, then atomically publish that exact inode under the
+    requested name.  Any race at the predictable name is detected against the
+    held descriptor and fails closed; an uncertain staging entry is retained.
+    """
+
+    staging_name = f".paper-reader-mkdir-{new_uuid()}"
+    child: int | None = None
+    published = False
+    os.mkdir(staging_name, mode, dir_fd=parent_descriptor)
+    try:
+        child = os.open(
+            staging_name,
+            _DIRECTORY_OPEN_FLAGS,
+            dir_fd=parent_descriptor,
+        )
+        opened = os.fstat(child)
+        named_staging = os.stat(
+            staging_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(named_staging.st_mode)
+            or not _same_entry(opened, named_staging)
+        ):
+            raise UnsafeStoragePathError(
+                f"created directory component is unsafe {error_context}: {component}"
+            )
+        os.fsync(child)
+        os.fsync(parent_descriptor)
+        _native_renameat_tree_no_replace(
+            parent_descriptor,
+            staging_name,
+            parent_descriptor,
+            component,
+            source=Path(staging_name),
+            destination=Path(component),
+        )
+        published = True
+        os.fsync(parent_descriptor)
+        opened_after = os.fstat(child)
+        named_final = os.stat(
+            component,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISDIR(opened_after.st_mode)
+            or not stat.S_ISDIR(named_final.st_mode)
+            or not _same_entry(opened, opened_after)
+            or not _same_entry(opened_after, named_final)
+        ):
+            raise UnsafeStoragePathError(
+                f"directory component changed {error_context}: {component}"
+            )
+        result = child
+        child = None
+        return result
+    except BaseException:
+        if published and child is not None:
+            quarantine_name = f".paper-reader-mkdir-failed-{new_uuid()}"
+            try:
+                _native_renameat_tree_no_replace(
+                    parent_descriptor,
+                    component,
+                    parent_descriptor,
+                    quarantine_name,
+                    source=Path(component),
+                    destination=Path(quarantine_name),
+                )
+                held = os.fstat(child)
+                captured = os.stat(
+                    quarantine_name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if not _same_entry(held, captured):
+                    _native_renameat_tree_no_replace(
+                        parent_descriptor,
+                        quarantine_name,
+                        parent_descriptor,
+                        component,
+                        source=Path(quarantine_name),
+                        destination=Path(component),
+                    )
+                    os.fsync(parent_descriptor)
+                    raise UnsafeStoragePathError(
+                        f"failed directory publication captured a replacement "
+                        f"{error_context}: {component}"
+                    )
+                os.fsync(parent_descriptor)
+            except BaseException as quarantine_error:
+                raise UnsafeStoragePathError(
+                    f"failed directory publication changed or could not be quarantined "
+                    f"{error_context}: {component}"
+                ) from quarantine_error
+        raise
+    finally:
+        if child is not None:
+            os.close(child)
+
+
+def open_directory_anchor(
+    path: Path | str,
+    *,
+    create: bool = False,
+    mode: int = 0o755,
+) -> OwnedDirectoryAnchor:
+    """Open an exact host directory without following any path component.
+
+    ``Path.mkdir`` followed by ``Path.resolve`` is not sufficient for
+    attacker-controlled host paths: an existing intermediate symlink may be
+    followed before the eventual identity check.  This walker creates missing
+    components relative to already-held directory descriptors and validates
+    every opened component against its no-follow directory entry.
+    """
+
+    if type(create) is not bool:
+        raise ValueError("create must be a boolean")
+    if type(mode) is not int or mode < 0:
+        raise ValueError("mode must be a non-negative integer")
+    lexical = Path(os.path.abspath(Path(path).expanduser()))
+    descriptor = os.open(lexical.anchor or os.sep, _DIRECTORY_OPEN_FLAGS)
+    try:
+        for component in lexical.parts[1:]:
+            child = _open_directory_component(
+                descriptor,
+                component,
+                create=create,
+                mode=mode,
+                error_context=f"while anchoring {lexical}",
+            )
+            os.close(descriptor)
+            descriptor = child
+        metadata = os.fstat(descriptor)
+        anchor = OwnedDirectoryAnchor(
+            path=lexical,
+            descriptor=descriptor,
+            device=metadata.st_dev,
+            inode=metadata.st_ino,
+        )
+        validate_directory_anchor(anchor)
+        descriptor = -1
+        return anchor
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+
+
 def validate_directory_anchor(anchor: DirectoryAnchorLike) -> None:
     try:
         opened = os.fstat(anchor.descriptor)
@@ -784,27 +985,13 @@ def _open_relative_directory(
     descriptor = os.dup(anchor.descriptor)
     try:
         for component in parts:
-            if create:
-                try:
-                    os.mkdir(component, 0o755, dir_fd=descriptor)
-                    os.fsync(descriptor)
-                except FileExistsError:
-                    pass
-            child = os.open(component, _DIRECTORY_OPEN_FLAGS, dir_fd=descriptor)
-            try:
-                opened = os.fstat(child)
-                named = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
-                if (
-                    not stat.S_ISDIR(opened.st_mode)
-                    or not stat.S_ISDIR(named.st_mode)
-                    or not _same_entry(opened, named)
-                ):
-                    raise UnsafeStoragePathError(
-                        f"anchored directory component changed: {component}"
-                    )
-            except BaseException:
-                os.close(child)
-                raise
+            child = _open_directory_component(
+                descriptor,
+                component,
+                create=create,
+                mode=0o755,
+                error_context="inside anchored storage",
+            )
             os.close(descriptor)
             descriptor = child
         return descriptor
@@ -1078,16 +1265,14 @@ def create_anchored_directory(
     destination = Path(path)
     parent_fd, name = _open_anchored_parent(anchor, destination, create=True)
     descriptor: int | None = None
-    created = False
-    opened: os.stat_result | None = None
-    created_metadata: os.stat_result | None = None
     try:
         _validate_anchored_parent(anchor, destination, parent_fd)
-        os.mkdir(name, mode, dir_fd=parent_fd)
-        created = True
-        created_metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        os.fsync(parent_fd)
-        descriptor = os.open(name, _DIRECTORY_OPEN_FLAGS, dir_fd=parent_fd)
+        descriptor = _create_directory_entry_no_replace(
+            parent_fd,
+            name,
+            mode=mode,
+            error_context=f"while creating {destination}",
+        )
         opened = os.fstat(descriptor)
         named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         if not _same_entry(opened, named):
@@ -1108,16 +1293,6 @@ def create_anchored_directory(
         if descriptor is not None:
             os.close(descriptor)
             descriptor = None
-        if created:
-            try:
-                current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-                if stat.S_ISDIR(current.st_mode) and (
-                    created_metadata is None or _same_entry(created_metadata, current)
-                ):
-                    os.rmdir(name, dir_fd=parent_fd)
-                    os.fsync(parent_fd)
-            except OSError:
-                pass
         raise
     finally:
         if descriptor is not None:
@@ -1272,8 +1447,20 @@ def remove_anchored_file(
     anchor: DirectoryAnchorLike,
     path: Path | str,
     *,
+    expected: OwnedPublishedFile | None = None,
     missing_ok: bool = True,
 ) -> None:
+    """Remove a regular file relative to an anchored parent.
+
+    When ``expected`` is supplied, a portable pathname unlink cannot make the
+    inode comparison and deletion one atomic operation.  Detach the name with
+    atomic no-replace rename instead, verify the captured inode and content,
+    and retain a full-content hidden forensic tombstone.  The held inode is
+    never truncated because that could destroy data through a concurrently
+    created hardlink.  If a replacement wins the race, restore that captured
+    entry with no-replace semantics and fail closed without deleting it.
+    """
+
     destination = Path(path)
     try:
         parent_fd, name = _open_anchored_parent(anchor, destination, create=False)
@@ -1293,6 +1480,90 @@ def remove_anchored_file(
             raise UnsafeStoragePathError(
                 f"anchored cleanup file is not a regular file: {destination}"
             )
+        if expected is not None:
+            if Path(os.path.abspath(expected.path)) != Path(os.path.abspath(destination)):
+                raise UnsafeStoragePathError(
+                    f"anchored cleanup expected path does not match its target: {destination}"
+                )
+            held = os.fstat(expected.descriptor)
+            metadata_identity = (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+                metadata.st_nlink,
+            )
+            held_identity = (
+                held.st_dev,
+                held.st_ino,
+                held.st_size,
+                held.st_mtime_ns,
+                held.st_ctime_ns,
+                held.st_nlink,
+            )
+            if (
+                metadata_identity != expected.identity
+                or held_identity != expected.identity
+                or expected.identity[5] != 1
+            ):
+                raise UnsafeStoragePathError(
+                    f"anchored cleanup held identity or link count changed: {destination}"
+                )
+            quarantine_name = f".{name}.{new_uuid()}.cleanup-tombstone"
+            quarantine_path = destination.parent / quarantine_name
+            _native_renameat_tree_no_replace(
+                parent_fd,
+                name,
+                parent_fd,
+                quarantine_name,
+                source=destination,
+                destination=quarantine_path,
+            )
+            os.fsync(parent_fd)
+            captured = os.stat(
+                quarantine_name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            held_after = os.fstat(expected.descriptor)
+            captured_matches = (
+                stat.S_ISREG(captured.st_mode)
+                and stat.S_ISREG(held_after.st_mode)
+                and _same_entry(held_after, captured)
+                and captured.st_nlink == 1
+                and held_after.st_nlink == 1
+                and captured.st_size == expected.identity[2]
+                and held_after.st_size == expected.identity[2]
+                and captured.st_mtime_ns == expected.identity[3]
+                and held_after.st_mtime_ns == expected.identity[3]
+                and _sha256_descriptor(
+                    expected.descriptor,
+                    expected_size=expected.identity[2],
+                )
+                == expected.content_sha256
+            )
+            if not captured_matches:
+                try:
+                    _native_renameat_tree_no_replace(
+                        parent_fd,
+                        quarantine_name,
+                        parent_fd,
+                        name,
+                        source=quarantine_path,
+                        destination=destination,
+                    )
+                    os.fsync(parent_fd)
+                except BaseException as restore_error:
+                    raise UnsafeStoragePathError(
+                        "anchored cleanup captured a different identity and could not "
+                        f"restore it from quarantine: {destination}"
+                    ) from restore_error
+                raise UnsafeStoragePathError(
+                    f"anchored cleanup captured a different identity: {destination}"
+                )
+            os.fsync(parent_fd)
+            return
         os.unlink(name, dir_fd=parent_fd)
         os.fsync(parent_fd)
     finally:
@@ -2746,6 +3017,7 @@ __all__ = [
     "new_uuid",
     "open_anchored_regular_file",
     "open_anchored_directory",
+    "open_directory_anchor",
     "open_resolved_source_guard",
     "open_terminal_artifact_guard",
     "paths_alias",

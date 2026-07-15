@@ -53,6 +53,269 @@ def test_uuid_random_ids_and_tokens_are_random_and_well_formed() -> None:
     assert storage.random_token() != storage.random_token()
 
 
+def test_open_directory_anchor_creates_without_following_existing_symlink(
+    tmp_path: Path,
+) -> None:
+    storage = _storage_module()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises((OSError, storage.UnsafeStoragePathError)):
+        storage.open_directory_anchor(linked / "child", create=True)
+
+    assert not (outside / "child").exists()
+
+
+def _swap_new_directory_when_parent_is_synced(
+    storage: object,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    target: Path,
+) -> Path:
+    moved = target.with_name(f"{target.name}-created-away")
+    real_fsync = storage.os.fsync
+    injected = False
+
+    def swap_after_fsync(descriptor: int) -> None:
+        nonlocal injected
+        real_fsync(descriptor)
+        if not injected and target.is_dir():
+            target.rename(moved)
+            target.mkdir()
+            injected = True
+
+    monkeypatch.setattr(storage.os, "fsync", swap_after_fsync)
+    return moved
+
+
+def test_open_directory_anchor_rejects_new_directory_replaced_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _storage_module()
+    target = tmp_path / "created"
+    moved = _swap_new_directory_when_parent_is_synced(
+        storage,
+        monkeypatch,
+        target=target,
+    )
+
+    with pytest.raises(storage.UnsafeStoragePathError, match="changed"):
+        with storage.open_directory_anchor(target, create=True) as anchor:
+            storage.publish_bytes_no_replace(
+                b"must-not-escape",
+                target / "artifact.bin",
+                anchor=anchor,
+            )
+
+    assert moved.is_dir()
+    assert not (target / "artifact.bin").exists()
+
+
+def test_open_directory_anchor_rejects_new_directory_replaced_at_first_stat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _storage_module()
+    target = tmp_path / "created"
+    moved = tmp_path / "created-away"
+    real_stat = storage.os.stat
+    injected = False
+
+    def replace_before_stat(
+        path: object,
+        *args: object,
+        **kwargs: object,
+    ) -> os.stat_result:
+        nonlocal injected
+        if (
+            not injected
+            and path == target.name
+            and kwargs.get("dir_fd") is not None
+            and kwargs.get("follow_symlinks") is False
+        ):
+            target.rename(moved)
+            target.mkdir()
+            injected = True
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(storage.os, "stat", replace_before_stat)
+
+    with pytest.raises(storage.UnsafeStoragePathError, match="changed"):
+        with storage.open_directory_anchor(target, create=True) as anchor:
+            storage.publish_bytes_no_replace(
+                b"must-not-escape",
+                target / "artifact.bin",
+                anchor=anchor,
+            )
+
+    assert injected is True
+    assert moved.is_dir()
+    assert not (target / "artifact.bin").exists()
+
+
+def test_anchored_parent_creation_rejects_new_directory_replaced_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _storage_module()
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "created"
+    moved = _swap_new_directory_when_parent_is_synced(
+        storage,
+        monkeypatch,
+        target=target,
+    )
+
+    with storage.open_directory_anchor(root) as anchor:
+        with pytest.raises(storage.UnsafeStoragePathError, match="changed"):
+            storage.publish_bytes_no_replace(
+                b"must-not-escape",
+                target / "artifact.bin",
+                anchor=anchor,
+            )
+
+    assert moved.is_dir()
+    assert not (target / "artifact.bin").exists()
+
+
+def test_remove_anchored_file_refuses_replaced_expected_identity(tmp_path: Path) -> None:
+    storage = _storage_module()
+    root = tmp_path / "root"
+    with storage.open_directory_anchor(root, create=True) as anchor:
+        target = root / "artifact.bin"
+        published = storage.publish_bytes_no_replace(
+            b"owned",
+            target,
+            anchor=anchor,
+            hold_open=True,
+        )
+        assert isinstance(published, storage.OwnedPublishedFile)
+        replacement = root / "replacement.bin"
+        replacement.write_bytes(b"replacement")
+        os.replace(replacement, target)
+        try:
+            with pytest.raises(storage.UnsafeStoragePathError, match="held identity"):
+                storage.remove_anchored_file(anchor, target, expected=published)
+        finally:
+            published.close()
+
+        assert target.read_bytes() == b"replacement"
+
+
+def test_remove_anchored_file_does_not_unlink_replacement_raced_at_detach(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _storage_module()
+    root = tmp_path / "root"
+    with storage.open_directory_anchor(root, create=True) as anchor:
+        target = root / "artifact.bin"
+        published = storage.publish_bytes_no_replace(
+            b"owned",
+            target,
+            anchor=anchor,
+            hold_open=True,
+        )
+        assert isinstance(published, storage.OwnedPublishedFile)
+        replacement = root / "replacement.bin"
+        replacement.write_bytes(b"replacement")
+        original_rename = storage._native_renameat_tree_no_replace
+        injected = False
+
+        def replace_at_detach(
+            source_parent_fd: int,
+            source_name: str,
+            destination_parent_fd: int,
+            destination_name: str,
+            *,
+            source: Path,
+            destination: Path,
+        ) -> None:
+            nonlocal injected
+            if not injected and source_name == target.name:
+                os.replace(replacement, target)
+                injected = True
+            original_rename(
+                source_parent_fd,
+                source_name,
+                destination_parent_fd,
+                destination_name,
+                source=source,
+                destination=destination,
+            )
+
+        monkeypatch.setattr(
+            storage,
+            "_native_renameat_tree_no_replace",
+            replace_at_detach,
+        )
+        try:
+            with pytest.raises(storage.UnsafeStoragePathError, match="captured a different identity"):
+                storage.remove_anchored_file(anchor, target, expected=published)
+        finally:
+            published.close()
+
+        assert injected is True
+        assert target.read_bytes() == b"replacement"
+        assert not replacement.exists()
+
+
+def test_remove_anchored_file_quarantines_exact_expected_identity(
+    tmp_path: Path,
+) -> None:
+    storage = _storage_module()
+    root = tmp_path / "root"
+    with storage.open_directory_anchor(root, create=True) as anchor:
+        target = root / "artifact.bin"
+        published = storage.publish_bytes_no_replace(
+            b"owned",
+            target,
+            anchor=anchor,
+            hold_open=True,
+        )
+        assert isinstance(published, storage.OwnedPublishedFile)
+        try:
+            storage.remove_anchored_file(anchor, target, expected=published)
+        finally:
+            published.close()
+
+    tombstones = list(root.glob(".artifact.bin.*.cleanup-tombstone"))
+    assert not target.exists()
+    assert len(tombstones) == 1
+    assert tombstones[0].read_bytes() == b"owned"
+
+
+def test_remove_anchored_file_refuses_expected_identity_with_external_hardlink(
+    tmp_path: Path,
+) -> None:
+    storage = _storage_module()
+    root = tmp_path / "root"
+    with storage.open_directory_anchor(root, create=True) as anchor:
+        target = root / "artifact.bin"
+        published = storage.publish_bytes_no_replace(
+            b"owned-content",
+            target,
+            anchor=anchor,
+            hold_open=True,
+        )
+        assert isinstance(published, storage.OwnedPublishedFile)
+        retained = root / "retained.bin"
+        os.link(target, retained)
+        try:
+            with pytest.raises(storage.UnsafeStoragePathError, match="identity|link"):
+                storage.remove_anchored_file(anchor, target, expected=published)
+        finally:
+            published.close()
+
+    assert target.read_bytes() == b"owned-content"
+    assert retained.read_bytes() == b"owned-content"
+    assert not list(root.glob(".artifact.bin.*.cleanup-tombstone"))
+
+
 @pytest.mark.parametrize("owner_kind", ["file", "directory"])
 def test_owned_descriptor_is_detached_before_close_error(
     owner_kind: str,

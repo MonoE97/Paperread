@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import math
+import os
 import re
+import stat
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -122,6 +125,8 @@ class FigureExtraction(TypedDict):
     visual_quality: NotRequired[dict[str, Any]]
     evidence_tier: NotRequired[str]
     evidence_tier_reason: NotRequired[str]
+    artifact_size_bytes: NotRequired[int]
+    artifact_sha256: NotRequired[str]
 
 
 class CaptionBlock(TypedDict):
@@ -559,6 +564,7 @@ def _collect_source_candidates(
             source_path,
             output_root / "source-figures",
             max_candidates=max_candidates,
+            expected_arxiv_id=arxiv_id,
         )
     except arxiv_source.FigureCandidateLimitError as exc:
         raise FigureCandidateLimitError(
@@ -586,7 +592,11 @@ def _collect_source_candidates(
             output_root / "source-rendered",
         )
     except arxiv_source.FigurePixelLimitError as exc:
-        raise FigurePixelLimitError(actual=exc.actual, limit=exc.limit) from exc
+        raise FigurePixelLimitError(
+            actual=exc.actual,
+            limit=exc.limit,
+            resource_name=exc.resource_name,
+        ) from exc
     except Exception:
         source_attempts.append({"stage": "collect", "status": "error"})
         warnings.append("arxiv_source_collect_failed")
@@ -618,14 +628,18 @@ def _source_entries_to_candidates(entries: list[dict[str, Any]]) -> list[FigureE
         if not image_path.exists():
             continue
 
-        width, height = _image_dimensions(image_path)
+        bound_bytes = _validate_bound_source_artifact(entry, image_path)
+        width, height = (
+            _image_dimensions(image_path)
+            if bound_bytes is None
+            else _image_dimensions(image_path, content=bound_bytes)
+        )
         _enforce_pixel_limit(width, height)
         bbox = fitz.Rect(0, 0, width, height)
         caption = _source_caption(entry)
         priority = _source_priority_score(source, entry, caption, bbox)
 
-        candidates.append(
-            FigureExtraction(
+        candidate = FigureExtraction(
                 figure_id=f"source-{index}-{image_path.stem}",
                 caption=caption,
                 caption_confidence=_source_caption_confidence(entry, caption),
@@ -641,8 +655,86 @@ def _source_entries_to_candidates(entries: list[dict[str, Any]]) -> list[FigureE
                 fallback_reason=None,
                 needs_fallback=False,
             )
-        )
+        artifact_size = entry.get("artifact_size_bytes")
+        artifact_sha256 = entry.get("artifact_sha256")
+        if artifact_size is not None or artifact_sha256 is not None:
+            if (
+                type(artifact_size) is not int
+                or artifact_size < 0
+                or type(artifact_sha256) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", artifact_sha256) is None
+            ):
+                raise ValueError("source figure artifact binding is invalid")
+            candidate["artifact_size_bytes"] = artifact_size
+            candidate["artifact_sha256"] = artifact_sha256
+        candidates.append(candidate)
     return candidates
+
+
+def _validate_bound_source_artifact(
+    entry: dict[str, Any],
+    path: Path,
+) -> bytes | None:
+    expected_size = entry.get("artifact_size_bytes")
+    expected_sha256 = entry.get("artifact_sha256")
+    if expected_size is None and expected_sha256 is None:
+        return None
+    if (
+        type(expected_size) is not int
+        or expected_size < 0
+        or type(expected_sha256) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+    ):
+        raise ValueError("source figure artifact binding is invalid")
+
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        before = os.fstat(descriptor)
+        named_before = os.lstat(path)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or not stat.S_ISREG(named_before.st_mode)
+            or before.st_nlink != 1
+            or named_before.st_nlink != 1
+            or (before.st_dev, before.st_ino) != (named_before.st_dev, named_before.st_ino)
+            or before.st_size != expected_size
+        ):
+            raise ValueError("source figure artifact identity is invalid")
+        chunks: list[bytes] = []
+        remaining = expected_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if remaining or os.read(descriptor, 1):
+            raise ValueError("source figure artifact size changed")
+        after = os.fstat(descriptor)
+        named_after = os.lstat(path)
+        identities = {
+            (
+                item.st_dev,
+                item.st_ino,
+                item.st_size,
+                item.st_mtime_ns,
+                item.st_ctime_ns,
+                item.st_nlink,
+            )
+            for item in (before, named_before, after, named_after)
+        }
+        content = b"".join(chunks)
+        if (
+            len(identities) != 1
+            or hashlib.sha256(content).hexdigest() != expected_sha256
+        ):
+            raise ValueError("source figure artifact does not match its bound size/hash")
+        return content
+    finally:
+        os.close(descriptor)
 
 
 def _source_priority_score(
@@ -1467,8 +1559,17 @@ def _ranking_key(item: FigureExtraction) -> tuple[float, float, float, float]:
     )
 
 
-def _image_dimensions(path: Path) -> tuple[float, float]:
-    with fitz.open(path) as doc:
+def _image_dimensions(
+    path: Path,
+    *,
+    content: bytes | None = None,
+) -> tuple[float, float]:
+    document = (
+        fitz.open(path)
+        if content is None
+        else fitz.open(stream=content, filetype=path.suffix.lstrip("."))
+    )
+    with document as doc:
         if doc.page_count < 1:
             raise ValueError("figure has no pages")
         page = doc.load_page(0)

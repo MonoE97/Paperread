@@ -449,6 +449,133 @@ def test_manifest_rejects_pdf_aliases_and_duplicate_zotero_keys_before_output(
     assert not collection_output.exists()
 
 
+def test_zotero_collection_manifest_accepts_name_only_inventory_and_replays(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    skill_root = tmp_path / "skill"
+    skill_root.mkdir()
+    monkeypatch.setattr(v2_cli, "_batch_root", lambda: skill_root)
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(
+        json.dumps(
+            {
+                "collection": {"name": "仅名称集合"},
+                "items": [{"item_key": "ITEM1", "title": "论文一"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "manifest.json"
+    args = [
+        "manifest",
+        "from-zotero-collection",
+        "仅名称集合",
+        "--inventory",
+        str(inventory),
+        "--batch-title",
+        "name-only collection",
+        "--output",
+        str(output),
+        "--request-id",
+        REQUEST_1,
+    ]
+
+    first = runner.invoke(app, args)
+    first_payload = _json_result(first)
+    assert first.exit_code == 0, first_payload
+    assert first_payload["replayed"] is False
+    manifest = json.loads(output.read_text(encoding="utf-8"))
+    assert manifest["source_summary"]["collection_key"] is None
+    assert manifest["source_summary"]["collection_name"] == "仅名称集合"
+    assert manifest["items"][0]["source"]["collection_key"] is None
+    exact_bytes = output.read_bytes()
+
+    replay = runner.invoke(app, args)
+    replay_payload = _json_result(replay)
+    assert replay.exit_code == 0, replay_payload
+    assert replay_payload["replayed"] is True
+    assert replay_payload["result"] == first_payload["result"]
+    assert output.read_bytes() == exact_bytes
+
+    wrong_output = tmp_path / "wrong-name.json"
+    before = _snapshot(skill_root)
+    mismatch = runner.invoke(
+        app,
+        [
+            *args[:2],
+            "另一个集合",
+            *args[3:8],
+            str(wrong_output),
+            "--request-id",
+            REQUEST_2,
+        ],
+    )
+    mismatch_payload = _json_result(mismatch)
+    assert mismatch.exit_code != 0
+    assert mismatch_payload["error"]["code"] == "collection_mismatch"
+    assert not wrong_output.exists()
+    assert _snapshot(skill_root) == before
+
+
+@pytest.mark.parametrize(
+    "inventory",
+    [
+        {
+            "collection": {"key": 123, "name": "Collection"},
+            "items": [{"item_key": "ITEM1", "title": "One"}],
+        },
+        {
+            "collection": {"key": "COLL1", "name": 123},
+            "items": [{"item_key": "ITEM1", "title": "One"}],
+        },
+        {
+            "collection": {"key": "COLL1", "name": "Collection"},
+            "items": [{"item_key": 123, "title": "One"}],
+        },
+        {
+            "collection": {"key": "COLL1", "name": "Collection"},
+            "items": [{"item_key": "ITEM1", "title": 123}],
+        },
+    ],
+)
+def test_zotero_collection_manifest_rejects_implicitly_coerced_inventory_fields(
+    tmp_path: Path,
+    monkeypatch,
+    inventory: dict,
+) -> None:
+    skill_root = tmp_path / "skill"
+    skill_root.mkdir()
+    monkeypatch.setattr(v2_cli, "_batch_root", lambda: skill_root)
+    inventory_path = tmp_path / "inventory.json"
+    inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+    output = tmp_path / "manifest.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "manifest",
+            "from-zotero-collection",
+            "Collection" if inventory["collection"].get("name") == "Collection" else "COLL1",
+            "--inventory",
+            str(inventory_path),
+            "--batch-title",
+            "strict inventory",
+            "--output",
+            str(output),
+            "--request-id",
+            REQUEST_1,
+        ],
+    )
+    payload = _json_result(result)
+
+    assert result.exit_code != 0
+    assert payload["error"]["code"] == "invalid_inventory"
+    assert not output.exists()
+    assert not (skill_root / ".paper_reader_batch").exists()
+
+
 def test_manifest_receipt_resumes_before_and_after_publication_without_scan(tmp_path: Path) -> None:
     skill_root = tmp_path / "skill"
     skill_root.mkdir()

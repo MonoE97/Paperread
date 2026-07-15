@@ -117,6 +117,97 @@ def test_validator_accepts_minimal_closed_v2_bundle(tmp_path: Path) -> None:
     assert validator.validate_skill(tmp_path) == []
 
 
+def test_validator_rejects_required_file_replaced_by_directory(tmp_path: Path) -> None:
+    validator = _load_validator()
+    _build_bundle(tmp_path, validator)
+    required_path = tmp_path / "src/paper_reader_batch/v2_errors.py"
+    required_path.unlink()
+    required_path.mkdir()
+
+    expected = (
+        "required path is not a regular file: src/paper_reader_batch/v2_errors.py"
+    )
+    assert expected in validator.validate_skill(tmp_path)
+    assert expected in validator.validate_skill(tmp_path, release_bundle=True)
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "src/paper_reader_batch/cli.py",
+        "src/paper_reader_batch/io.py",
+        "src/paper_reader_batch/local_prepare.py",
+        "src/paper_reader_batch/manifest.py",
+        "src/paper_reader_batch/report.py",
+        "src/paper_reader_batch/runs.py",
+        "src/paper_reader_batch/state.py",
+        "src/paper_reader_batch/takeaway.py",
+        "src/paper_reader_batch/worker_contract.py",
+    ],
+)
+def test_validator_rejects_reintroduced_v1_runtime_module(
+    relative_path: str,
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator()
+    _build_bundle(tmp_path, validator)
+    legacy_module = tmp_path / relative_path
+    legacy_module.parent.mkdir(parents=True, exist_ok=True)
+    legacy_module.write_text("# historical V1 runtime surface\n", encoding="utf-8")
+
+    expected = f"forbidden V1 runtime module: {relative_path}"
+    assert expected in validator.validate_skill(tmp_path)
+    assert expected in validator.validate_skill(tmp_path, release_bundle=True)
+
+
+@pytest.mark.parametrize(
+    "schema_name",
+    [
+        "paper_reader_batch.state.v1.schema.json",
+        "paper_reader_batch.event.schema.json",
+        "paper_reader_batch.unknown.v2.schema.json",
+    ],
+)
+def test_validator_rejects_schema_outside_active_v2_namespace(
+    schema_name: str,
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator()
+    _build_bundle(tmp_path, validator)
+    schema_path = tmp_path / "references/schemas" / schema_name
+    schema_path.write_text("{}\n", encoding="utf-8")
+
+    expected = f"unexpected schema file: references/schemas/{schema_name}"
+    assert expected in validator.validate_skill(tmp_path)
+    assert expected in validator.validate_skill(tmp_path, release_bundle=True)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "reported_path"),
+    [
+        (
+            "historical/paper_reader_batch.state.v1.schema.json",
+            "references/schemas/historical",
+        ),
+        ("schema-notes.txt", "references/schemas/schema-notes.txt"),
+    ],
+)
+def test_validator_rejects_any_extra_schema_namespace_entry(
+    relative_path: str,
+    reported_path: str,
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator()
+    _build_bundle(tmp_path, validator)
+    extra_path = tmp_path / "references/schemas" / relative_path
+    extra_path.parent.mkdir(parents=True, exist_ok=True)
+    extra_path.write_text("{}\n", encoding="utf-8")
+
+    expected = f"unexpected schema namespace entry: {reported_path}"
+    assert expected in validator.validate_skill(tmp_path)
+    assert expected in validator.validate_skill(tmp_path, release_bundle=True)
+
+
 def test_release_validator_rejects_required_file_symlink_to_external_path(
     tmp_path: Path,
 ) -> None:
