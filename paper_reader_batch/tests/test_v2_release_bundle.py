@@ -27,9 +27,9 @@ def _build_bundle(
     validator: ModuleType,
     *,
     omit: set[str] | None = None,
-    project_version: str = "2.0.0",
+    project_version: str = "2.1.0",
     entrypoint: str = "paper_reader_batch.v2_cli:app",
-    lock_version: str = "2.0.0",
+    lock_version: str = "2.1.0",
 ) -> None:
     omitted = omit or set()
     for relative in validator.REQUIRED_PATHS:
@@ -44,7 +44,7 @@ def _build_bundle(
         encoding="utf-8",
     )
     (root / "src/paper_reader_batch/__init__.py").write_text(
-        '__version__ = "2.0.0"\n',
+        '__version__ = "2.1.0"\n',
         encoding="utf-8",
     )
     (root / "pyproject.toml").write_text(
@@ -105,9 +105,9 @@ def test_validator_rejects_stale_project_entrypoint_and_lock(tmp_path: Path) -> 
     )
 
     errors = validator.validate_skill(tmp_path)
-    assert "pyproject project.version must be 2.0.0" in errors
+    assert "pyproject project.version must be 2.1.0" in errors
     assert "pyproject paper_reader_batch entrypoint must be paper_reader_batch.v2_cli:app" in errors
-    assert "uv.lock paper-reader-batch package version must be 2.0.0" in errors
+    assert "uv.lock paper-reader-batch package version must be 2.1.0" in errors
 
 
 def test_validator_accepts_minimal_closed_v2_bundle(tmp_path: Path) -> None:

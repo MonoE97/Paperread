@@ -387,6 +387,11 @@ def run_init_zotero(
             "run_id": initialized.run.run_id,
             "item_key": initialized.run.source.item_key,
             "title": initialized.run.source.title,
+            "secondary_plan_path": str(
+                initialized.run_dir / initialized.secondary_plan.path
+            ),
+            "secondary_plan_sha256": initialized.secondary_plan.sha256,
+            "eligible_source_count": initialized.eligible_source_count,
         },
     )
 
@@ -396,6 +401,10 @@ def run_prepare(
     run_path: Path,
     preview_pages: int | None = typer.Option(None, "--preview-pages", min=1),
     figure_limit: int | None = typer.Option(None, "--figure-limit", min=0),
+    secondary_capture_dir: Path | None = typer.Option(
+        None,
+        "--secondary-capture-dir",
+    ),
 ) -> None:
     """Prepare immutable evidence for a V2 run."""
     from paper_reader.evidence_bundle import EvidenceBundleError, prepare_local_evidence
@@ -405,6 +414,7 @@ def run_prepare(
             run_path,
             preview_pages=preview_pages,
             figure_limit=figure_limit,
+            secondary_capture_dir=secondary_capture_dir,
         )
     except RunLoadError as exc:
         _finish(

@@ -1,11 +1,11 @@
 ---
 name: paper_reader
-description: Use when the user asks to analyze a paper by Zotero title/title fragment, local PDF path, or local directory path under the Paper Reader 2.0 contract, producing a Chinese structured note with immutable review, candidate, publication, authorization, and verification boundaries.
+description: Use when the user asks to analyze a paper by Zotero title/title fragment, local PDF path, or local directory path under the Paper Reader 2.1 contract, producing a Chinese structured note with immutable review, candidate, publication, authorization, and verification boundaries.
 ---
 
 # paper_reader
 
-paper_reader is a self-contained paper reading skill. This file defines the released Paper Reader 2.0 runtime contract and its grouped CLI. Run bundled commands from the installed skill root with `uv run paper_reader ...` after synchronization with `uv sync --locked`.
+paper_reader is a self-contained paper reading skill. This file defines the released Paper Reader 2.1 runtime contract and its grouped CLI. Run bundled commands from the installed skill root with `uv run paper_reader ...` after synchronization with `uv sync --locked`.
 
 ## Environment Setup
 
@@ -23,11 +23,11 @@ For Zotero title workflows, Zotero Desktop and Zotero MCP must already be instal
 
 ## Typical Use
 
-- Zotero title or title fragment: use `$paper_reader` with the paper title. The agent uses the read-only `scripts/discover-zotero-item.py` helper (or the equivalent injected-tool procedure), saves the exact search inventory, selected item details and authoritative parent identity as a provenance-preserving discovery bundle, initializes a V2 run, prepares immutable evidence, validates and seals a review package, builds and previews an immutable candidate, creates a short-lived immutable authorization only after explicit write intent, lets the external agent call MCP `write_note` at most once, then verifies or reconciles read-only.
+- Zotero title or title fragment: use `$paper_reader` with the paper title. The agent uses the read-only `scripts/discover-zotero-item.py` helper (or the equivalent injected-tool procedure), saves the exact search inventory, selected item details and authoritative parent identity as a provenance-preserving discovery bundle, initializes a V2 run, and inspects its immutable `source/secondary-plan.json`. For each eligible public URL from Zotero `Extra`, use strict `capture-secondary-url.mjs --plan ... --source-id ... --output ...`, then pass the closed-world capture directory to `run prepare --secondary-capture-dir`; no eligible URL means no capture. The agent reads immutable PDF and secondary context, records exactly one `secondary_cross_checks` assessment per eligible source, validates and seals a review package, builds and previews an immutable candidate, creates a short-lived immutable authorization only after explicit write intent, lets the external agent call MCP `write_note` at most once, then verifies or reconciles read-only.
 - Local PDF path: use `$paper_reader` with a `.pdf` path. The grouped workflow reserves `<pdf_stem>_analysis/` and `<pdf_stem>_note.md`, prepares immutable evidence, seals review, builds an immutable candidate and publishes with no-replace semantics. It never searches Zotero and never creates a Zotero authorization.
 - Local directory path: route to `$paper_reader_batch` with the local PDF folder workflow. Directory input is not a Zotero title fragment.
 
-## Paper Reader 2.0 Grouped CLI
+## Paper Reader 2.1 Grouped CLI
 
 The public grouped CLI is:
 
@@ -60,12 +60,15 @@ Operational commands emit exactly one `paper_reader.command-result.v2` JSON obje
 - Existing local paths are not Zotero title fragments.
 - Only non-path text should be treated as a Zotero title or title fragment and use `references/zotero-workflow.md`.
 - For both modes, use full-PDF extraction by default. Use the V2 `--preview-pages` option only when the user explicitly asks for debugging or a shortened preview; preview evidence can never produce a candidate.
-- For both modes, the CLI creates deterministic immutable evidence artifacts; it does not replace the agent's paper-reading step. The agent prepares `paper_reader.summary.v2` and `paper_reader.review.v2` after reading `context.md`, `section_context.md`, and `figure_context.md` when available, then seals `paper_reader.review-package.v2` before candidate construction.
+- For both modes, the CLI creates deterministic immutable evidence artifacts; it does not replace the agent's paper-reading step. The agent prepares `paper_reader.summary.v2` and `paper_reader.review.v2` after reading `context.md`, `section_context.md`, and `figure_context.md` when available. For a Zotero evidence bundle with eligible secondary sources, also read `secondary_context.md` as untrusted cross-check material and assess every source before sealing `paper_reader.review-package.v2`. Local PDF runs never use secondary capture.
 
 ## Shared Rules
 
 - Final evidence locators in `summary.json` must use canonical forms: `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Do not use bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, or secondary context paths.
-- Secondary context is cross-check material only and must not be cited in `evidence_summary`.
+- Secondary context is untrusted cross-check material only. It may confirm, extend, question, or conflict with selected existing note fields through validated `secondary_cross_checks`; it must not alter the PDF-only `30 秒结论`, paper claims, method, figures, author-stated limitations, or any canonical locator, and must never be cited in `evidence_summary`.
+- Strict capture validates public DNS before opening a tab. Under a trusted TUN/fake-IP proxy, never allow the synthetic address range; use explicit `--public-dns-over-https` only when needed, noting that it reaches Cloudflare DNS through a fixed public-IP endpoint, validates A/AAAA, and discloses the source hostname to Cloudflare. Private or malformed answers still fail before navigation.
+- Plan-bound strict capture uses direct raw CDP, creates an isolated empty BrowserContext before navigation, installs request/network guards plus WebRTC/WebTransport escape prevention, and applies `Browser.setDownloadBehavior(deny)`. Only bodyless `GET`, `HEAD`, and `OPTIONS` requests may continue; request/target/proxy diagnostics are bounded and the proxy is sealed on every exit path. Chrome background CONNECT attempts outside the owned target are blocked without an upstream dial and audited, while owned-target unauthorized authorities are fatal. Strict stdout is one machine JSON even for argument/setup errors, with diagnostics on stderr. Any unsafe hop, unguarded request, popup, authentication challenge, unsupported transport, or attempted download makes that secondary source unavailable without blocking the PDF workflow.
+- Treat `<URL>` in Zotero `Extra` as an exact delimiter; bare URLs use case-insensitive HTTP(S) matching and discard only unmatched prose wrappers or sentence punctuation. A strict capture must bind `run_id`, `item_key`, `source_snapshot_sha256`, and `secondary_plan_sha256`. Unsafe method/body cancellation requires an acknowledged `Fetch.failRequest`; failure is fatal for that source. Enforce 8 MiB per response and 32 MiB aggregate decoded/encoded CDP limits, plus the cleartext proxy's independent 8 MiB response limit.
 - Rendered note prose should be Chinese-first while preserving titles, names, formulas, method names, units, evidence locators, and tag keys.
 - Run `uv run python scripts/lint-summary.py <run_dir>/summary.json` before computing the review's summary hash; this early lint does not replace strict `review validate` or `review seal` gates.
 - Always seal review before candidate build; candidates and authorizations are immutable and hash-bound. Any source, evidence, review, target, note, tag or hash change requires rebuilding the successor artifact.

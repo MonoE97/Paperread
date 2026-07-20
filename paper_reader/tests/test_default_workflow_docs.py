@@ -20,6 +20,9 @@ ZOTERO_REFERENCE = SKILL_ROOT / "references" / "zotero-workflow.md"
 PDF_REFERENCE = SKILL_ROOT / "references" / "pdf-path-workflow.md"
 SUMMARY_REFERENCE = SKILL_ROOT / "references" / "summary-schema.md"
 CAPTURE_SCRIPT = SKILL_ROOT / "scripts" / "capture-secondary-url.mjs"
+NETWORK_POLICY_SCRIPT = SKILL_ROOT / "scripts" / "lib" / "secondary-network-policy.mjs"
+RAW_CDP_SCRIPT = SKILL_ROOT / "scripts" / "lib" / "raw-cdp-capture.mjs"
+STRICT_EGRESS_PROXY_SCRIPT = SKILL_ROOT / "scripts" / "lib" / "strict-egress-proxy.mjs"
 DISCOVERY_SCRIPT = SKILL_ROOT / "scripts" / "discover-zotero-item.py"
 SUMMARY_LINT_SCRIPT = SKILL_ROOT / "scripts" / "lint-summary.py"
 VALIDATE_SCRIPT = SKILL_ROOT / "scripts" / "validate-skill.py"
@@ -73,6 +76,9 @@ def test_skill_bundle_contains_required_runtime_assets() -> None:
         PDF_REFERENCE,
         SUMMARY_REFERENCE,
         CAPTURE_SCRIPT,
+        NETWORK_POLICY_SCRIPT,
+        RAW_CDP_SCRIPT,
+        STRICT_EGRESS_PROXY_SCRIPT,
         DISCOVERY_SCRIPT,
         SUMMARY_LINT_SCRIPT,
         VALIDATE_SCRIPT,
@@ -112,7 +118,7 @@ def test_skill_body_routes_from_skill_root_and_preserves_boundaries() -> None:
     _metadata, body = parse_frontmatter(SKILL)
 
     for phrase in [
-        "Paper Reader 2.0 runtime contract",
+        "Paper Reader 2.1 runtime contract",
         "grouped CLI",
         "paper_reader.run.v2",
         "paper_reader.summary.v2",
@@ -178,7 +184,7 @@ def test_openai_agent_metadata_matches_skill() -> None:
         "short_description:",
         "default_prompt:",
         "allow_implicit_invocation: true",
-        "Paper Reader 2.0",
+        "Paper Reader 2.1",
         "grouped CLI",
         "released",
         "historical-only",
@@ -196,7 +202,7 @@ def test_project_metadata_is_skill_root_relative() -> None:
     project = pyproject["project"]
 
     assert project["name"] == "paper_reader"
-    assert project["version"] == "2.0.0"
+    assert project["version"] == "2.1.0"
     assert "readme" not in project
     assert project["scripts"] == {"paper_reader": "paper_reader.public_cli:app"}
     assert pyproject["tool"]["pytest"]["ini_options"]["testpaths"] == ["tests"]
@@ -219,7 +225,7 @@ def test_references_use_skill_root_paths_and_workflow_terms() -> None:
 
     for text in [zotero, pdf, summary]:
         for phrase in [
-            "Paper Reader 2.0 Runtime Contract",
+            "Paper Reader 2.1 Runtime Contract",
             "historical-only",
             "unsupported_run_schema",
         ]:
@@ -246,7 +252,7 @@ def test_references_use_skill_root_paths_and_workflow_terms() -> None:
         "context.md",
         "figure_context.md",
         "section_context.md",
-        "secondary_context_unavailable",
+        "Missing or unavailable sources degrade the evidence but do not block the PDF workflow",
         "unsupported_run_schema",
     ]:
         assert phrase in zotero
@@ -310,7 +316,7 @@ def test_zotero_reference_keeps_single_paper_write_safety_contract() -> None:
         "uv run paper_reader run prepare",
         "scripts/lint-summary.py",
         "section_context.md",
-        "not a canonical evidence source",
+        "are not canonical evidence sources",
         "paper_reader.candidate.v2",
         "paper_reader.write-authorization.v2",
         "immutable candidate",
@@ -462,10 +468,12 @@ def test_root_agents_defines_breaking_v2_public_contract() -> None:
 
     text = read(agents)
 
+    assert "2.0 安装文档" not in text
+
     for phrase in [
-        "Paper Reader 2.0",
+        "Paper Reader 2.1",
         "released runtime contract",
-        "2.0.0",
+        "2.1.0",
         "grouped CLI",
         "paper_reader.run.v2",
         "paper_reader.summary.v2",
@@ -536,8 +544,8 @@ def test_root_readmes_publish_v2_clean_install_contract() -> None:
     for path in [REPO_ROOT / "README.md", REPO_ROOT / "README.zh-CN.md"]:
         text = read(path)
         for phrase in [
-            "Paper Reader 2.0",
-            "2.0.0",
+            "Paper Reader 2.1",
+            "2.1.0",
             "clean install",
             "uv sync --locked",
             "uv run paper_reader --version",
@@ -559,7 +567,7 @@ def test_root_readmes_use_tracked_release_staging_instead_of_recursive_source_co
         assert "--release-bundle" in text
 
 
-def test_root_docs_do_not_claim_unbound_secondary_capture_can_affect_notes() -> None:
+def test_root_docs_publish_bound_secondary_cross_check_contract() -> None:
     agents_path = REPO_ROOT / "AGENTS.md"
     if not agents_path.exists():
         pytest.skip("root documentation is validated only in the source repository")
@@ -568,12 +576,110 @@ def test_root_docs_do_not_claim_unbound_secondary_capture_can_affect_notes() -> 
     chinese = read(REPO_ROOT / "README.zh-CN.md")
     agents = read(agents_path)
 
-    assert "unbound diagnostic material only" in english
-    assert "must not participate in review or candidate construction" in english
-    assert "仅是未绑定的诊断材料" in chinese
-    assert "不得参与 review 或 candidate 构建" in chinese
-    assert "当前 grouped runtime 尚无 immutable secondary-capture ingestion" in agents
-    assert "不得参与 review 或 candidate 构建" in agents
+    for phrase in [
+        "source/secondary-plan.json",
+        "run prepare --secondary-capture-dir",
+        "secondary_cross_checks",
+        "no web capture or cross-check text is produced",
+        "Local PDF runs reject this path before evidence allocation",
+    ]:
+        assert phrase in english
+
+    for phrase in [
+        "source/secondary-plan.json",
+        "run prepare --secondary-capture-dir",
+        "secondary_cross_checks",
+        "不抓网页也不生成交叉核对文字",
+        "本地 PDF run 会在 evidence 分配前拒绝该路径",
+    ]:
+        assert phrase in chinese
+
+    for phrase in [
+        "source/secondary-plan.json",
+        "run prepare --secondary-capture-dir",
+        "paper_reader.summary.v2.secondary_cross_checks",
+        "Local PDF 和 local batch",
+        "Batch 不抓取、解析或总结网页",
+        "`evidence_summary` 始终只能引用 canonical PDF / figure evidence",
+    ]:
+        assert phrase in agents
+
+def test_strict_capture_docs_publish_raw_cdp_security_contract() -> None:
+    agents_path = REPO_ROOT / "AGENTS.md"
+    if not agents_path.exists():
+        pytest.skip("root documentation is validated only in the source repository")
+
+    skill = read(SKILL)
+    zotero = read(ZOTERO_REFERENCE)
+    english = read(REPO_ROOT / "README.md")
+    chinese = read(REPO_ROOT / "README.zh-CN.md")
+    agents = read(agents_path)
+
+    for phrase in [
+        "direct raw CDP",
+        "isolated empty BrowserContext",
+        "`Browser.setDownloadBehavior(deny)`",
+        "WebRTC/WebTransport",
+    ]:
+        assert phrase in skill
+
+    for phrase in [
+        "direct raw CDP",
+        "isolated empty BrowserContext",
+        "`Fetch.requestPaused` / `Network.requestWillBeSent`",
+        "loopback HTTP/CONNECT proxy",
+        "pinned public IP",
+        "`Browser.setDownloadBehavior(deny)`",
+        "strict mode does not use the legacy 3456 relay",
+        "`ZOTERO_PAPER_READER_CDP_WS_ENDPOINT`",
+        "Chrome 144+",
+        "approval dialog",
+        "WebRTC/WebTransport",
+        "passive binary",
+        "direct-socket",
+    ]:
+        assert phrase in zotero
+
+    for text in [english, chinese]:
+        for phrase in [
+            "Node.js 22+",
+            "direct raw CDP",
+            "isolated empty BrowserContext",
+            "`Browser.setDownloadBehavior(deny)`",
+            "Chrome 144+",
+            "approval dialog",
+            "strict mode does not use the legacy 3456 relay",
+        ]:
+            assert phrase in text
+
+    for phrase in [
+        "direct raw CDP",
+        "isolated empty BrowserContext",
+        "`Fetch.requestPaused` / `Network.requestWillBeSent`",
+        "loopback HTTP/CONNECT proxy",
+        "pinned public IP",
+        "`Browser.setDownloadBehavior(deny)`",
+        "strict mode does not use the legacy 3456 relay",
+        "WebRTC/WebTransport",
+        "passive binary",
+        "direct-socket",
+    ]:
+        assert phrase in agents
+
+    for text in [skill, zotero, english, chinese, agents]:
+        for phrase in [
+            "`run_id`",
+            "`item_key`",
+            "`source_snapshot_sha256`",
+            "`secondary_plan_sha256`",
+            "`Fetch.failRequest`",
+            "8 MiB",
+            "32 MiB",
+        ]:
+            assert phrase in text
+
+    for text in [skill, zotero, english, chinese]:
+        assert "`<URL>`" in text
 
 
 def test_root_readmes_state_the_actual_posix_runtime_support_boundary() -> None:
@@ -609,8 +715,8 @@ def test_single_validator_tracks_v2_runtime_and_schemas() -> None:
         "references/schemas/paper_reader.run.v2.schema.json",
         "references/schemas/paper_reader.command-result.v2.schema.json",
         "paper_reader.public_cli:app",
-        "pyproject project.version must be 2.0.0",
-        "uv.lock paper-reader package version must be 2.0.0",
+        "pyproject project.version must be 2.1.0",
+        "uv.lock paper-reader package version must be 2.1.0",
     ]:
         assert phrase in validator
 
@@ -618,6 +724,22 @@ def test_single_validator_tracks_v2_runtime_and_schemas() -> None:
 def test_capture_secondary_script_is_in_skill_bundle() -> None:
     assert CAPTURE_SCRIPT.exists()
     text = read(CAPTURE_SCRIPT)
+    assert "--plan" in text
+    assert "--source-id" in text
+    assert "paper_reader.secondary-plan.v2-internal" in text
     assert "secondary_context" in text
     assert "secondary_context_unavailable" in text
     assert "request-retries" in text
+
+
+def test_capture_secondary_prefers_article_title_over_platform_shell_title() -> None:
+    text = read(CAPTURE_SCRIPT)
+
+    activity_title = text.index('pick("#activity-name")?.innerText')
+    rich_media_title = text.index('pick(".rich_media_title")?.innerText')
+    open_graph_title = text.index('meta("og:title")')
+    platform_title = text.index("document.title", open_graph_title)
+
+    assert activity_title < platform_title
+    assert rich_media_title < platform_title
+    assert open_graph_title < platform_title

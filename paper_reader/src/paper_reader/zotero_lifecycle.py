@@ -26,6 +26,7 @@ from paper_reader.contracts import (
 from paper_reader.local_lifecycle import LocalLifecycleError, _local_source_identity
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.runs import slugify_title
+from paper_reader.secondary_sources import build_secondary_source_plan
 from paper_reader.storage import (
     DirectoryAnchorLike,
     PublishConflictError,
@@ -68,6 +69,8 @@ class ZoteroLifecycleError(ValueError):
 class InitializedZoteroRun:
     run_dir: Path
     run: PaperReaderRun
+    secondary_plan: ArtifactRef
+    eligible_source_count: int
 
 
 class _VisibleTextParser(HTMLParser):
@@ -150,19 +153,75 @@ def _validated_item_type(value: object, *, context: str) -> str:
 def normalize_parent_snapshot(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ZoteroLifecycleError("invalid_parent_snapshot", "Zotero parent snapshot must be an object")
-    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-    key = str(payload.get("key") or data.get("key") or "").strip()
+    if "data" in payload:
+        data = payload["data"]
+        if not isinstance(data, dict):
+            raise ZoteroLifecycleError(
+                "invalid_parent_snapshot",
+                "Zotero parent snapshot data must be an object",
+            )
+    else:
+        data = payload
+
+    top_key = (
+        _validated_identifier(
+            payload["key"],
+            context="Zotero parent snapshot key",
+            code="invalid_parent_snapshot",
+        )
+        if "key" in payload
+        else None
+    )
+    nested_key = (
+        _validated_identifier(
+            data["key"],
+            context="Zotero parent snapshot data key",
+            code="invalid_parent_snapshot",
+        )
+        if data is not payload and "key" in data
+        else None
+    )
+    if top_key is not None and nested_key is not None and top_key != nested_key:
+        raise ZoteroLifecycleError(
+            "invalid_parent_snapshot",
+            "Zotero parent snapshot wrapper and data keys differ",
+        )
+    key = top_key if top_key is not None else nested_key
     title = display_title(data.get("title", ""))
     if not key or not title:
         raise ZoteroLifecycleError(
             "invalid_parent_snapshot",
             "Zotero parent snapshot requires key and title",
         )
-    version_value = payload.get("version", data.get("version", 0))
-    if type(version_value) is not int or version_value < 0:
+
+    missing_version = object()
+    top_version = payload.get("version", missing_version)
+    nested_version = (
+        data.get("version", missing_version) if data is not payload else missing_version
+    )
+    for context, version in (
+        ("wrapper", top_version),
+        ("data", nested_version),
+    ):
+        if version is not missing_version and (type(version) is not int or version < 0):
+            raise ZoteroLifecycleError(
+                "invalid_parent_snapshot",
+                f"Zotero parent snapshot {context} version must be a non-negative integer",
+            )
+    if (
+        top_version is not missing_version
+        and nested_version is not missing_version
+        and top_version != nested_version
+    ):
         raise ZoteroLifecycleError(
             "invalid_parent_snapshot",
-            "Zotero parent snapshot version must be a non-negative integer",
+            "Zotero parent snapshot wrapper and data versions differ",
+        )
+    version_value = top_version if top_version is not missing_version else nested_version
+    if version_value is missing_version:
+        raise ZoteroLifecycleError(
+            "invalid_parent_snapshot",
+            "Zotero parent snapshot version is required",
         )
     return {
         "key": key,
@@ -322,6 +381,96 @@ def _read_bundle(path: Path) -> tuple[bytes, dict[str, Any], dict[str, Any], lis
     return raw_bytes, payload, selected, inventory
 
 
+def _optional_extra(
+    payload: dict[str, Any],
+    *,
+    context: str,
+) -> tuple[bool, str]:
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    if "extra" not in data:
+        return False, ""
+    extra = data["extra"]
+    if not isinstance(extra, str):
+        raise ZoteroLifecycleError(
+            "invalid_discovery_bundle",
+            f"{context} Extra must be a string when present",
+        )
+    return True, extra
+
+
+def _bind_authoritative_parent_extra(
+    selected: dict[str, Any],
+    *,
+    expected_item_key: str,
+) -> dict[str, Any]:
+    selected_copy = dict(selected)
+    selected_has_extra, selected_extra = _optional_extra(
+        selected_copy,
+        context="selected_item",
+    )
+    selected_copy.pop("extra", None)
+    paper_reader_meta = selected_copy.get("_paper_reader")
+    if not isinstance(paper_reader_meta, dict):
+        raise ZoteroLifecycleError(
+            "invalid_discovery_bundle",
+            "discovery bundle requires an authoritative parent snapshot",
+        )
+    discovery = paper_reader_meta.get("discovery")
+    if not isinstance(discovery, dict):
+        raise ZoteroLifecycleError(
+            "invalid_discovery_bundle",
+            "discovery bundle requires an authoritative parent snapshot",
+        )
+    snapshots = discovery.get("raw_parent_snapshots")
+    if not isinstance(snapshots, dict):
+        raise ZoteroLifecycleError(
+            "invalid_discovery_bundle",
+            "discovery provenance raw_parent_snapshots must be an object",
+        )
+    snapshot = snapshots.get(expected_item_key)
+    if not isinstance(snapshot, dict):
+        raise ZoteroLifecycleError(
+            "invalid_discovery_bundle",
+            "discovery provenance has no exact selected parent snapshot",
+        )
+    parent = normalize_parent_snapshot(snapshot)
+    data = snapshot.get("data") if isinstance(snapshot.get("data"), dict) else snapshot
+    item_type = _validated_item_type(data.get("itemType"), context="selected parent snapshot")
+    if (
+        parent["key"] != expected_item_key
+        or parent["normalized_title"] != normalized_title(selected_copy.get("title", ""))
+        or parent["DOI"] != normalized_doi(selected_copy.get("DOI", ""))
+        or parent["version"] != _required_version(selected_copy, context="selected_item")
+        or item_type != _validated_item_type(selected_copy.get("itemType"), context="selected_item")
+    ):
+        raise ZoteroLifecycleError(
+            "invalid_discovery_bundle",
+            "selected parent snapshot identity differs from selected_item",
+        )
+    parent_has_extra, parent_extra = _optional_extra(
+        snapshot,
+        context="selected parent snapshot",
+    )
+    if parent_has_extra and selected_has_extra and parent_extra != selected_extra:
+        raise ZoteroLifecycleError(
+            "parent_extra_mismatch",
+            "selected_item Extra differs from the authoritative parent snapshot",
+        )
+    if parent_has_extra:
+        selected_copy["extra"] = parent_extra
+        meta_copy = dict(paper_reader_meta)
+        enrichment = meta_copy.get("enrichment")
+        enrichment_copy = dict(enrichment) if isinstance(enrichment, dict) else {}
+        enrichment_copy["extra"] = {
+            "source": "zotero_parent_snapshot",
+            "item_key": expected_item_key,
+            "version": parent["version"],
+        }
+        meta_copy["enrichment"] = enrichment_copy
+        selected_copy["_paper_reader"] = meta_copy
+    return selected_copy
+
+
 def _validated_inventory(
     inventory: list[dict[str, Any]],
     *,
@@ -466,12 +615,22 @@ def _build_validated_run(
     raw_bytes: bytes,
     normalized_snapshot: dict[str, Any],
     source_core: dict[str, Any],
-) -> tuple[PaperReaderRun, bytes, bytes]:
+) -> tuple[PaperReaderRun, bytes, bytes, bytes]:
     raw_path = "source/discovery.raw.json"
     normalized_path = "source/source.json"
     normalized_bytes = canonical_json_bytes(normalized_snapshot)
+    plan = build_secondary_source_plan(
+        normalized_snapshot["selected_item"],
+        source_snapshot_sha256=hashlib.sha256(normalized_bytes).hexdigest(),
+    )
+    plan_bytes = canonical_json_bytes(plan)
     raw_ref = _artifact_ref(raw_path, "raw_discovery_bundle", raw_bytes)
     normalized_ref = _artifact_ref(normalized_path, "normalized_source", normalized_bytes)
+    plan_ref = _artifact_ref(
+        "source/secondary-plan.json",
+        "secondary_source_plan",
+        plan_bytes,
+    )
     source = ZoteroSourceIdentity(
         **source_core,
         raw_discovery_bundle=raw_ref,
@@ -484,13 +643,13 @@ def _build_validated_run(
         source=source,
         target=None,
         status="initialized",
-        artifacts=(raw_ref, normalized_ref),
+        artifacts=(raw_ref, normalized_ref, plan_ref),
         gate=GateState(status="not_evaluated"),
         live_preflight=None,
     )
     run_bytes = canonical_json_bytes(run)
     PaperReaderRun.model_validate_json(run_bytes)
-    return run, normalized_bytes, run_bytes
+    return run, normalized_bytes, plan_bytes, run_bytes
 
 
 def _stage_run(
@@ -499,6 +658,7 @@ def _stage_run(
     staging_anchor: DirectoryAnchorLike,
     raw_bytes: bytes,
     normalized_bytes: bytes,
+    plan_bytes: bytes,
     run_bytes: bytes,
 ) -> None:
     source_dir = staging / "source"
@@ -510,6 +670,11 @@ def _stage_run(
     atomic_write_bytes(
         source_dir / "source.json",
         normalized_bytes,
+        anchor=staging_anchor,
+    )
+    atomic_write_bytes(
+        source_dir / "secondary-plan.json",
+        plan_bytes,
         anchor=staging_anchor,
     )
     atomic_write_bytes(staging / "run.json", run_bytes, anchor=staging_anchor)
@@ -531,6 +696,10 @@ def initialize_zotero_run(
     normalized_inventory = _validated_inventory(
         inventory,
         selected=selected,
+        expected_item_key=expected_item_key,
+    )
+    selected = _bind_authoritative_parent_extra(
+        selected,
         expected_item_key=expected_item_key,
     )
     (
@@ -570,7 +739,7 @@ def initialize_zotero_run(
         "attachment": attachment_identity,
     }
     try:
-        run, normalized_bytes, run_bytes = _build_validated_run(
+        run, normalized_bytes, plan_bytes, run_bytes = _build_validated_run(
             raw_bytes=raw_bytes,
             normalized_snapshot=normalized_snapshot,
             source_core=source_core,
@@ -580,7 +749,7 @@ def initialize_zotero_run(
             "invalid_discovery_bundle",
             f"discovery bundle cannot form a strict canonical V2 run: {exc}",
         ) from exc
-    projected_size = len(raw_bytes) + len(normalized_bytes) + len(run_bytes)
+    projected_size = len(raw_bytes) + len(normalized_bytes) + len(plan_bytes) + len(run_bytes)
     if projected_size > V2_RESOURCE_POLICY.run_max_bytes:
         raise ZoteroLifecycleError(
             "run_size_limit_exceeded",
@@ -654,12 +823,14 @@ def initialize_zotero_run(
                                 staging_anchor=staging_anchor,
                                 raw_bytes=raw_bytes,
                                 normalized_bytes=normalized_bytes,
+                                plan_bytes=plan_bytes,
                                 run_bytes=run_bytes,
                             )
                             staging_snapshot = tree_snapshot_from_bytes(
                                 {
                                     "source/discovery.raw.json": raw_bytes,
                                     "source/source.json": normalized_bytes,
+                                    "source/secondary-plan.json": plan_bytes,
                                     "run.json": run_bytes,
                                 }
                             )
@@ -695,7 +866,16 @@ def initialize_zotero_run(
                                     "selected Zotero PDF changed while the run was allocated: "
                                     f"{exc}",
                                 ) from exc
-                            return InitializedZoteroRun(run_dir=destination, run=run)
+                            plan_ref = next(
+                                item for item in run.artifacts if item.role == "secondary_source_plan"
+                            )
+                            plan_payload = json.loads(plan_bytes)
+                            return InitializedZoteroRun(
+                                run_dir=destination,
+                                run=run,
+                                secondary_plan=plan_ref,
+                                eligible_source_count=plan_payload["eligible_source_count"],
+                            )
                         finally:
                             try:
                                 remove_anchored_tree(

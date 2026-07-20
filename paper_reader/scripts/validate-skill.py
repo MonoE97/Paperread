@@ -60,6 +60,8 @@ RUNTIME_STATE_PARTS = {
     "__pycache__",
     "runs",
 }
+REQUIRED_PYDANTIC_DEPENDENCY = "pydantic>=2.12,<3"
+REQUIRED_PYDANTIC_SPECIFIER = ">=2.12,<3"
 REQUIRED_PATHS = [
     "SKILL.md",
     "agents/openai.yaml",
@@ -92,6 +94,8 @@ REQUIRED_PATHS = [
     "src/paper_reader/run_lock.py",
     "src/paper_reader/run_size.py",
     "src/paper_reader/runs.py",
+    "src/paper_reader/secondary_evidence.py",
+    "src/paper_reader/secondary_projection.py",
     "src/paper_reader/secondary_sources.py",
     "src/paper_reader/summary_lint.py",
     "src/paper_reader/summary_preflight_cli.py",
@@ -127,6 +131,9 @@ REQUIRED_PATHS = [
     "references/schemas/paper_reader.command-result.v2.schema.json",
     "scripts/capture-secondary-url.mjs",
     "scripts/discover-zotero-item.py",
+    "scripts/lib/raw-cdp-capture.mjs",
+    "scripts/lib/secondary-network-policy.mjs",
+    "scripts/lib/strict-egress-proxy.mjs",
     "scripts/lint-summary.py",
     "scripts/validate-skill.py",
     "tests/fixtures/minimal.pdf",
@@ -181,8 +188,23 @@ def _validate_release_metadata(
         else:
             if project.get("name") != "paper_reader":
                 errors.append("pyproject project.name must be paper_reader")
-            if project.get("version") != "2.0.0":
-                errors.append("pyproject project.version must be 2.0.0")
+            if project.get("version") != "2.1.0":
+                errors.append("pyproject project.version must be 2.1.0")
+            dependencies = project.get("dependencies")
+            pydantic_dependencies = (
+                [
+                    dependency
+                    for dependency in dependencies
+                    if isinstance(dependency, str) and dependency.startswith("pydantic")
+                ]
+                if isinstance(dependencies, list)
+                else []
+            )
+            if pydantic_dependencies != [REQUIRED_PYDANTIC_DEPENDENCY]:
+                errors.append(
+                    "pyproject pydantic dependency must be "
+                    f"{REQUIRED_PYDANTIC_DEPENDENCY}"
+                )
             scripts = project.get("scripts")
             if not isinstance(scripts, dict) or scripts.get("paper_reader") != "paper_reader.public_cli:app":
                 errors.append("pyproject paper_reader entrypoint must be paper_reader.public_cli:app")
@@ -201,10 +223,28 @@ def _validate_release_metadata(
             errors.append("uv.lock must contain exactly one paper-reader package")
         else:
             package = matches[0]
-            if package.get("version") != "2.0.0":
-                errors.append("uv.lock paper-reader package version must be 2.0.0")
+            if package.get("version") != "2.1.0":
+                errors.append("uv.lock paper-reader package version must be 2.1.0")
             if package.get("source") != {"editable": "."}:
                 errors.append("uv.lock paper-reader package must be the editable skill root")
+            metadata = package.get("metadata")
+            requires_dist = metadata.get("requires-dist") if isinstance(metadata, dict) else None
+            pydantic_requirements = (
+                [
+                    requirement
+                    for requirement in requires_dist
+                    if isinstance(requirement, dict) and requirement.get("name") == "pydantic"
+                ]
+                if isinstance(requires_dist, list)
+                else []
+            )
+            if len(pydantic_requirements) != 1 or (
+                pydantic_requirements[0].get("specifier") != REQUIRED_PYDANTIC_SPECIFIER
+            ):
+                errors.append(
+                    "uv.lock pydantic dependency must use "
+                    f"{REQUIRED_PYDANTIC_SPECIFIER}"
+                )
 
 
 def _validate_required_files(root: Path, errors: list[str]) -> set[str]:
@@ -384,9 +424,9 @@ def validate_skill(skill_root: Path, *, release_bundle: bool = False) -> list[st
     init_py = root / "src/paper_reader/__init__.py"
     if (
         "src/paper_reader/__init__.py" in regular_required_paths
-        and '__version__ = "2.0.0"' not in init_py.read_text(encoding="utf-8")
+        and '__version__ = "2.1.0"' not in init_py.read_text(encoding="utf-8")
     ):
-        errors.append("paper_reader package version must be 2.0.0")
+        errors.append("paper_reader package version must be 2.1.0")
 
     _validate_release_metadata(root, errors, regular_required_paths)
     _validate_no_v1_runtime_modules(root, errors)

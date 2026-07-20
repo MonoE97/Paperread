@@ -58,6 +58,43 @@ def _prepared_run(tmp_path: Path, *, preview: bool = False) -> tuple[Path, str]:
     return run_dir, payload["data"]["evidence_digest"]
 
 
+def _prepared_zotero_secondary_run(
+    tmp_path: Path,
+    *,
+    urls: tuple[str, ...],
+    captured: bool = True,
+    capture_title: str = "外部解读文章",
+) -> tuple[Path, str]:
+    from test_v2_zotero_prepare import _write_capture, _zotero_run
+
+    run_dir, _pdf_path = _zotero_run(tmp_path, extra="\n".join(urls))
+    capture_dir = tmp_path / "captures"
+    capture_dir.mkdir()
+    if captured:
+        for index, url in enumerate(urls, start=1):
+            _write_capture(
+                capture_dir,
+                binding_run_dir=run_dir,
+                requested_url=url,
+                source_id=f"secondary-{index:03d}",
+                title=capture_title,
+            )
+    prepared = _invoke(
+        [
+            "run",
+            "prepare",
+            str(run_dir),
+            "--figure-limit",
+            "0",
+            "--secondary-capture-dir",
+            str(capture_dir),
+        ]
+    )
+    payload = _result_payload(prepared)
+    assert prepared.exit_code == 0, prepared.stderr
+    return run_dir, payload["data"]["evidence_digest"]
+
+
 def _write_summary_and_review(
     run_dir: Path,
     evidence_digest: str,
@@ -65,6 +102,7 @@ def _write_summary_and_review(
     locator: str = "context.md page 1",
     method: str = "方法先抽取正文，再对证据与结论执行结构化复核。",
     review_status: str = "passed",
+    summary_updates: dict[str, object] | None = None,
 ) -> tuple[PaperReaderSummary, PaperReaderReview]:
     run_id = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))["run_id"]
     summary_payload = {
@@ -102,6 +140,7 @@ def _write_summary_and_review(
             }
         ],
     }
+    summary_payload.update(summary_updates or {})
     summary_bytes = json.dumps(summary_payload, ensure_ascii=False, separators=(",", ":")).encode()
     summary = PaperReaderSummary.model_validate_json(summary_bytes)
     (run_dir / "summary.json").write_bytes(summary_bytes)
@@ -138,6 +177,536 @@ def test_review_validate_is_read_only_and_accepts_fully_bound_chinese_render(tmp
     assert len(payload["data"]["rendered_note_sha256"]) == 64
     assert payload["data"]["blockers"] == []
     assert _tree_snapshot(run_dir) == before
+
+
+def test_review_seal_projects_secondary_findings_into_allowed_existing_fields_only(
+    tmp_path: Path,
+) -> None:
+    source_url = "https://mp.weixin.qq.com/s/example?scene=334"
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(
+        tmp_path,
+        urls=(source_url,),
+    )
+    _write_summary_and_review(
+        run_dir,
+        evidence_digest,
+        summary_updates={
+            "secondary_cross_checks": [
+                {
+                    "source_id": "secondary-001",
+                    "status": "used",
+                    "reason": "该解读提供了可核对的实验语境。",
+                    "findings": [
+                        {
+                            "relation": "supports",
+                            "target": "core_result_short_annotation",
+                            "text": "外部解读与论文关于压力影响形变的方向一致。",
+                            "caveats": ["外部表述经过简化，仍以论文数据为准。"],
+                        },
+                        {
+                            "relation": "extends",
+                            "target": "technical_details_item",
+                            "text": "解读补充说明了该结果对电池堆叠条件的工程含义。",
+                            "caveats": [],
+                        },
+                        {
+                            "relation": "questions",
+                            "target": "inferred_limits_item",
+                            "text": "解读未给出跨材料体系复现所需的完整条件。",
+                            "caveats": [],
+                        },
+                    ],
+                }
+            ]
+        },
+    )
+
+    result = _invoke(["review", "seal", str(run_dir)])
+
+    assert result.exit_code == 0, result.stderr
+    package_dir = Path(_result_payload(result)["data"]["review_package_dir"])
+    note = (package_dir / "note.md").read_text(encoding="utf-8")
+    expected_annotation = "外部交叉核对（补充）"
+    assert note.count(expected_annotation) == 3
+    assert note.count(f"]({source_url})") == 3
+    thirty_second = next(line for line in note.splitlines() if line.startswith("| 30 秒结论 |"))
+    assert source_url not in thirty_second
+    evidence_lines = [line for line in note.splitlines() if "context.md page" in line]
+    assert all(source_url not in line for line in evidence_lines)
+    assert "## 6" not in note
+    assert [line for line in note.splitlines() if line.startswith("## ")] == [
+        "## 0. 阅读结论",
+        "## 1. 速读信息",
+        "## 2. 论文主张",
+        "## 3. 方法与设计",
+        "## 4. 图表导读",
+        "## 5. 边界与机会",
+    ]
+    template = Path(__file__).parents[1] / "templates" / "zotero_note.md.j2"
+    assert hashlib.sha256(template.read_bytes()).hexdigest() == (
+        "510daa4cd394b841cfba2aa2718acd2a8faacadf340b3d279050d025aeeaaee3"
+    )
+
+
+def test_review_seal_keeps_projected_inferred_finding_after_legacy_display_cap(
+    tmp_path: Path,
+) -> None:
+    source_url = "https://mp.weixin.qq.com/s/example?scene=334"
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(
+        tmp_path,
+        urls=(source_url,),
+    )
+    _write_summary_and_review(
+        run_dir,
+        evidence_digest,
+        summary_updates={
+            "inferred_limits": [
+                {
+                    "text": f"论文内部推断限制 {index}。",
+                    "source_type": "inferred",
+                    "basis": "基于论文实验边界。",
+                    "locator": "context.md page 1",
+                }
+                for index in range(9)
+            ],
+            "secondary_cross_checks": [
+                {
+                    "source_id": "secondary-001",
+                    "status": "used",
+                    "reason": "外部解读暴露了额外适用边界。",
+                    "findings": [
+                        {
+                            "relation": "questions",
+                            "target": "inferred_limits_item",
+                            "text": "外部解读未说明长周期压力波动的影响。",
+                            "caveats": [],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    result = _invoke(["review", "seal", str(run_dir)])
+
+    assert result.exit_code == 0, result.stderr
+    package_dir = Path(_result_payload(result)["data"]["review_package_dir"])
+    note = (package_dir / "note.md").read_text(encoding="utf-8")
+    assert "外部解读未说明长周期压力波动的影响" in note
+    assert note.count("论文内部推断限制") == 8
+
+
+def test_review_seal_flattens_and_escapes_secondary_source_title(
+    tmp_path: Path,
+) -> None:
+    source_url = "https://mp.weixin.qq.com/s/example?scene=334"
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(
+        tmp_path,
+        urls=(source_url,),
+        capture_title="外部|[解读]\n## 6. 注入",
+    )
+    _write_summary_and_review(
+        run_dir,
+        evidence_digest,
+        summary_updates={
+            "secondary_cross_checks": [
+                {
+                    "source_id": "secondary-001",
+                    "status": "used",
+                    "reason": "该来源可用于补充技术语境。",
+                    "findings": [
+                        {
+                            "relation": "extends",
+                            "target": "technical_details_item",
+                            "text": "该来源补充了工程|压力控制的解释。",
+                            "caveats": [],
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    result = _invoke(["review", "seal", str(run_dir)])
+
+    assert result.exit_code == 0, result.stderr
+    package_dir = Path(_result_payload(result)["data"]["review_package_dir"])
+    note = (package_dir / "note.md").read_text(encoding="utf-8")
+    assert "\n## 6. 注入" not in note
+    assert "该来源补充了工程\\|压力控制的解释" in note
+    assert "[外部\\|\\[解读\\] ## 6. 注入]" in note
+
+
+def test_review_seal_allows_english_secondary_source_title_as_metadata(
+    tmp_path: Path,
+) -> None:
+    source_url = "https://example.com/external-guide"
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(
+        tmp_path,
+        urls=(source_url,),
+        capture_title="External Engineering Guide",
+    )
+    _write_summary_and_review(
+        run_dir,
+        evidence_digest,
+        summary_updates={
+            "secondary_cross_checks": [
+                {
+                    "source_id": "secondary-001",
+                    "status": "used",
+                    "reason": "该来源可用于补充工程语境。",
+                    "findings": [
+                        {
+                            "relation": "extends",
+                            "target": "technical_details_item",
+                            "text": "该来源补充了堆叠压力控制的实践语境。",
+                            "caveats": [],
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    result = _invoke(["review", "seal", str(run_dir)])
+
+    assert result.exit_code == 0, result.stderr
+    package_dir = Path(_result_payload(result)["data"]["review_package_dir"])
+    note = (package_dir / "note.md").read_text(encoding="utf-8")
+    assert f"[External Engineering Guide]({source_url})" in note
+
+
+def test_review_seal_allows_pipe_in_english_secondary_title_inside_table(
+    tmp_path: Path,
+) -> None:
+    source_url = "https://example.com/external-guide"
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(
+        tmp_path,
+        urls=(source_url,),
+        capture_title="External | Engineering Guide",
+    )
+    _write_summary_and_review(
+        run_dir,
+        evidence_digest,
+        summary_updates={
+            "secondary_cross_checks": [
+                {
+                    "source_id": "secondary-001",
+                    "status": "used",
+                    "reason": "该来源可用于核对核心结果。",
+                    "findings": [
+                        {
+                            "relation": "supports",
+                            "target": "core_result_short_annotation",
+                            "text": "该来源给出了与核心结果一致的解释。",
+                            "caveats": [],
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    result = _invoke(["review", "seal", str(run_dir)])
+
+    result_payload = _result_payload(result)
+    assert result.exit_code == 0, (result.stderr, result_payload["data"]["blockers"])
+    package_dir = Path(_result_payload(result)["data"]["review_package_dir"])
+    note = (package_dir / "note.md").read_text(encoding="utf-8")
+    assert f"[External \\\\| Engineering Guide]({source_url})" in note
+
+
+@pytest.mark.parametrize(
+    "raw_summary_update",
+    [
+        {
+            "one_sentence_summary": (
+                "本文结论参考了[外部来源](https://example.com/external-guide)。"
+            )
+        },
+        {
+            "technical_details": [
+                "额外工程说明见[外部来源](https://example.com/external-guide)。"
+            ]
+        },
+    ],
+)
+def test_review_validate_blocks_plan_url_outside_structured_secondary_assessment(
+    raw_summary_update: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    source_url = "https://example.com/external-guide"
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(
+        tmp_path,
+        urls=(source_url,),
+    )
+    _write_summary_and_review(
+        run_dir,
+        evidence_digest,
+        summary_updates={
+            **raw_summary_update,
+            "secondary_cross_checks": [
+                {
+                    "source_id": "secondary-001",
+                    "status": "used",
+                    "reason": "该来源可用于补充工程语境。",
+                    "findings": [
+                        {
+                            "relation": "extends",
+                            "target": "technical_details_item",
+                            "text": "该来源补充了堆叠压力控制的实践语境。",
+                            "caveats": [],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    result = _invoke(["review", "validate", str(run_dir)])
+
+    assert result.exit_code == 1
+    assert "secondary_cross_check_projection_bypass" in _blocker_codes(result)
+
+
+def test_review_validate_blocks_rejected_plan_url_outside_secondary_pipeline(
+    tmp_path: Path,
+) -> None:
+    source_url = "http://127.0.0.1/private"
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(
+        tmp_path,
+        urls=(source_url,),
+        captured=False,
+    )
+    _write_summary_and_review(
+        run_dir,
+        evidence_digest,
+        summary_updates={
+            "one_sentence_summary": f"本文结论还参考了[未绑定来源]({source_url})。"
+        },
+    )
+
+    result = _invoke(["review", "validate", str(run_dir)])
+
+    assert result.exit_code == 1
+    assert "secondary_cross_check_projection_bypass" in _blocker_codes(result)
+
+
+def test_review_validate_blocks_untrusted_english_link_label_in_raw_summary(
+    tmp_path: Path,
+) -> None:
+    run_dir, evidence_digest = _prepared_run(tmp_path)
+    _write_summary_and_review(
+        run_dir,
+        evidence_digest,
+        summary_updates={
+            "technical_details": [
+                "中文引导（[This external article completely contradicts the reported mechanism]"
+                "(https://example.org)）"
+            ]
+        },
+    )
+
+    result = _invoke(["review", "validate", str(run_dir)])
+
+    assert result.exit_code == 1
+    assert "rendered_note_field_english_prose" in _blocker_codes(result)
+
+
+def test_review_seal_projects_unavailable_secondary_source_into_existing_boundary_list(
+    tmp_path: Path,
+) -> None:
+    source_url = "https://mp.weixin.qq.com/s/unavailable?scene=334"
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(
+        tmp_path,
+        urls=(source_url,),
+        captured=False,
+    )
+    _write_summary_and_review(
+        run_dir,
+        evidence_digest,
+        summary_updates={
+            "secondary_cross_checks": [
+                {
+                    "source_id": "secondary-001",
+                    "status": "unavailable",
+                    "reason": "页面无法读取，不能形成内容判断。",
+                    "findings": [],
+                }
+            ]
+        },
+    )
+
+    result = _invoke(["review", "seal", str(run_dir)])
+
+    assert result.exit_code == 0, result.stderr
+    package_dir = Path(_result_payload(result)["data"]["review_package_dir"])
+    note = (package_dir / "note.md").read_text(encoding="utf-8")
+    failure = "外部交叉核对未完整完成：以下链接无法读取，未纳入上述判断"
+    assert note.count(failure) == 1
+    boundary_section = note.split("### 适用机会与边界", 1)[1]
+    assert source_url in boundary_section
+    assert source_url not in note.split("### 适用机会与边界", 1)[0]
+
+
+def test_zotero_without_extra_links_keeps_existing_note_rendering_unchanged(
+    tmp_path: Path,
+) -> None:
+    from paper_reader.note import render_note, render_note_html
+
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(tmp_path, urls=())
+    summary, _review = _write_summary_and_review(run_dir, evidence_digest)
+    run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    evidence_ref = next(
+        item for item in run["artifacts"] if item["role"] == "evidence_manifest"
+    )
+    evidence = json.loads(
+        (run_dir / evidence_ref["path"]).read_text(encoding="utf-8")
+    )
+    metadata_ref = next(item for item in evidence["files"] if item["role"] == "metadata")
+    metadata = json.loads(
+        (run_dir / metadata_ref["path"]).read_text(encoding="utf-8")
+    )
+    expected_note = render_note(
+        metadata,
+        summary.model_dump(mode="json"),
+        generated_date=run["created_at"][:10],
+    )
+
+    result = _invoke(["review", "seal", str(run_dir)])
+
+    assert result.exit_code == 0, result.stderr
+    package_dir = Path(_result_payload(result)["data"]["review_package_dir"])
+    assert (package_dir / "note.md").read_text(encoding="utf-8") == expected_note
+    assert (package_dir / "note.html").read_text(encoding="utf-8") == render_note_html(
+        expected_note
+    )
+    assert "外部交叉核对" not in expected_note
+
+
+@pytest.mark.parametrize(
+    ("summary_updates", "expected_code"),
+    [
+        ({}, "secondary_cross_check_missing"),
+        (
+            {
+                "secondary_cross_checks": [
+                    {
+                        "source_id": "secondary-999",
+                        "status": "used",
+                        "reason": "来源身份不匹配。",
+                        "findings": [
+                            {
+                                "relation": "supports",
+                                "target": "core_result_short_annotation",
+                                "text": "该内容与论文结果一致。",
+                                "caveats": [],
+                            }
+                        ],
+                    }
+                ]
+            },
+            "secondary_cross_check_mismatch",
+        ),
+        (
+            {
+                "secondary_cross_checks": [
+                    {
+                        "source_id": "secondary-001",
+                        "status": "used",
+                        "reason": "尝试把冲突写入论文核心结果。",
+                        "findings": [
+                            {
+                                "relation": "conflicts",
+                                "target": "core_result_short_annotation",
+                                "text": "外部说法与论文结果存在冲突。",
+                                "caveats": [],
+                            }
+                        ],
+                    }
+                ]
+            },
+            "secondary_cross_check_target_invalid",
+        ),
+        (
+            {
+                "secondary_cross_checks": [
+                    {
+                        "source_id": "secondary-001",
+                        "status": "used",
+                        "reason": "同一表格字段的标注数量超过上限。",
+                        "findings": [
+                            {
+                                "relation": "supports",
+                                "target": "core_result_short_annotation",
+                                "text": "第一条一致性判断。",
+                                "caveats": [],
+                            },
+                            {
+                                "relation": "supports",
+                                "target": "core_result_short_annotation",
+                                "text": "第二条一致性判断。",
+                                "caveats": [],
+                            },
+                            {
+                                "relation": "supports",
+                                "target": "core_result_short_annotation",
+                                "text": "第三条一致性判断。",
+                                "caveats": [],
+                            },
+                        ],
+                    }
+                ]
+            },
+            "secondary_cross_check_table_limit",
+        ),
+    ],
+)
+def test_review_validate_blocks_incomplete_or_misbound_secondary_assessments(
+    summary_updates: dict[str, object],
+    expected_code: str,
+    tmp_path: Path,
+) -> None:
+    source_url = "https://mp.weixin.qq.com/s/example?scene=334"
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(
+        tmp_path,
+        urls=(source_url,),
+    )
+    _write_summary_and_review(
+        run_dir,
+        evidence_digest,
+        summary_updates=summary_updates,
+    )
+
+    result = _invoke(["review", "validate", str(run_dir)])
+
+    assert result.exit_code == 1
+    assert expected_code in _blocker_codes(result)
+
+
+def test_review_validate_rejects_secondary_assessment_for_local_pdf(
+    tmp_path: Path,
+) -> None:
+    run_dir, evidence_digest = _prepared_run(tmp_path)
+    _write_summary_and_review(
+        run_dir,
+        evidence_digest,
+        summary_updates={
+            "secondary_cross_checks": [
+                {
+                    "source_id": "secondary-001",
+                    "status": "unavailable",
+                    "reason": "本地 PDF 不应进入外部链接流程。",
+                    "findings": [],
+                }
+            ]
+        },
+    )
+
+    result = _invoke(["review", "validate", str(run_dir)])
+
+    assert result.exit_code == 1
+    assert "secondary_cross_check_not_allowed" in _blocker_codes(result)
 
 
 def test_review_validation_retains_verified_evidence_bytes_after_path_overwrite(

@@ -411,7 +411,7 @@ def _fake_paper_reader_root(tmp_path: Path) -> Path:
     (root / "references" / "schemas").mkdir(parents=True)
     (root / "SKILL.md").write_text("# paper_reader V2\n", encoding="utf-8")
     (root / "pyproject.toml").write_text(
-        '[project]\nname="paper_reader"\nversion="2.0.0"\n[project.scripts]\n'
+        '[project]\nname="paper_reader"\nversion="2.1.0"\n[project.scripts]\n'
         'paper_reader="paper_reader.public_cli:app"\n',
         encoding="utf-8",
     )
@@ -1022,6 +1022,90 @@ def test_crash_after_invocation_reservation_before_spawn_is_safely_recoverable(
     assert resumed.result["status"] == "prepared"
     assert (source.parent / "paper_analysis").is_dir()
     assert not (source.parent / "paper_analysis_v2").exists()
+
+
+def test_owner_only_record_transition_is_resumed_under_coordinator_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir, source, assignment = _batch_run(tmp_path)
+    request_id = "13131313-1313-4313-8313-131313131313"
+    real_replace = local_prepare_module.replace_bytes_atomic
+    left_owner_only = False
+
+    def crash_record_transition(path: Path, data: bytes, **kwargs) -> None:
+        nonlocal left_owner_only
+        if path.name == "record.json" and not left_owner_only:
+            left_owner_only = True
+
+            def stop_after_owner(stage: str) -> None:
+                if stage == "after_owner_staging_fsync":
+                    raise RuntimeError("simulated owner-only coordination crash")
+
+            real_replace(path, data, fault=stop_after_owner, **kwargs)
+            return
+        real_replace(path, data, **kwargs)
+
+    monkeypatch.setattr(
+        local_prepare_module,
+        "replace_bytes_atomic",
+        crash_record_transition,
+    )
+    with pytest.raises(RuntimeError, match="owner-only coordination crash"):
+        run_local_prepare(**_run_kwargs(run_dir, assignment, request_id))
+
+    assert left_owner_only is True
+    record_path = (
+        run_dir
+        / "results"
+        / "local-prepare"
+        / ".coordination"
+        / request_id
+        / "record.json"
+    )
+    assert json.loads(record_path.read_text(encoding="utf-8"))["init_invoked"] is False
+    assert local_prepare_module.active_transition_targets(
+        record_path.parent,
+        replace_targets=local_prepare_module._COORDINATION_TRANSITION_TARGETS,
+    ) == {"record.json"}
+
+    monkeypatch.setattr(
+        local_prepare_module,
+        "replace_bytes_atomic",
+        real_replace,
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def failing_init_runner(argv, _cwd, _timeout_seconds, invocation) -> int:
+        calls.append(argv)
+        invocation.mark_started()
+        invocation.write_stdout(
+            canonical_json_bytes(
+                {
+                    "schema_version": "paper_reader.command-result.v2",
+                    "command": "run init-local",
+                    "ok": False,
+                    "code": "fixture_failure",
+                    "created_at": "2026-07-11T00:00:02Z",
+                    "message": "stop after owner-only transition recovery",
+                    "data": {"source_pdf": str(source)},
+                }
+            )
+            + b"\n"
+        )
+        return 1
+
+    resumed = run_local_prepare(
+        **_run_kwargs(run_dir, assignment, request_id),
+        runner=failing_init_runner,
+    )
+
+    assert resumed.result["status"] == "failed"
+    assert len(calls) == 1
+    assert local_prepare_module.active_transition_targets(
+        record_path.parent,
+        replace_targets=local_prepare_module._COORDINATION_TRANSITION_TARGETS,
+    ) == set()
 
 
 def test_execution_release_fault_occurs_only_after_runner_commits_started_marker(

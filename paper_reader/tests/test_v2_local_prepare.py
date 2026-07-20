@@ -108,6 +108,40 @@ def test_prepare_builds_one_immutable_complete_pdf_evidence_bundle(tmp_path: Pat
     assert resource_checks["run_size_bytes"]["actual"] == final_run_size
 
 
+def test_prepare_local_rejects_secondary_capture_dir_before_run_mutation(tmp_path: Path) -> None:
+    source = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, source)
+    initialized = _invoke(["run", "init-local", str(source)])
+    run_dir = Path(_result_payload(initialized)["data"]["run_dir"])
+    capture_dir = tmp_path / "captures"
+    capture_dir.mkdir()
+    before = {
+        path.relative_to(run_dir).as_posix(): path.read_bytes()
+        for path in run_dir.rglob("*")
+        if path.is_file()
+    }
+
+    result = _invoke(
+        [
+            "run",
+            "prepare",
+            str(run_dir),
+            "--secondary-capture-dir",
+            str(capture_dir),
+        ]
+    )
+
+    assert result.exit_code == 1
+    assert _result_payload(result)["code"] == "invalid_input"
+    after = {
+        path.relative_to(run_dir).as_posix(): path.read_bytes()
+        for path in run_dir.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert not (run_dir / "evidence").exists()
+
+
 def test_prepare_extracts_from_the_pdf_identity_verified_before_path_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -37,6 +37,14 @@ def _validate_absolute_path(value: str) -> str:
     return value
 
 
+def _validate_secondary_cross_check_text(value: str) -> str:
+    if value != value.strip() or "\x00" in value or "\n" in value or "\r" in value:
+        raise ValueError("secondary cross-check text must be a trimmed single line")
+    if "http://" in value.lower() or "https://" in value.lower():
+        raise ValueError("secondary cross-check text must not embed source URLs")
+    return value
+
+
 def _authorization_utc_instant(value: str) -> datetime:
     time_text = value[:-1]
     if "." in time_text:
@@ -66,6 +74,11 @@ ArtifactPath: TypeAlias = Annotated[str, AfterValidator(safe_relative_artifact_p
 AbsolutePath: TypeAlias = Annotated[str, AfterValidator(_validate_absolute_path)]
 NonNegativeInt: TypeAlias = Annotated[int, Field(ge=0)]
 PositiveInt: TypeAlias = Annotated[int, Field(gt=0)]
+SecondaryCrossCheckText: TypeAlias = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=2_000),
+    AfterValidator(_validate_secondary_cross_check_text),
+]
 
 
 class StrictContractModel(BaseModel):
@@ -198,6 +211,40 @@ class InferredLimitation(StrictContractModel):
     locator: str
 
 
+class SecondaryCrossCheckFinding(StrictContractModel):
+    relation: Literal["supports", "extends", "questions", "conflicts"]
+    target: Literal[
+        "core_result_short_annotation",
+        "main_risk_short_annotation",
+        "technical_details_item",
+        "inferred_limits_item",
+        "applicability_limits_item",
+    ]
+    text: SecondaryCrossCheckText
+    caveats: tuple[SecondaryCrossCheckText, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_caveats(self) -> Self:
+        if len(self.caveats) > 3:
+            raise ValueError("secondary cross-check finding accepts at most three caveats")
+        return self
+
+
+class SecondaryCrossCheck(StrictContractModel):
+    source_id: Identifier
+    status: Literal["used", "irrelevant", "unavailable"]
+    reason: SecondaryCrossCheckText
+    findings: tuple[SecondaryCrossCheckFinding, ...]
+
+    @model_validator(mode="after")
+    def validate_status_payload(self) -> Self:
+        if self.status == "used" and not 1 <= len(self.findings) <= 3:
+            raise ValueError("used secondary source requires one to three findings")
+        if self.status != "used" and self.findings:
+            raise ValueError("irrelevant or unavailable secondary source cannot contain findings")
+        return self
+
+
 class ReviewIssue(StrictContractModel):
     severity: Literal["low", "medium", "high", "blocker"]
     issue: str
@@ -267,6 +314,10 @@ class PaperReaderSummary(StrictContractModel):
     limitations: tuple[str, ...]
     follow_up_keywords: tuple[str, ...]
     evidence_summary: tuple[EvidenceClaim, ...]
+    secondary_cross_checks: tuple[SecondaryCrossCheck, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     tldr: str | None = None
     research_object: str | None = None
     research_question_short: str | None = None
@@ -451,6 +502,8 @@ V2_SUPPORT_MODELS = (
     EvidenceClaim,
     AuthorStatedLimitation,
     InferredLimitation,
+    SecondaryCrossCheckFinding,
+    SecondaryCrossCheck,
     ReviewIssue,
     ImprovementNote,
     McpWriteEnvelope,
@@ -477,6 +530,8 @@ __all__ = [
     "PaperReaderReviewPackage",
     "PaperReaderRun",
     "PaperReaderSummary",
+    "SecondaryCrossCheck",
+    "SecondaryCrossCheckFinding",
     "PaperReaderVerification",
     "PaperReaderWriteAuthorization",
     "PortableIdentifier",

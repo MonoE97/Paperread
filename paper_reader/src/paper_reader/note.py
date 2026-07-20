@@ -208,10 +208,15 @@ def clean_result_evidence_notes(value: Any) -> list[dict[str, str]]:
     return cleaned
 
 
-def clean_limitation_objects(value: Any, *, expected_source_type: str | None = None) -> list[dict[str, str]]:
+def clean_limitation_objects(
+    value: Any,
+    *,
+    expected_source_type: str | None = None,
+    limit: int = 8,
+) -> list[dict[str, str]]:
     items = safe_list(value)
     cleaned: list[dict[str, str]] = []
-    for item in items[:8]:
+    for item in items[:limit]:
         if isinstance(item, str):
             text = safe_text(item)
             if text not in {"unknown", "未知"}:
@@ -699,6 +704,9 @@ def render_note(
     paper_type = safe_choice(summary.get("paper_type"), VALID_PAPER_TYPES, "unknown")
     trust_status = safe_choice(summary.get("trust_status"), VALID_TRUST_STATUSES, "usable_with_caveats")
     reading_decision = safe_choice(summary.get("reading_decision"), VALID_READING_DECISIONS, "unknown")
+    projected_inferred_count = summary.get("_secondary_projected_inferred_count", 0)
+    if type(projected_inferred_count) is not int or not 0 <= projected_inferred_count <= 24:
+        projected_inferred_count = 0
     context = {
         "note_title": build_note_title(metadata, resolved_date, version_suffix=version_suffix),
         "generated_date": resolved_date,
@@ -769,6 +777,7 @@ def render_note(
         "inferred_limits": clean_limitation_objects(
             summary.get("inferred_limits", []),
             expected_source_type="inferred",
+            limit=8 + projected_inferred_count,
         ),
         "potential_gaps": clean_limitation_objects(summary.get("potential_gaps", [])),
         "transferable_insight": fallback_text(summary.get("transferable_insight"), summary.get("ai4s_relevance")),

@@ -138,7 +138,7 @@ def test_version_is_a_human_option_not_a_flat_command() -> None:
     result = _invoke(["--version"])
 
     assert result.exit_code == 0
-    assert result.stdout.strip() == "2.0.0"
+    assert result.stdout.strip() == "2.1.0"
     flat = _invoke(["version"])
     assert flat.exit_code != 0
 
@@ -654,13 +654,18 @@ def test_maintenance_extract_pdf_rejects_max_pages_above_v2_cap() -> None:
     assert payload["code"] == "invalid_command_usage"
 
 
-def test_zotero_workflow_routes_original_input_and_forbids_unbound_secondary_capture() -> None:
+def test_zotero_workflow_routes_original_input_and_binds_secondary_capture() -> None:
     reference = (
         Path(__file__).parents[1] / "references" / "zotero-workflow.md"
     ).read_text(encoding="utf-8")
 
     assert 'uv run paper_reader route "<original user input>"' in reference
     assert "secondary_contexts" not in reference
-    assert "immutable evidence ingestion" in reference
+    assert "source/secondary-plan.json" in reference
+    assert "run prepare <run_dir> --secondary-capture-dir <temporary_capture_dir>" in reference
     assert "evidence.json" in reference
-    assert "must not be written into the run" in reference
+    assert (
+        "Legacy positional `capture-secondary-url.mjs <url> --output <output.md>` remains "
+        "diagnostic-only"
+        in reference
+    )

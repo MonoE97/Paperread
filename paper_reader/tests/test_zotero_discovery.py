@@ -133,6 +133,91 @@ def test_build_discovery_bundle_enriches_identity_and_preserves_raw_provenance()
     }
 
 
+def test_build_discovery_bundle_enriches_extra_from_authoritative_parent_snapshot() -> None:
+    from paper_reader.zotero_discovery import build_discovery_bundle
+
+    parent_snapshot = _parent_snapshot()
+    parent_snapshot["data"]["extra"] = (
+        "https://mp.weixin.qq.com/s/first?scene=334\n"
+        "https://mp.weixin.qq.com/s/second?scene=24&clicktime=123"
+    )
+
+    bundle = build_discovery_bundle(
+        title="Exact Paper",
+        search_response=_search_response(),
+        selected_details_response=_details_response(),
+        fetch_parent=lambda item_key: parent_snapshot,
+    )
+
+    selected = bundle["selected_item"]
+    assert selected["extra"] == parent_snapshot["data"]["extra"]
+    assert selected["_paper_reader"]["enrichment"]["extra"] == {
+        "source": "zotero_parent_snapshot",
+        "item_key": "PARENT1",
+        "version": 27,
+    }
+
+
+def test_build_discovery_bundle_drops_selected_extra_when_parent_has_none() -> None:
+    from paper_reader.zotero_discovery import build_discovery_bundle
+
+    details_response = _details_response()
+    details_payload = json.loads(details_response["result"]["content"][0]["text"])
+    details_payload["extra"] = "https://example.test/unbound"
+    details_response["result"]["content"][0]["text"] = json.dumps(details_payload)
+
+    bundle = build_discovery_bundle(
+        title="Exact Paper",
+        search_response=_search_response(),
+        selected_details_response=details_response,
+        fetch_parent=lambda item_key: _parent_snapshot(),
+    )
+
+    assert "extra" not in bundle["selected_item"]
+    assert bundle["selected_item"]["_paper_reader"]["discovery"][
+        "raw_selected_details_response"
+    ] == details_response
+
+
+def test_build_discovery_bundle_rejects_selected_extra_that_differs_from_parent() -> None:
+    from paper_reader.zotero_discovery import DiscoveryError, build_discovery_bundle
+
+    parent_snapshot = _parent_snapshot()
+    parent_snapshot["data"]["extra"] = "https://example.test/parent"
+    details_response = _details_response()
+    details_payload = json.loads(details_response["result"]["content"][0]["text"])
+    details_payload["extra"] = "https://example.test/selected"
+    details_response["result"]["content"][0]["text"] = json.dumps(details_payload)
+
+    with pytest.raises(DiscoveryError) as exc_info:
+        build_discovery_bundle(
+            title="Exact Paper",
+            search_response=_search_response(),
+            selected_details_response=details_response,
+            fetch_parent=lambda item_key: parent_snapshot,
+        )
+
+    assert exc_info.value.code == "parent_extra_mismatch"
+
+
+@pytest.mark.parametrize("extra", [123, ["https://example.test/context"]])
+def test_build_discovery_bundle_rejects_non_string_parent_extra(extra: object) -> None:
+    from paper_reader.zotero_discovery import DiscoveryError, build_discovery_bundle
+
+    parent_snapshot = _parent_snapshot()
+    parent_snapshot["data"]["extra"] = extra
+
+    with pytest.raises(DiscoveryError) as exc_info:
+        build_discovery_bundle(
+            title="Exact Paper",
+            search_response=_search_response(),
+            selected_details_response=_details_response(),
+            fetch_parent=lambda item_key: parent_snapshot,
+        )
+
+    assert exc_info.value.code == "invalid_parent_snapshot"
+
+
 def test_build_discovery_bundle_rejects_parent_identity_mismatch() -> None:
     from paper_reader.zotero_discovery import DiscoveryError, build_discovery_bundle
 
@@ -150,6 +235,30 @@ def test_build_discovery_bundle_rejects_parent_identity_mismatch() -> None:
     assert exc_info.value.code == "parent_identity_mismatch"
 
 
+@pytest.mark.parametrize(
+    ("identity_field", "nested_value"),
+    [("key", "OTHER_ITEM"), ("version", 999)],
+)
+def test_build_discovery_bundle_rejects_split_parent_wrapper_identity(
+    identity_field: str,
+    nested_value: object,
+) -> None:
+    from paper_reader.zotero_discovery import DiscoveryError, build_discovery_bundle
+
+    parent_snapshot = _parent_snapshot()
+    parent_snapshot["data"][identity_field] = nested_value
+
+    with pytest.raises(DiscoveryError) as exc_info:
+        build_discovery_bundle(
+            title="Exact Paper",
+            search_response=_search_response(),
+            selected_details_response=_details_response(),
+            fetch_parent=lambda item_key: parent_snapshot,
+        )
+
+    assert exc_info.value.code == "invalid_parent_snapshot"
+
+
 def test_build_discovery_bundle_rejects_parent_snapshot_without_version() -> None:
     from paper_reader.zotero_discovery import DiscoveryError, build_discovery_bundle
 
@@ -163,6 +272,28 @@ def test_build_discovery_bundle_rejects_parent_snapshot_without_version() -> Non
             search_response=_search_response(),
             selected_details_response=_details_response(),
             fetch_parent=lambda item_key: parent_snapshot,
+        )
+
+    assert exc_info.value.code == "invalid_parent_snapshot"
+
+
+def test_normalize_parent_snapshot_rejects_missing_version() -> None:
+    from paper_reader.zotero_lifecycle import (
+        ZoteroLifecycleError,
+        normalize_parent_snapshot,
+    )
+
+    with pytest.raises(ZoteroLifecycleError) as exc_info:
+        normalize_parent_snapshot(
+            {
+                "key": "PARENT1",
+                "data": {
+                    "key": "PARENT1",
+                    "itemType": "journalArticle",
+                    "title": "Exact Paper",
+                    "DOI": "10.1000/example",
+                },
+            }
         )
 
     assert exc_info.value.code == "invalid_parent_snapshot"

@@ -44,6 +44,7 @@ def _bundle(
     selected_title: str = "A <i>Useful</i> Paper &amp; Result",
     search_results: list[dict[str, object]] | None = None,
     raw_selected: bool = False,
+    include_parent_snapshot: bool = True,
 ) -> dict[str, object]:
     item = {
         "key": selected_key,
@@ -70,6 +71,24 @@ def _bundle(
         "notes": [],
         "tags": [{"tag": "materials"}],
     }
+    if include_parent_snapshot:
+        item["_paper_reader"] = {
+            "discovery": {
+                "raw_parent_snapshots": {
+                    selected_key: {
+                        "key": selected_key,
+                        "version": 17,
+                        "data": {
+                            "key": selected_key,
+                            "version": 17,
+                            "itemType": "journalArticle",
+                            "title": selected_title,
+                            "DOI": "10.1000/Example.DOI",
+                        },
+                    }
+                }
+            }
+        }
     selected: object = item
     if raw_selected:
         selected = {
@@ -167,7 +186,211 @@ def test_init_zotero_preserves_raw_bytes_and_binds_normalized_source_and_pdf(
     assert run["artifacts"] == [
         source["raw_discovery_bundle"],
         source["normalized_source"],
+        next(item for item in run["artifacts"] if item["role"] == "secondary_source_plan"),
     ]
+
+
+def test_init_zotero_rejects_missing_authoritative_parent_snapshot_before_allocating_run(
+    tmp_path: Path,
+) -> None:
+    pdf_path = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, pdf_path)
+    bundle_path = tmp_path / "discovery.json"
+    bundle_path.write_text(
+        json.dumps(_bundle(pdf_path, include_parent_snapshot=False)),
+        encoding="utf-8",
+    )
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+
+    with pytest.raises(ZoteroLifecycleError) as exc_info:
+        _initialize(bundle_path, "PARENT1", skill_root)
+
+    assert exc_info.value.code == "invalid_discovery_bundle"
+    assert "authoritative parent snapshot" in str(exc_info.value)
+    assert not (skill_root / "runs").exists()
+
+
+@pytest.mark.parametrize(
+    ("identity_field", "nested_value"),
+    [("key", "OTHER_ITEM"), ("version", 999)],
+)
+def test_init_zotero_rejects_split_parent_wrapper_identity_before_allocating_run(
+    tmp_path: Path,
+    identity_field: str,
+    nested_value: object,
+) -> None:
+    pdf_path = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, pdf_path)
+    payload = _bundle(pdf_path)
+    selected = payload["selected_item"]
+    assert isinstance(selected, dict)
+    snapshots = selected["_paper_reader"]["discovery"]["raw_parent_snapshots"]
+    snapshots["PARENT1"]["data"][identity_field] = nested_value
+    bundle_path = tmp_path / "discovery.json"
+    bundle_path.write_text(json.dumps(payload), encoding="utf-8")
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+
+    with pytest.raises(ZoteroLifecycleError) as exc_info:
+        _initialize(bundle_path, "PARENT1", skill_root)
+
+    assert exc_info.value.code == "invalid_parent_snapshot"
+    assert not (skill_root / "runs").exists()
+
+
+def test_init_zotero_builds_bound_secondary_plan_from_authoritative_parent_extra(
+    tmp_path: Path,
+) -> None:
+    pdf_path = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, pdf_path)
+    payload = _bundle(pdf_path)
+    selected = payload["selected_item"]
+    assert isinstance(selected, dict)
+    selected["_paper_reader"] = {
+        "discovery": {
+            "raw_parent_snapshots": {
+                "PARENT1": {
+                    "key": "PARENT1",
+                    "version": 17,
+                    "data": {
+                        "key": "PARENT1",
+                        "version": 17,
+                        "itemType": "journalArticle",
+                        "title": "A <i>Useful</i> Paper &amp; Result",
+                        "DOI": "10.1000/Example.DOI",
+                        "extra": (
+                            "https://mp.weixin.qq.com/s/first?scene=334\n"
+                            "https://mp.weixin.qq.com/s/second?scene=24&clicktime=123\n"
+                            "https://doi.org/10.1000/Example.DOI\n"
+                            "https://example.test/paper\n"
+                            "http://127.0.0.1/private\n"
+                            "https://mp.weixin.qq.com/s/first?scene=334"
+                        ),
+                    },
+                }
+            }
+        }
+    }
+    bundle_path = tmp_path / "discovery.json"
+    bundle_path.write_text(json.dumps(payload), encoding="utf-8")
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+
+    initialized = _initialize(bundle_path, "PARENT1", skill_root)
+
+    run = json.loads((initialized.run_dir / "run.json").read_text(encoding="utf-8"))
+    normalized = json.loads(
+        (initialized.run_dir / "source" / "source.json").read_text(encoding="utf-8")
+    )
+    plan_path = initialized.run_dir / "source" / "secondary-plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan_ref = next(item for item in run["artifacts"] if item["role"] == "secondary_source_plan")
+
+    assert normalized["selected_item"]["extra"] == selected["_paper_reader"]["discovery"][
+        "raw_parent_snapshots"
+    ]["PARENT1"]["data"]["extra"]
+    assert plan["format"] == "paper_reader.secondary-plan.v2-internal"
+    assert plan["item_key"] == "PARENT1"
+    assert plan["source_snapshot_sha256"] == run["source"]["normalized_source"]["sha256"]
+    assert plan["eligible_source_count"] == 2
+    assert [(item["url"], item["eligibility"], item["rejection_reason"]) for item in plan["sources"]] == [
+        ("https://mp.weixin.qq.com/s/first?scene=334", "eligible", None),
+        ("https://mp.weixin.qq.com/s/second?scene=24&clicktime=123", "eligible", None),
+        ("https://doi.org/10.1000/Example.DOI", "rejected", "primary_source"),
+        ("https://example.test/paper", "rejected", "primary_source"),
+        ("http://127.0.0.1/private", "rejected", "unsafe_url"),
+    ]
+    assert plan_ref == {
+        "role": "secondary_source_plan",
+        "path": "source/secondary-plan.json",
+        "sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+        "size_bytes": plan_path.stat().st_size,
+        "media_type": "application/json",
+    }
+
+
+def test_init_zotero_rejects_parent_extra_mismatch_before_allocating_run(
+    tmp_path: Path,
+) -> None:
+    pdf_path = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, pdf_path)
+    payload = _bundle(pdf_path)
+    selected = payload["selected_item"]
+    assert isinstance(selected, dict)
+    selected["extra"] = "https://example.test/selected"
+    selected["_paper_reader"] = {
+        "discovery": {
+            "raw_parent_snapshots": {
+                "PARENT1": {
+                    "key": "PARENT1",
+                    "version": 17,
+                    "data": {
+                        "key": "PARENT1",
+                        "version": 17,
+                        "itemType": "journalArticle",
+                        "title": "A <i>Useful</i> Paper &amp; Result",
+                        "DOI": "10.1000/Example.DOI",
+                        "extra": "https://example.test/parent",
+                    },
+                }
+            }
+        }
+    }
+    bundle_path = tmp_path / "discovery.json"
+    bundle_path.write_text(json.dumps(payload), encoding="utf-8")
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+
+    with pytest.raises(ZoteroLifecycleError) as exc_info:
+        _initialize(bundle_path, "PARENT1", skill_root)
+
+    assert exc_info.value.code == "parent_extra_mismatch"
+    assert not (skill_root / "runs").exists()
+
+
+def test_init_zotero_does_not_plan_selected_extra_without_authoritative_parent_extra(
+    tmp_path: Path,
+) -> None:
+    pdf_path = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, pdf_path)
+    payload = _bundle(pdf_path)
+    selected = payload["selected_item"]
+    assert isinstance(selected, dict)
+    selected["extra"] = "https://example.test/unbound"
+    selected["_paper_reader"] = {
+        "discovery": {
+            "raw_parent_snapshots": {
+                "PARENT1": {
+                    "key": "PARENT1",
+                    "version": 17,
+                    "data": {
+                        "key": "PARENT1",
+                        "version": 17,
+                        "itemType": "journalArticle",
+                        "title": "A <i>Useful</i> Paper &amp; Result",
+                        "DOI": "10.1000/Example.DOI",
+                    },
+                }
+            }
+        }
+    }
+    bundle_path = tmp_path / "discovery.json"
+    bundle_path.write_text(json.dumps(payload), encoding="utf-8")
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+
+    initialized = _initialize(bundle_path, "PARENT1", skill_root)
+
+    normalized = json.loads(
+        (initialized.run_dir / "source" / "source.json").read_text(encoding="utf-8")
+    )
+    plan = json.loads(
+        (initialized.run_dir / "source" / "secondary-plan.json").read_text(encoding="utf-8")
+    )
+    assert "extra" not in normalized["selected_item"]
+    assert plan["eligible_source_count"] == 0
+    assert plan["sources"] == []
 
 
 def test_init_zotero_rejects_missing_parent_versions_before_allocating_run(
@@ -603,6 +826,14 @@ def test_init_zotero_cli_uses_installed_skill_root_not_current_directory(
     assert payload["code"] == "initialized"
     run_dir = Path(payload["data"]["run_dir"])
     assert run_dir.is_relative_to(skill_root / "runs")
+    plan_path = run_dir / "source" / "secondary-plan.json"
+    assert payload["data"]["secondary_plan_path"] == str(plan_path)
+    assert payload["data"]["secondary_plan_sha256"] == hashlib.sha256(
+        plan_path.read_bytes()
+    ).hexdigest()
+    assert payload["data"]["eligible_source_count"] == 0
+    assert "secondary_source_count" not in payload["data"]
+    assert "https://" not in result.stdout
     assert not (unrelated_cwd / "runs").exists()
 
 

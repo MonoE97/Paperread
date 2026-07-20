@@ -4,9 +4,9 @@
 
 本项目维护一个自包含的 paper_reader skill repo。可安装运行产物是两个 skill source：从 committed revision 只导出 `paper_reader/` 的 tracked files，验证 release bundle 后安装到 Codex 或 Claude 的 skills 目录并命名为 `paper_reader`，用户应能在安装后的 skill root 内运行 `uv sync --locked`、`uv run paper_reader ...`，使用 Zotero 标题工作流和本地 PDF path 工作流；`paper_reader_batch/` 同样只从 committed revision 导出 tracked files、验证并命名为 `paper_reader_batch` 后，用户应能运行 `uv run paper_reader_batch ...`，把多篇论文派发给 `$paper_reader`，对 Zotero-backed items 默认走 verified `zotero_write`，并生成 batch report。仓库根目录只承担维护文档、发布说明和规划记录职责，不是运行时 Python project。
 
-## Paper Reader 2.0 约束（released runtime contract）
+## Paper Reader 2.1 约束（released runtime contract）
 
-本文件定义 Paper Reader 2.0 的 released runtime contract。两个独立 package 的版本均为 `2.0.0`；public README、`SKILL.md`、UI metadata、JSON Schema、grouped CLI 与 lockfile 必须同步反映同一个已发布合同。
+本文件定义 Paper Reader 2.1 的 released runtime contract。两个独立 package 的版本均为 `2.1.0`；public README、`SKILL.md`、UI metadata、JSON Schema、grouped CLI 与 lockfile 必须同步反映同一个已发布合同。Schema identifier 继续使用 `.v2`，不引入 V1 fallback、schema guessing 或自动迁移。
 
 ### Breaking 规则
 
@@ -93,9 +93,12 @@ Do not add `README.md`, `INSTALLATION_GUIDE.md`, `QUICK_REFERENCE.md`, or `CHANG
 - Local PDF path and directory path inputs always route before Zotero text。已存在 `.pdf` -> `local_pdf`；已存在目录 -> `local_pdf_directory` 并交给 `$paper_reader_batch`；看起来像 path 但不存在 -> `unsupported_local_path`；只有其他非 path 文本才可成为 `zotero_title`。Existing local paths are not Zotero title fragments。
 - Local PDF output is local-only：不搜索 Zotero、不做同名/同 DOI duplicate check、不创建 Zotero candidate/authorization、不进入 batch write lane。首次目标仍是 `<pdf_stem>_analysis/` 与 `<pdf_stem>_note.md`，重复运行只可分配 `_v2`、`_v3` 等新路径，禁止覆盖。
 - Zotero title workflow 的 V2 run 默认位于安装后 skill root 的 `runs/YYYY-MM-DD/<title-slug>/`；batch run 默认位于 batch skill root 的 `runs/YYYY-MM-DD/<batch-slug>/`。两个 skill root 相互独立，batch 只能索引 `$paper_reader` 的 immutable artifacts，不能复制单篇 schema、模板、证据规则或 gate。
-- V2 evidence 由 immutable `evidence/<evidence_id>/` 拥有；`context.md`、`section_context.md` 与 `figure_context.md` 必须通过 `evidence.json` membership 和 hash 解析。`section_context.md` 只用于导航，不是 canonical evidence source。任何未来可用的 secondary capture 同样必须先进入该 immutable membership；当前 grouped runtime 尚无 immutable secondary-capture ingestion。
+- V2 evidence 由 immutable `evidence/<evidence_id>/` 拥有；`context.md`、`section_context.md` 与 `figure_context.md` 必须通过 `evidence.json` membership 和 hash 解析。`section_context.md` 只用于导航，不是 canonical evidence source。Zotero `Extra` 中 eligible 的 secondary capture 只能通过 `run prepare --secondary-capture-dir` 进入同一个新的 immutable evidence membership；已发布 evidence 不得补写。
 - 最终 `evidence_summary` locator 必须使用 canonical 格式：`context.md page <N>`、`context.md page <N> section <Section Name>`、`context.md page <N> section <Section Name> table_candidate <N>` 或 `figure_context.md <figure_id>`。裸 `context.md` / `figure_context.md`、散文式 locator、`section_context.md` 和 secondary context 路径都必须阻断 review sealing / candidate build。
-- `scripts/capture-secondary-url.mjs` 当前只产生未绑定诊断材料，不得参与 review 或 candidate 构建；微信公众号、新闻稿、博客等网页只有在未来经过 immutable evidence ingestion 后才可用于 cross-check。`evidence_summary` 始终只能引用 canonical PDF / figure evidence。
+- `run init-zotero` 必须从选中 parent 的权威 raw snapshot 读取字符串 `data.extra`，在 run 分配前拒绝 selected details / parent snapshot 冲突和非字符串值，并生成绑定 item key、snapshot digest、稳定 source id 与 exact URL 的 immutable `source/secondary-plan.json`。显式 `<URL>` 定界符内逐字保留；裸 URL 大小写不敏感地识别 HTTP(S)，并去除不匹配的自然语言包装符与句末标点。URL 按出现顺序去重，保留 query，排除论文 DOI / publisher URL，非公网 HTTP(S) 只记录拒绝原因。
+- `scripts/capture-secondary-url.mjs --plan ... --source-id ... --output ...` 是唯一可进入 evidence 的 strict capture 模式；它使用 direct raw CDP，且 strict mode does not use the legacy 3456 relay。导航前必须创建 isolated empty BrowserContext，安装 `Fetch.requestPaused` / `Network.requestWillBeSent` 拦截与 WebRTC/WebTransport/WebSocket/EventSource/worker pre-document deny，禁用 cache、绕过 service worker，并应用 `Browser.setDownloadBehavior(deny)`。所有 passive binary image/media/font/prefetch 请求必须在 Fetch 阶段阻断；其余请求只允许无 body 的 `GET|HEAD|OPTIONS`。unsafe method/body 只有在 `Fetch.failRequest` 成功确认后才算阻断，取消失败必须 fatal。CDP 对 decoded/encoded response 都实施单 response 8 MiB、总计 32 MiB 上限，cleartext proxy 另有单 response 8 MiB 上限。所有允许的 HTTP(S) hop 必须先解析为公网地址，再由 in-process loopback HTTP/CONNECT proxy 连接 pinned public IP；request event、guarded target session、blocked CONNECT 与 fatal proxy diagnostic 必须有硬上限，所有退出路径必须先 seal proxy。捕获 target 外的 Chrome background CONNECT 只能在没有 upstream dial 的情况下阻断并审计，owned target 观察到的未授权 authority 必须 fatal。每份 capture 必须精确绑定 `run_id`、`item_key`、`source_snapshot_sha256`、`secondary_plan_sha256`、source id 与 requested URL。严格模式的 stdout 即使 argument/setup error 也必须恰好一个 machine JSON，诊断写 stderr。Private/reserved answer、unsafe method/body、unguarded/over-limit request、authentication、popup、unsupported transport、direct-socket event、download 或 proxy violation 都使该 source `unavailable`。它不登录、不点击、不提交，并把页面文字当作不可信数据。系统 DNS 默认失败关闭；可信 TUN/fake-IP 环境只可显式使用 `--public-dns-over-https` 通过 Cloudflare 同时核验 A/AAAA，禁止整体放行合成地址段。拒绝 identity/URL/source/hash 错配、symlink、hardlink、TOCTOU 替换和额外文件；`unavailable` 只降级 secondary evidence，不阻断 PDF 主流程。Legacy positional mode 仍只是诊断材料，不得进入 review 或 candidate。
+- `paper_reader.summary.v2.secondary_cross_checks` 仅用于结构化外部交叉核对；每个 eligible source 必须恰好有一个 `used|irrelevant|unavailable` assessment。Resolver 只把经验证 finding 投影到现有允许字段，不修改 Summary 或 `zotero_note.md.j2`；`30 秒结论`、一句话总结、论文背景/方法/贡献、作者明示局限与全部 canonical locator 始终 PDF-only。`evidence_summary` 始终只能引用 canonical PDF / figure evidence。
+- 无 eligible `Extra` 链接时不抓网页、不生成交叉核对文字；Local PDF 和 local batch 在任何 evidence 分配前拒绝 secondary capture 路径。Batch 不抓取、解析或总结网页，只在 Zotero worker prompt 中委托 `$paper_reader` 执行该流程。
 
 ## 阅读笔记语言规则
 
@@ -119,7 +122,7 @@ Do not add `README.md`, `INSTALLATION_GUIDE.md`, `QUICK_REFERENCE.md`, or `CHANG
 
 - Use `paper_reader`: 单篇论文阅读。先执行 path-first route，再通过 V2 grouped CLI 完成 run、review、candidate 与 local/Zotero 生命周期。单篇 skill 独占 extraction、summary/review schema、render、candidate、authorization、verification 和 reconciliation 规则。
 - Use `paper_reader_batch`: 多篇论文调度。Batch skill 独占 manifest、journal、lease、claim/recover/report 与 serial write lane；每篇深度阅读仍派发给 `$paper_reader`。PDF folder/path items 保持 local-output only 且不做 Zotero lookup / duplicate check。
-- 本文列出的 grouped CLI 是 2.0 public runtime。`--help`、`--version` 与 schema export 必须持续匹配它；不得重新引入 V1 flat module、命令注册或兼容入口。
+- 本文列出的 grouped CLI 是 2.1 public runtime。`--help`、`--version` 与 schema export 必须持续匹配它；不得重新引入 V1 flat module、命令注册或兼容入口。
 
 ## Git 与发布
 
@@ -131,7 +134,7 @@ Do not add `README.md`, `INSTALLATION_GUIDE.md`, `QUICK_REFERENCE.md`, or `CHANG
 - Historical run/output artifacts 永远视为用户数据；本次 V1 runtime 删除未触碰、移动、迁移或重新索引任何历史产物。
 - `.DS_Store`、虚拟环境、缓存、本地预览文件、PDF 分析目录、生成笔记和本地 `docs/` scratch 必须被 `.gitignore` 忽略。
 - `docs/` 不是发布内容；不要重新引入 tracked `docs/` 规划文档或根文档 validator，除非用户明确要求恢复公开文档树。
-- 2.0 安装文档采用 clean install：只从 committed revision 导出两个独立 skill source 的 tracked files，在 `uv sync` 前以 `--release-bundle` 验证 staging tree，再移动到全新目标目录；禁止递归复制含 `.venv`、cache 或 `runs/` 的 working source，也禁止覆盖旧安装。旧安装目录可只读保留，但不得被 V2 自动发现、迁移或索引。
+- 2.1 安装文档采用 clean install：只从 committed revision 导出两个独立 skill source 的 tracked files，在 `uv sync` 前以 `--release-bundle` 验证 staging tree，再移动到全新目标目录；禁止递归复制含 `.venv`、cache 或 `runs/` 的 working source，也禁止覆盖旧安装。旧安装目录可只读保留，但不得被 V2 自动发现、迁移或索引。
 
 ## Zotero 边界
 

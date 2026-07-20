@@ -1,10 +1,12 @@
-# Batch Workflow — Paper Reader Batch 2.0 Runtime Contract
+# Batch Workflow — Paper Reader Batch 2.1 Runtime Contract
 
-Use this workflow when the user asks to analyze multiple papers. It is the released grouped-CLI runtime contract for Paper Reader Batch 2.0.
+Use this workflow when the user asks to analyze multiple papers. It is the released grouped-CLI runtime contract for Paper Reader Batch 2.1.
 
 paper_reader_batch is a scheduler and reporter. It must dispatch each paper to
 `$paper_reader` for single-paper analysis. It must not copy single-paper prompts,
 summary schema, note templates, evidence locator rules, or Zotero write gates.
+
+For Zotero-backed assignments, the deterministic worker prompt delegates Zotero `Extra` link planning, read-only capture, immutable ingestion, and `secondary_cross_checks` assessment to `$paper_reader`. Batch never fetches or interprets a page and never copies the single-paper cross-check schema. PDF assignments do not enable this capability.
 
 Every active artifact is strict V2 with `extra=forbid`. V1/unversioned/unknown artifacts are historical-only and must fail read-only before lock or mutation with `unsupported_run_schema`; aliases, migration, schema guessing and hidden fallback are forbidden.
 

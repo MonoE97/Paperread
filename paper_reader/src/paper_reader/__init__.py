@@ -1,3 +1,3 @@
 """Utilities for paper reading workflows with Zotero titles and local PDF paths."""
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"

@@ -249,7 +249,7 @@ class McpHttpClient:
                 "params": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "paper-reader-discovery", "version": "2.0"},
+                    "clientInfo": {"name": "paper-reader-discovery", "version": "2.1"},
                 },
             }
         )
@@ -610,6 +610,21 @@ def _validate_optional_identity(
         raise DiscoveryError("parent_identity_mismatch", f"{context} itemType differs from parent")
 
 
+def _optional_extra(
+    payload: dict[str, Any],
+    *,
+    context: str,
+    error_code: str,
+) -> tuple[bool, str]:
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    if "extra" not in data:
+        return False, ""
+    extra = data["extra"]
+    if not isinstance(extra, str):
+        raise DiscoveryError(error_code, f"{context} Extra must be a string when present")
+    return True, extra
+
+
 def build_discovery_bundle(
     *,
     title: str,
@@ -723,6 +738,24 @@ def _build_discovery_bundle(
         item_type=selected_item_type,
         context="selected details",
     )
+    parent_has_extra, parent_extra = _optional_extra(
+        selected_parent_snapshot,
+        context="read-only parent snapshot",
+        error_code="invalid_parent_snapshot",
+    )
+    selected_has_extra, selected_extra = _optional_extra(
+        selected,
+        context="selected details",
+        error_code="invalid_mcp_response",
+    )
+    if parent_has_extra and selected_has_extra and selected_extra != parent_extra:
+        raise DiscoveryError(
+            "parent_extra_mismatch",
+            "selected details Extra differs from the read-only parent snapshot",
+        )
+    # Extra is authoritative only in the parent snapshot. Keep an unbound
+    # selected-details value solely inside the raw discovery provenance.
+    selected.pop("extra", None)
 
     paper_reader_meta = (
         dict(selected.get("_paper_reader", {}))
@@ -747,6 +780,17 @@ def _build_discovery_bundle(
             raw_title_resolution_search_responses
         )
     paper_reader_meta["discovery"] = discovery_provenance
+    if parent_has_extra:
+        selected["extra"] = parent_extra
+        enrichment = paper_reader_meta.get("enrichment")
+        if not isinstance(enrichment, dict):
+            enrichment = {}
+        enrichment["extra"] = {
+            "source": "zotero_parent_snapshot",
+            "item_key": selected_key,
+            "version": selected_parent["version"],
+        }
+        paper_reader_meta["enrichment"] = enrichment
     enriched_selected = {
         **selected,
         "version": selected_parent["version"],

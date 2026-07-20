@@ -33,6 +33,7 @@ LOCATOR_FRAGMENT_RE = re.compile(
     r"\b(?:context\.md page \d+|figure_context\.md [A-Za-z0-9_.:-]+|context\.md|figure_context\.md)\b"
     r"(?: table_candidate \d+)?",
 )
+MARKDOWN_LINK_DESTINATION_RE = re.compile(r"\]\((?:\\.|[^)])*\)")
 CHEMICAL_SYMBOL_RE = re.compile(r"^[A-Z][a-z]?$")
 CHEMICAL_SYMBOL_SEQUENCE_RE = re.compile(r"^(?:[A-Z][a-z]?)(?:[-/][A-Z][a-z]?)+$")
 ENGLISH_FUNCTION_WORDS = {
@@ -107,8 +108,30 @@ RENDERED_TEXT_LIST_FIELDS = ("contributions", "technical_details", "limitations"
 RENDERED_METHOD_MODULE_FIELDS = ("name", "input", "target", "output", "role")
 RENDERED_FIGURE_FIELDS = ("analysis", "why_it_matters", "why_it_matters_short")
 
-def _strip_allowed_mixed_english_phrases(value: str) -> str:
-    text = LOCATOR_FRAGMENT_RE.sub(" ", value)
+
+def _strip_trusted_source_links(
+    value: str,
+    *,
+    trusted_source_links: tuple[str, ...] = (),
+) -> str:
+    text = value
+    for link in trusted_source_links:
+        if link:
+            text = text.replace(link, "来源")
+    return text
+
+
+def _strip_allowed_mixed_english_phrases(
+    value: str,
+    *,
+    trusted_source_links: tuple[str, ...] = (),
+) -> str:
+    text = _strip_trusted_source_links(
+        value,
+        trusted_source_links=trusted_source_links,
+    )
+    text = MARKDOWN_LINK_DESTINATION_RE.sub("]", text)
+    text = LOCATOR_FRAGMENT_RE.sub(" ", text)
     text = CONTEXT_SECTION_FRAGMENT_RE.sub(" ", text)
     for phrase in ALLOWED_MIXED_ENGLISH_PHRASES:
         text = re.sub(re.escape(phrase), " ", text, flags=re.IGNORECASE)
@@ -136,8 +159,15 @@ def _is_technical_token(token: str) -> bool:
     return bool(CHEMICAL_SYMBOL_SEQUENCE_RE.fullmatch(token))
 
 
-def _english_prose_tokens(value: str) -> list[str]:
-    text = _strip_allowed_mixed_english_phrases(value)
+def _english_prose_tokens(
+    value: str,
+    *,
+    trusted_source_links: tuple[str, ...] = (),
+) -> list[str]:
+    text = _strip_allowed_mixed_english_phrases(
+        value,
+        trusted_source_links=trusted_source_links,
+    )
     tokens: list[str] = []
     for token in ENGLISH_TOKEN_RE.findall(text):
         if _is_technical_token(token):
@@ -153,29 +183,61 @@ def _english_prose_token_count(value: str) -> int:
     return len(_english_prose_tokens(value))
 
 
-def _span_looks_like_english_prose(value: str) -> bool:
-    prose_tokens = _english_prose_tokens(value)
+def _span_looks_like_english_prose(
+    value: str,
+    *,
+    trusted_source_links: tuple[str, ...] = (),
+) -> bool:
+    prose_tokens = _english_prose_tokens(
+        value,
+        trusted_source_links=trusted_source_links,
+    )
     if len(prose_tokens) >= 3:
         return True
     if len(prose_tokens) == 1 and _contains_allowed_mixed_english_phrase(value):
         return True
     if len(prose_tokens) < 2:
         return False
-    latin_letter_count = len(LATIN_LETTER_RE.findall(_strip_allowed_mixed_english_phrases(value)))
+    latin_letter_count = len(
+        LATIN_LETTER_RE.findall(
+            _strip_allowed_mixed_english_phrases(
+                value,
+                trusted_source_links=trusted_source_links,
+            )
+        )
+    )
     return latin_letter_count >= 10
 
 
-def _looks_like_english_prose(value: Any) -> bool:
+def _looks_like_english_prose(
+    value: Any,
+    *,
+    trusted_source_links: tuple[str, ...] = (),
+) -> bool:
     if not isinstance(value, str):
         return False
     text = value.strip()
     if not text:
         return False
     if not CJK_RE.search(text):
-        return _span_looks_like_english_prose(text)
-    if any(_span_looks_like_english_prose(span) for span in LATIN_SPAN_RE.findall(text)):
+        return _span_looks_like_english_prose(
+            text,
+            trusted_source_links=trusted_source_links,
+        )
+    if any(
+        _span_looks_like_english_prose(
+            span,
+            trusted_source_links=trusted_source_links,
+        )
+        for span in LATIN_SPAN_RE.findall(text)
+    ):
         return True
-    return _contains_allowed_mixed_english_phrase(text) and len(_english_prose_tokens(text)) == 1
+    return _contains_allowed_mixed_english_phrase(text) and len(
+        _english_prose_tokens(
+            text,
+            trusted_source_links=trusted_source_links,
+        )
+    ) == 1
 
 
 def _preview(value: str, *, limit: int = 80) -> str:
@@ -316,11 +378,22 @@ def lint_summary(summary: dict[str, Any]) -> list[dict[str, str]]:
     return issues
 
 
-def lint_rendered_markdown(note: str) -> list[dict[str, str]]:
+def lint_rendered_markdown(
+    note: str,
+    *,
+    trusted_source_links: tuple[str, ...] = (),
+) -> list[dict[str, str]]:
     """Lint prose that actually survives renderer fallbacks into Markdown."""
     issues: list[dict[str, str]] = []
     for line_number, raw_line in enumerate(note.splitlines(), start=1):
-        line = raw_line.strip()
+        # Replace only resolver-issued, exact source links before Markdown table
+        # tokenization. A trusted title may itself contain an escaped ``\|``;
+        # splitting first would fragment the provenance token and turn metadata
+        # into an apparent prose violation.
+        line = _strip_trusted_source_links(
+            raw_line.strip(),
+            trusted_source_links=trusted_source_links,
+        )
         if not line or line.startswith("#") or line == "---" or line.startswith("Tags:"):
             continue
         values: list[str]

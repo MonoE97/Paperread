@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
+
+from paper_reader.storage import canonical_json_bytes
 
 
 SCHEMA_VERSIONS = {
@@ -144,3 +147,51 @@ def test_checked_in_json_schemas_match_pydantic_exports() -> None:
         assert json.loads(schema_path.read_text(encoding="utf-8")) == model.model_json_schema(
             mode="validation"
         )
+
+
+def test_empty_secondary_cross_checks_preserve_existing_v2_summary_canonical_hash() -> None:
+    contracts = _contracts_module()
+    payload = {
+        "schema_version": "paper_reader.summary.v2",
+        "summary_id": "summary_hash_fixture",
+        "run_id": "run_hash_fixture",
+        "created_at": "2026-07-15T00:00:00Z",
+        "evidence_digest": "0" * 64,
+        "paper_type": "method_paper",
+        "trust_status": "usable_with_caveats",
+        "review_status": "passed",
+        "improvement_status": "not_needed",
+        "trust_rationale": "可信度说明。",
+        "one_sentence_summary": "一句话总结。",
+        "abstract_translation": "摘要翻译。",
+        "research_question": "研究问题？",
+        "method": "研究方法。",
+        "experiments": "实验设计。",
+        "ai4s_relevance": "相关性。",
+        "key_points": ["要点。"],
+        "contributions": ["贡献。"],
+        "limitations": ["局限。"],
+        "follow_up_keywords": ["keyword"],
+        "evidence_summary": [
+            {
+                "claim": "结论。",
+                "evidence": [
+                    {
+                        "type": "text",
+                        "locator": "context.md page 1",
+                        "summary": "证据。",
+                    }
+                ],
+                "confidence": "medium",
+            }
+        ],
+    }
+    summary = contracts.PaperReaderSummary.model_validate_json(
+        json.dumps(payload, ensure_ascii=False)
+    )
+
+    dumped = summary.model_dump(mode="json")
+    assert "secondary_cross_checks" not in dumped
+    assert hashlib.sha256(canonical_json_bytes(summary)).hexdigest() == (
+        "947cc20ce7466e7befe4172346b8eed1dd4b33c97a88351615586810a057ad24"
+    )

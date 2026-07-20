@@ -855,6 +855,47 @@ def test_worker_claim_event_limits_pdf_assignments_but_fills_with_non_pdf_items(
     assert sum(assignment["source"]["source_type"] == "pdf_path" for assignment in assignments) == 1
 
 
+def test_worker_prompt_delegates_secondary_cross_checks_only_for_zotero_items(
+    tmp_path: Path,
+) -> None:
+    run_dir = _mixed_run(tmp_path)
+    assignments = claim_worker(
+        run_dir,
+        worker_id="worker",
+        request_id=REQUEST_CLAIM,
+        limit=3,
+        now="2026-07-10T00:00:01Z",
+    ).result["assignments"]
+    by_item = {assignment["item_id"]: assignment for assignment in assignments}
+
+    pdf = by_item["001"]
+    pdf_prompt = worker_prompt(
+        run_dir,
+        pdf["item_id"],
+        worker_id=pdf["worker_id"],
+        claim_id=pdf["claim_id"],
+        lease_token=pdf["lease_token"],
+        attempt_id=pdf["attempt_id"],
+        now="2026-07-10T00:00:02Z",
+    )
+    zotero = by_item["003"]
+    zotero_prompt = worker_prompt(
+        run_dir,
+        zotero["item_id"],
+        worker_id=zotero["worker_id"],
+        claim_id=zotero["claim_id"],
+        lease_token=zotero["lease_token"],
+        attempt_id=zotero["attempt_id"],
+        now="2026-07-10T00:00:02Z",
+    )
+
+    assert "secondary-capture-dir" not in pdf_prompt["instruction"]
+    assert "Zotero Extra" in zotero_prompt["instruction"]
+    assert "--secondary-capture-dir" in zotero_prompt["instruction"]
+    assert "secondary_cross_checks" in zotero_prompt["instruction"]
+    assert "evidence_summary" in zotero_prompt["instruction"]
+
+
 def test_same_request_cross_process_claim_replays_exact_token_and_one_event(tmp_path: Path) -> None:
     run_dir = _run(tmp_path)
     context = multiprocessing.get_context("spawn")

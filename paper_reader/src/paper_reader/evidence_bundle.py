@@ -27,6 +27,7 @@ from paper_reader.evidence_figures import (
 from paper_reader.evidence_manifest import (
     EvidenceManifest,
     EvidenceManifestError,
+    EvidenceResourceCheck,
     build_evidence_manifest,
     validate_evidence_manifest_membership,
 )
@@ -56,7 +57,16 @@ from paper_reader.storage import (
     validate_directory_anchor,
 )
 from paper_reader.secondary_sources import build_secondary_sources
-from paper_reader.v2_loader import LoadedRun
+from paper_reader.secondary_evidence import (
+    BoundSecondaryInputs,
+    BoundSecondaryPlan,
+    CAPTURE_TOTAL_TEXT_MAX_CHARS,
+    SecondaryEvidenceError,
+    build_secondary_evidence_files,
+    load_bound_secondary_plan,
+    load_secondary_inputs,
+)
+from paper_reader.v2_loader import LoadedRun, load_v2_run
 from paper_reader.workflow import (
     build_context_markdown,
     build_metadata,
@@ -84,6 +94,7 @@ class _PreparedSource:
     pdf: LocalSourceIdentity
     metadata: dict
     secondary_sources: dict
+    secondary_plan: BoundSecondaryPlan | None
     allow_network_figure_source: bool
 
 
@@ -232,7 +243,12 @@ def _verified_pdf_snapshot(
             yield snapshot_path
 
 
-def _verify_source(loaded: LoadedRun, *, pdf: LocalSourceIdentity) -> _PreparedSource:
+def _verify_source(
+    loaded: LoadedRun,
+    *,
+    pdf: LocalSourceIdentity,
+    secondary_plan: BoundSecondaryPlan | None,
+) -> _PreparedSource:
     source = loaded.run.source
     if isinstance(source, LocalSourceIdentity):
         if source != pdf:  # pragma: no cover - internal caller invariant
@@ -242,6 +258,7 @@ def _verify_source(loaded: LoadedRun, *, pdf: LocalSourceIdentity) -> _PreparedS
             pdf=pdf,
             metadata=metadata,
             secondary_sources=_secondary_sources(metadata),
+            secondary_plan=None,
             allow_network_figure_source=False,
         )
     if not isinstance(source, ZoteroSourceIdentity):  # pragma: no cover - strict discriminator
@@ -309,6 +326,7 @@ def _verify_source(loaded: LoadedRun, *, pdf: LocalSourceIdentity) -> _PreparedS
         pdf=pdf,
         metadata=metadata,
         secondary_sources=build_secondary_sources(item),
+        secondary_plan=secondary_plan,
         allow_network_figure_source=True,
     )
 
@@ -376,6 +394,34 @@ def _display_evidence_error(
     )
 
 
+def _secondary_evidence_error(exc: SecondaryEvidenceError, *, run_id: str) -> EvidenceBundleError:
+    return EvidenceBundleError(
+        exc.code,
+        str(exc),
+        data={"run_id": run_id},
+    )
+
+
+def _verify_secondary_plan_still_bound(
+    loaded: LoadedRun,
+    expected: BoundSecondaryPlan | None,
+) -> None:
+    try:
+        observed = load_bound_secondary_plan(loaded)
+    except SecondaryEvidenceError as exc:
+        raise _secondary_evidence_error(exc, run_id=loaded.run.run_id) from exc
+    if (observed is None) != (expected is None) or (
+        observed is not None
+        and expected is not None
+        and observed.raw_bytes != expected.raw_bytes
+    ):
+        raise EvidenceBundleError(
+            "secondary_plan_changed",
+            "secondary source plan changed during evidence preparation",
+            data={"run_id": loaded.run.run_id},
+        )
+
+
 def _page_count(source_path: Path) -> int:
     try:
         with fitz.open(source_path) as document:
@@ -407,13 +453,33 @@ def prepare_local_evidence(
     *,
     preview_pages: int | None = None,
     figure_limit: int | None = None,
+    secondary_capture_dir: Path | None = None,
 ) -> PreparedEvidence:
+    if secondary_capture_dir is not None:
+        preflight = load_v2_run(run_path)
+        if isinstance(preflight.run.source, LocalSourceIdentity):
+            raise EvidenceBundleError(
+                "invalid_input",
+                "secondary captures are available only for Zotero-backed runs",
+                data={"run_id": preflight.run.run_id},
+            )
     with locked_v2_run(run_path) as loaded:
-        return _prepare_local_evidence_locked(
-            loaded,
-            preview_pages=preview_pages,
-            figure_limit=figure_limit,
-        )
+        try:
+            secondary_plan = load_bound_secondary_plan(loaded)
+            secondary_inputs = load_secondary_inputs(
+                secondary_plan,
+                secondary_capture_dir,
+            )
+        except SecondaryEvidenceError as exc:
+            raise _secondary_evidence_error(exc, run_id=loaded.run.run_id) from exc
+        with secondary_inputs:
+            return _prepare_local_evidence_locked(
+                loaded,
+                preview_pages=preview_pages,
+                figure_limit=figure_limit,
+                secondary_plan=secondary_plan,
+                secondary_inputs=secondary_inputs,
+            )
 
 
 def _prepare_local_evidence_locked(
@@ -421,13 +487,20 @@ def _prepare_local_evidence_locked(
     *,
     preview_pages: int | None,
     figure_limit: int | None,
+    secondary_plan: BoundSecondaryPlan | None,
+    secondary_inputs: BoundSecondaryInputs,
 ) -> PreparedEvidence:
     source = _pdf_identity(loaded)
     with _verified_pdf_snapshot(source, run_id=loaded.run.run_id) as verified_pdf_path:
-        prepared_source = _verify_source(loaded, pdf=source)
+        prepared_source = _verify_source(
+            loaded,
+            pdf=source,
+            secondary_plan=secondary_plan,
+        )
         return _prepare_verified_evidence_locked(
             loaded,
             prepared_source=prepared_source,
+            secondary_inputs=secondary_inputs,
             verified_pdf_path=verified_pdf_path,
             preview_pages=preview_pages,
             figure_limit=figure_limit,
@@ -438,6 +511,7 @@ def _prepare_verified_evidence_locked(
     loaded: LoadedRun,
     *,
     prepared_source: _PreparedSource,
+    secondary_inputs: BoundSecondaryInputs,
     verified_pdf_path: Path,
     preview_pages: int | None,
     figure_limit: int | None,
@@ -513,6 +587,18 @@ def _prepare_verified_evidence_locked(
 
     metadata = prepared_source.metadata
     complete = preview_pages is None
+    try:
+        _verify_secondary_plan_still_bound(loaded, prepared_source.secondary_plan)
+        secondary_inputs.verify()
+        secondary_files = build_secondary_evidence_files(
+            plan_binding=prepared_source.secondary_plan,
+            captures=secondary_inputs.captures,
+            canonical_capture_bytes=secondary_inputs.canonical_capture_bytes,
+            fallback_inventory=prepared_source.secondary_sources,
+            title=str(metadata.get("title", "")),
+        )
+    except SecondaryEvidenceError as exc:
+        raise _secondary_evidence_error(exc, run_id=loaded.run.run_id) from exc
     evidence_id = new_random_id("evidence")
     staging = run_dir / f".{evidence_id}.{new_uuid()}.staging"
     run_anchor = loaded.run_directory_anchor
@@ -528,7 +614,7 @@ def _prepare_verified_evidence_locked(
             "extract.json": canonical_json_bytes(extraction),
             "context.md": build_context_markdown(metadata, extraction).encode("utf-8"),
             "section_context.md": build_section_context_markdown(metadata, extraction).encode("utf-8"),
-            "secondary_sources.json": canonical_json_bytes(prepared_source.secondary_sources),
+            **secondary_files.files,
         }
         for name, content in files_to_write.items():
             atomic_write_bytes(staging / name, content, anchor=staging_anchor)
@@ -544,13 +630,29 @@ def _prepare_verified_evidence_locked(
                 "section_context",
                 "text/markdown",
             ),
-            (
-                staging / "secondary_sources.json",
-                future_dir / "secondary_sources.json",
-                "secondary_sources",
-                "application/json",
-            ),
         ]
+        for relative_name in secondary_files.files:
+            if relative_name == "secondary_sources.json":
+                role, media_type = "secondary_sources", "application/json"
+            elif relative_name == "secondary-plan.json":
+                role, media_type = "secondary_plan", "application/json"
+            elif relative_name == "secondary_context.md":
+                role, media_type = "secondary_context", "text/markdown"
+            elif relative_name.startswith("secondary/") and relative_name.endswith(".json"):
+                role, media_type = "secondary_capture", "application/json"
+            else:  # pragma: no cover - internal closed-world invariant
+                raise EvidenceBundleError(
+                    "secondary_evidence_invalid",
+                    f"unexpected secondary evidence member: {relative_name}",
+                )
+            artifact_specs.append(
+                (
+                    staging / relative_name,
+                    future_dir / relative_name,
+                    role,
+                    media_type,
+                )
+            )
         try:
             prepared_figures = prepare_figure_artifacts(
                 source_path=source_path,
@@ -590,9 +692,24 @@ def _prepare_verified_evidence_locked(
             figure_limit=resolved_figure_limit,
             run_size_bytes=0,
             figures=prepared_figures.members,
-            degraded=prepared_figures.degraded,
+            degraded=prepared_figures.degraded or secondary_files.degraded,
             figure_check=prepared_figures.extraction_check,
             figure_resource_checks=prepared_figures.resource_checks,
+            secondary_resource_checks=(
+                EvidenceResourceCheck(
+                    name="secondary_capture_chars",
+                    status="degraded" if secondary_files.degraded else "passed",
+                    actual=secondary_files.capture_chars,
+                    limit=CAPTURE_TOTAL_TEXT_MAX_CHARS,
+                    message=(
+                        "one or more eligible secondary sources were unavailable or not captured"
+                        if secondary_files.degraded
+                        else None
+                    ),
+                ),
+            )
+            if prepared_source.secondary_plan is not None
+            else (),
         )
         manifest_path = staging / "evidence.json"
         manifest_ref: ArtifactRef | None = None
@@ -692,6 +809,14 @@ def _prepare_verified_evidence_locked(
             }
         )
         try:
+            try:
+                _verify_secondary_plan_still_bound(
+                    loaded,
+                    prepared_source.secondary_plan,
+                )
+                secondary_inputs.verify()
+            except SecondaryEvidenceError as exc:
+                raise _secondary_evidence_error(exc, run_id=loaded.run.run_id) from exc
             published = atomic_publish_tree(
                 staging,
                 destination,

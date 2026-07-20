@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from paper_reader.summary_lint import lint_summary
+from paper_reader.summary_lint import lint_rendered_markdown, lint_summary
 
 
 def test_lint_summary_flags_single_line_numbered_workflow() -> None:
@@ -354,3 +354,27 @@ def test_lint_summary_does_not_block_non_rendered_figure_quality_note_prose() ->
     issues = lint_summary(summary)
 
     assert not any(issue["code"] == "rendered_note_field_english_prose" for issue in issues)
+
+
+def test_lint_summary_does_not_trust_arbitrary_parenthesized_markdown_links() -> None:
+    summary = {
+        "technical_details": [
+            "中文引导（[This external article completely contradicts the reported mechanism]"
+            "(https://example.org)）"
+        ]
+    }
+
+    issues = lint_summary(summary)
+
+    assert any(issue["code"] == "rendered_note_field_english_prose" for issue in issues)
+
+
+def test_lint_rendered_markdown_does_not_trust_arbitrary_parenthesized_links() -> None:
+    note = (
+        "- 中文引导（[This external article completely contradicts the reported mechanism]"
+        "(https://example.org)）\n"
+    )
+
+    issues = lint_rendered_markdown(note)
+
+    assert any(issue["code"] == "rendered_note_english_prose" for issue in issues)

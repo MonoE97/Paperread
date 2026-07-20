@@ -21,7 +21,7 @@ def read(path: Path) -> str:
 def test_batch_skill_declares_grouped_routing_and_safety() -> None:
     text = read(SKILL)
     for phrase in [
-        "Paper Reader Batch 2.0 runtime contract",
+        "Paper Reader Batch 2.1 runtime contract",
         "grouped CLI",
         "$paper_reader",
         "zotero_write",
@@ -64,6 +64,22 @@ def test_batch_skill_declares_grouped_routing_and_safety() -> None:
         "only after full verification passes exact parent, note key, exact title, complete tags, required headings, minimum length, and canonical HTML hash",
     ]:
         assert phrase in text
+
+
+def test_batch_docs_delegate_secondary_cross_checks_without_owning_web_content() -> None:
+    for text in [
+        read(SKILL),
+        read(BATCH_WORKFLOW),
+        read(PARALLEL_DISPATCH),
+        read(WORKER_RESULT_CONTRACT),
+    ]:
+        assert "$paper_reader" in text
+        assert "secondary_cross_checks" in text
+
+    skill = read(SKILL)
+    assert "run prepare --secondary-capture-dir" in skill
+    assert "Batch never fetches, parses, summarizes, or renders those pages" in skill
+    assert "For `pdf_path` assignments, the prompt never enables this path" in skill
 
 
 def test_batch_workflow_declares_journal_leases_and_write_sequence() -> None:
@@ -249,7 +265,7 @@ def test_openai_metadata_marks_v2_as_released_runtime() -> None:
     text = read(OPENAI_YAML)
     for phrase in [
         'display_name: "paper_reader_batch"',
-        "Paper Reader Batch 2.0 released grouped CLI runtime",
+        "Paper Reader Batch 2.1 released grouped CLI runtime",
         "local-only",
         "external agent",
         "write begin",
@@ -341,8 +357,8 @@ def test_root_readmes_publish_v2_release_and_clean_install() -> None:
 
     for text in [english, chinese]:
         for phrase in [
-            "Paper Reader 2.0",
-            "2.0.0",
+            "Paper Reader 2.1",
+            "2.1.0",
             "clean install",
             "uv sync --locked",
             "uv run paper_reader --version",
@@ -391,11 +407,11 @@ def test_release_verification_uses_an_explicit_separately_staged_reader_root() -
         assert "uv run pytest" in text
 
 
-def test_batch_project_version_is_2_0_0() -> None:
+def test_batch_project_version_is_2_1_0() -> None:
     project = tomllib.loads(read(PYPROJECT))["project"]
 
     assert project["name"] == "paper_reader_batch"
-    assert project["version"] == "2.0.0"
+    assert project["version"] == "2.1.0"
     assert project["scripts"] == {"paper_reader_batch": "paper_reader_batch.v2_cli:app"}
 
 
@@ -434,7 +450,7 @@ def test_batch_validator_tracks_required_runtime_modules() -> None:
         "references/parallel-dispatch.md",
         "references/worker-result-contract.md",
         "paper_reader_batch.v2_cli:app",
-        "pyproject project.version must be 2.0.0",
-        "uv.lock paper-reader-batch package version must be 2.0.0",
+        "pyproject project.version must be 2.1.0",
+        "uv.lock paper-reader-batch package version must be 2.1.0",
     ]:
         assert phrase in validator

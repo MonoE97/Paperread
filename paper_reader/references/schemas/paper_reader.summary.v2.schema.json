@@ -292,6 +292,97 @@
       ],
       "title": "ReviewIssue",
       "type": "object"
+    },
+    "SecondaryCrossCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "findings": {
+          "items": {
+            "$ref": "#/$defs/SecondaryCrossCheckFinding"
+          },
+          "title": "Findings",
+          "type": "array"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "source_id": {
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Source Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "used",
+            "irrelevant",
+            "unavailable"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "status",
+        "reason",
+        "findings"
+      ],
+      "title": "SecondaryCrossCheck",
+      "type": "object"
+    },
+    "SecondaryCrossCheckFinding": {
+      "additionalProperties": false,
+      "properties": {
+        "caveats": {
+          "default": [],
+          "items": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Caveats",
+          "type": "array"
+        },
+        "relation": {
+          "enum": [
+            "supports",
+            "extends",
+            "questions",
+            "conflicts"
+          ],
+          "title": "Relation",
+          "type": "string"
+        },
+        "target": {
+          "enum": [
+            "core_result_short_annotation",
+            "main_risk_short_annotation",
+            "technical_details_item",
+            "inferred_limits_item",
+            "applicability_limits_item"
+          ],
+          "title": "Target",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "relation",
+        "target",
+        "text"
+      ],
+      "title": "SecondaryCrossCheckFinding",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -592,6 +683,14 @@
       "const": "paper_reader.summary.v2",
       "title": "Schema Version",
       "type": "string"
+    },
+    "secondary_cross_checks": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SecondaryCrossCheck"
+      },
+      "title": "Secondary Cross Checks",
+      "type": "array"
     },
     "summary_id": {
       "maxLength": 160,

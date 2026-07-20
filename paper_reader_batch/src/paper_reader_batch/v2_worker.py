@@ -439,6 +439,14 @@ def worker_prompt(
     )
     if manifest_item.input_type == "pdf_path":
         instruction += " This PDF is local-output only; never search or write Zotero."
+    else:
+        instruction += (
+            " For this Zotero-backed item, have $paper_reader inspect eligible public HTTP(S) "
+            "links from Zotero Extra, perform only plan-bound read-only captures, ingest them "
+            "with paper_reader run prepare --secondary-capture-dir, and assess every eligible "
+            "source in secondary_cross_checks before review. Unavailable pages are non-blocking; "
+            "secondary material must never be cited in evidence_summary."
+        )
     if prepared is not None:
         instruction += (
             " Continue the exact prepared paper_reader run and evidence returned by this prompt; "

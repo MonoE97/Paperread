@@ -1,6 +1,6 @@
-# Summary And Review Shape — Paper Reader 2.0 Runtime Contract
+# Summary And Review Shape — Paper Reader 2.1 Runtime Contract
 
-This reference defines the released Paper Reader 2.0 runtime schemas `paper_reader.summary.v2`, `paper_reader.review.v2`, and immutable `paper_reader.review-package.v2`. All use strict Pydantic v2 models with `extra=forbid`; unknown fields, implicit coercion, V1/unversioned artifacts and schema guessing are rejected. V1 artifacts are historical-only and fail with `unsupported_run_schema` before locks or mutation.
+This reference defines the released Paper Reader 2.1 runtime schemas `paper_reader.summary.v2`, `paper_reader.review.v2`, and immutable `paper_reader.review-package.v2`. All use strict Pydantic v2 models with `extra=forbid`; unknown fields, implicit coercion, V1/unversioned artifacts and schema guessing are rejected. V1 artifacts are historical-only and fail with `unsupported_run_schema` before locks or mutation.
 
 The summary separates fields that block review sealing from fields that improve the rendered note. The agent should fill both layers for high-quality notes, but only `gate-required` fields are mandatory for sealing. Review validation resolves every render fallback before Chinese-first prose lint, locator validation and sealing, so omitted optional fields cannot bypass checks.
 
@@ -59,6 +59,25 @@ These fields are rendered prominently by the note template or make the review mo
 - `inferred_limits`
 - `applicability_limits`
 - `note_labels`
+
+## Zotero secondary cross-checks
+
+`secondary_cross_checks` is optional in the schema and is omitted from canonical JSON when empty, so summaries for local PDFs and Zotero items without eligible `Extra` links retain their existing canonical bytes. When the bound immutable evidence inventory contains eligible sources, review sealing requires exactly one assessment per source in plan order:
+
+- `source_id`: the exact `secondary-NNN` from `secondary-plan.json`.
+- `status=used`: requires a successful capture and one to three Chinese findings.
+- `status=irrelevant`: requires a successful capture, a Chinese reason, and no findings.
+- `status=unavailable`: applies only to `unavailable` or `not_attempted` capture state, explains why no content judgment is possible, and has no findings.
+- `reason`: trimmed, single-line Chinese-first prose.
+
+Each finding has `relation`, `target`, `text`, and zero to three `caveats`. It must not contain a URL, source title, or publisher; review resolves those only from immutable evidence and escapes them when it creates the source link. Allowed relation/target pairs are:
+
+- `supports` -> `core_result_short_annotation` or `technical_details_item`
+- `extends` -> `technical_details_item` or `applicability_limits_item`
+- `questions` -> `main_risk_short_annotation`, `inferred_limits_item`, or `applicability_limits_item`
+- `conflicts` -> `main_risk_short_annotation` or `inferred_limits_item`
+
+At most two annotations may be appended to either existing table cell. Detailed findings go to existing list fields. A failed capture adds one deterministic link notice to `applicability_limits`. The resolver never changes `tldr`, `one_sentence_summary`, background/gap/contribution fields, method fields, figure fields, author-stated limitations, `evidence_summary`, or canonical locators. Secondary material is not PDF evidence and cannot be presented as a paper claim.
 
 ## `review.json`
 

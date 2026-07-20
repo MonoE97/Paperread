@@ -2425,7 +2425,12 @@ def _reserve_coordination_in_journal(
 ) -> RequestOutcome:
     preflight = load_run_view_for_mutation(run_dir)
     token_hash = sha256_bytes(lease_token.encode())
-    record, _record_raw = _load_signed_model(record_path, _CoordinationRecord, preflight.lease_secret)
+    record, _record_raw = _load_signed_model(
+        record_path,
+        _CoordinationRecord,
+        preflight.lease_secret,
+        recover_pending=True,
+    )
     internal_request_id = _coordination_reservation_request_id(coordinator_request_id)
     fingerprint = canonical_sha256(
         {
@@ -2463,9 +2468,10 @@ def _reserve_coordination_in_journal(
             record_path,
             _CoordinationRecord,
             view.lease_secret,
-            # append_transaction first invokes proposals with a read-only
-            # pre-recovery view whose lock descriptor is intentionally absent.
-            recover_pending=view.lock_descriptor is not None,
+            # The caller holds the request's coordinator lock across the
+            # complete journal reservation transaction, including the first
+            # read-only proposal pass.
+            recover_pending=True,
         )
         if current_record != record:
             raise BatchRuntimeError(
@@ -2524,7 +2530,7 @@ def _reserve_coordination_in_journal(
             record_path,
             _CoordinationRecord,
             view.lease_secret,
-            recover_pending=False,
+            recover_pending=True,
         )
         if current_record != record:
             raise BatchRuntimeError(
@@ -2992,19 +2998,6 @@ def run_local_prepare(
         timeout_seconds=timeout_seconds,
         now=now,
     )
-    _reserve_coordination_in_journal(
-        preflight.run_dir,
-        item_id=item_id,
-        worker_id=worker_id,
-        claim_id=claim_id,
-        lease_token=lease_token,
-        attempt_id=attempt_id,
-        coordinator_request_id=canonical_request_id,
-        coordinator_request_fingerprint=request_fingerprint,
-        record_path=record_path,
-        now=now,
-        fault=fault,
-    )
     child_runner = runner or _default_child_runner
     # The exact run-lock descriptor bundle is inherited through marker
     # publication. Avoid a grandparent coordinator guard here so independent
@@ -3014,6 +3007,19 @@ def run_local_prepare(
         create=True,
         guard_parent_replacement=False,
     ):
+        _reserve_coordination_in_journal(
+            preflight.run_dir,
+            item_id=item_id,
+            worker_id=worker_id,
+            claim_id=claim_id,
+            lease_token=lease_token,
+            attempt_id=attempt_id,
+            coordinator_request_id=canonical_request_id,
+            coordinator_request_fingerprint=request_fingerprint,
+            record_path=record_path,
+            now=now,
+            fault=fault,
+        )
         coordination_root = preflight.run_dir / "results" / "local-prepare" / ".coordination"
         owner_path = coordination_root / ".attempts" / f"{attempt_id}.json"
         owner, _owner_raw = _load_signed_model(owner_path, _AttemptOwner, secret)

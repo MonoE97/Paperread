@@ -213,7 +213,7 @@ class V2TopLevelGroup(TyperGroup):
 
 app = typer.Typer(
     cls=V2TopLevelGroup,
-    help="Paper Reader Batch 2.0 journal runtime.",
+    help="Paper Reader Batch 2.1 journal runtime.",
     no_args_is_help=True,
     add_completion=False,
     rich_markup_mode=None,

@@ -1,11 +1,11 @@
 ---
 name: paper_reader_batch
-description: Use when the user asks to analyze multiple papers from Zotero collections, Zotero titles, PDF folders, or PDF paths under the Paper Reader Batch 2.0 journal-and-lease contract, dispatching each item to $paper_reader while keeping PDF items local-only.
+description: Use when the user asks to analyze multiple papers from Zotero collections, Zotero titles, PDF folders, or PDF paths under the Paper Reader Batch 2.1 journal-and-lease contract, dispatching each item to $paper_reader while keeping PDF items local-only.
 ---
 
 # paper_reader_batch
 
-paper_reader_batch orchestrates multiple paper reads. This file defines the released Paper Reader Batch 2.0 runtime contract and grouped CLI. It does not perform deep
+paper_reader_batch orchestrates multiple paper reads. This file defines the released Paper Reader Batch 2.1 runtime contract and grouped CLI. It does not perform deep
 single-paper analysis itself. Each paper must be dispatched to `$paper_reader`,
 which remains the owner of extraction, evidence rules, summary schema, note
 rendering, immutable candidates/authorizations, and Zotero verification.
@@ -36,7 +36,7 @@ from Zotero preferences, normally `http://127.0.0.1:23120/mcp`.
   each PDF to `$paper_reader` local PDF workflow and generate a batch report; PDF
   items remain local-output only and skip Zotero lookup or duplicate checks.
 
-## Paper Reader Batch 2.0 Grouped CLI
+## Paper Reader Batch 2.1 Grouped CLI
 
 The public grouped CLI is:
 
@@ -93,6 +93,8 @@ Each `worker claim` and `local-prepare claim` binds at most one PDF item per jou
 The append-only hash-chain at `events/<20-digit-seq>.json` is source of truth; `state.json` is only a reconstructable snapshot. Event staging is provisional until its final no-replace rename; a failed exact precommit commits a deterministic `request.aborted` no-op marker at the proposal's sequence before the original staging can become inert. The marker embeds the canonical proposal and permanently binds its request identity; sidecars are never authoritative. Unrelated requests cannot promote provisional storage. `.run.lock`, manifest hash binding and request-id idempotency protect mutation. Journal gaps or hash failures return `journal_corrupt` and must not mutate.
 
 Every successful worker result must bind a sealed `$paper_reader` review package whose fully resolved rendered note passed the Chinese-first gate; batch must not accept a candidate as a substitute for that proof.
+
+For `zotero_item` and `zotero_title` assignments, `worker prompt` tells the outer `$paper_reader` worker to inspect the selected item's immutable Zotero `Extra` plan, perform only plan-bound read-only captures, ingest them through `run prepare --secondary-capture-dir`, and assess every eligible source through `secondary_cross_checks`. Batch never fetches, parses, summarizes, or renders those pages and does not duplicate their schema semantics. For `pdf_path` assignments, the prompt never enables this path.
 
 The default write policy is `zotero_write`; pass `--write-policy prepare_only` only for explicit dry-run. PDF items remain local-output only and a pure local PDF report uses `effective_write_policy=local_only`. The write sequence is fixed: claim exactly one candidate and its `claim_id` / `lease_token` / `write_attempt_id` -> preview that candidate while no authorization exists -> obtain the user's explicit real-write intent -> let the external agent call `$paper_reader zotero authorize` with the external claim id and `write_attempt_id` -> pass the resulting immutable authorization to batch `write begin`, which independently validates the current claim/lease/write-attempt identity. Authorization binds the external claim id, candidate digest and `write_attempt_id`, not the renewable lease token. Begin needs at least 30 seconds of authorization lifetime, commits `write.started` before returning the exact envelope, and a started crash becomes uncertain, never queued. The batch CLI must not call Zotero MCP `write_note`; only the external agent may send the envelope and the lane must verify or reconcile before progress. An exact parent + title + canonical HTML hash match locates one note but does not verify it. The located note becomes written only after full verification passes exact parent, note key, exact title, complete tags, required headings, minimum length, and canonical HTML hash. Per-paper report entries come from the single note's `30 秒结论`, with fallback to `tldr` then `one_sentence_summary`, preserving `takeaway_source_sha256`.
 

@@ -362,6 +362,7 @@ def build_evidence_manifest(
     degraded: bool,
     figure_check: EvidenceResourceCheck,
     figure_resource_checks: tuple[EvidenceResourceCheck, ...],
+    secondary_resource_checks: tuple[EvidenceResourceCheck, ...],
 ) -> EvidenceManifest:
     pages = tuple(int(item["page"]) for item in extraction.get("pages", []) if isinstance(item, dict))
     sections = tuple(
@@ -403,6 +404,7 @@ def build_evidence_manifest(
         ),
         figure_check,
         *figure_resource_checks,
+        *secondary_resource_checks,
         EvidenceResourceCheck(
             name="run_size_bytes",
             status="passed",

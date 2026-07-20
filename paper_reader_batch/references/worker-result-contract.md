@@ -1,4 +1,4 @@
-# Worker Result Contract — Paper Reader Batch 2.0 Runtime Contract
+# Worker Result Contract — Paper Reader Batch 2.1 Runtime Contract
 
 Worker, local-prepare, write and reconciliation results are durable handoff artifacts between the external agent, `$paper_reader`, and `paper_reader_batch`. This released runtime contract requires strict Pydantic v2 models with `extra=forbid`, canonical JSON digests, absolute source/artifact paths and exact V2 identities. Results point to artifacts created by `$paper_reader`; batch never synthesizes single-paper conclusions.
 
@@ -19,6 +19,8 @@ V1/unversioned/unknown files are historical-only. Loaders reject them read-only 
 ## Zotero Candidate Success
 
 `paper_reader_batch.worker-result.v2` for a Zotero item binds manifest/item id, claim id, exact worker attempt, lease token, result status, content digest and the referenced `paper_reader.run.v2`, `paper_reader.review-package.v2` and `paper_reader.candidate.v2` identities. The sealed review package must prove that the fully resolved rendered note passed the Chinese-first gate. Candidate path/digest, source parent fingerprint, fixed note title and all referenced artifact hashes must agree. Markdown metacharacters in that title are literal-escaped in the candidate Markdown H1 and rendered with the exact single-skill renderer version; the visible HTML H1 must equal the raw candidate/authorization/readback title character for character. A worker result never contains mutable write authority and the batch CLI must not call Zotero MCP `write_note`.
+
+Zotero workers delegate any `secondary_cross_checks` work to `$paper_reader`. Batch validates only the sealed artifact identities, hash closure and rendered-note proof; it does not copy, parse or reinterpret the single-paper cross-check schema, and local PDF workers never enable that path.
 
 For `zotero_title`, `inventory_sha256` is exactly `SHA-256(canonical_json_bytes(raw_discovery.search_results))`. The raw selected record must normalize to the candidate source inventory, selected key/title/DOI/version and attachment identity. A manifest `inventory_sha256=null` may be filled once by the successful result; a non-null manifest value must match exactly. Duplicate normalized-title parents remain blocked.
 

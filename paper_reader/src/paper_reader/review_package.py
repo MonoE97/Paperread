@@ -22,11 +22,21 @@ from paper_reader.evidence_manifest import (
     load_bound_evidence,
     locator_membership_error,
 )
-from paper_reader.note import render_note, render_note_html, validate_note, validate_trusted_summary
+from paper_reader.note import (
+    markdown_table_cell,
+    render_note,
+    render_note_html,
+    validate_note,
+    validate_trusted_summary,
+)
 from paper_reader.raw_schema import require_raw_schema_version
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
+from paper_reader.secondary_projection import (
+    SecondaryProjectionError,
+    resolve_secondary_render_summary,
+)
 from paper_reader.storage import (
     HeldExactTreeGuard,
     OwnedPublishedTree,
@@ -295,6 +305,8 @@ def _validate_review_run_loaded(loaded: LoadedRun) -> ReviewValidation:
     rendered_note_bytes: bytes | None = None
     rendered_html_bytes: bytes | None = None
     rendered_note_sha256: str | None = None
+    resolved_summary_payload: dict[str, object] | None = None
+    trusted_secondary_source_links: tuple[str, ...] = ()
 
     if summary is not None:
         if summary.run_id != loaded.run.run_id:
@@ -313,6 +325,30 @@ def _validate_review_run_loaded(loaded: LoadedRun) -> ReviewValidation:
                     )
                 )
             _validate_locator_bindings(summary, evidence, blockers)
+            try:
+                resolved_summary_payload = resolve_secondary_render_summary(
+                    summary,
+                    evidence,
+                )
+                raw_trusted_links = resolved_summary_payload.pop(
+                    "_secondary_trusted_source_links",
+                    [],
+                )
+                if not isinstance(raw_trusted_links, list) or not all(
+                    isinstance(item, str) and item for item in raw_trusted_links
+                ):
+                    raise SecondaryProjectionError(
+                        "secondary_evidence_invalid",
+                        "resolved secondary source link provenance is invalid",
+                    )
+                rendered_link_variants: list[str] = []
+                for source_link in raw_trusted_links:
+                    for variant in (source_link, markdown_table_cell(source_link)):
+                        if variant not in rendered_link_variants:
+                            rendered_link_variants.append(variant)
+                trusted_secondary_source_links = tuple(rendered_link_variants)
+            except SecondaryProjectionError as exc:
+                blockers.append(_blocker(exc.code, str(exc), "summary.json"))
 
         summary_payload = summary.model_dump(mode="json")
         for message in validate_trusted_summary(summary_payload):
@@ -363,7 +399,7 @@ def _validate_review_run_loaded(loaded: LoadedRun) -> ReviewValidation:
                 )
             )
 
-    if summary is not None and evidence is not None:
+    if summary is not None and evidence is not None and resolved_summary_payload is not None:
         try:
             metadata_artifact = evidence.artifacts_by_role["metadata"][0]
             metadata = json.loads(metadata_artifact.raw_bytes)
@@ -371,7 +407,7 @@ def _validate_review_run_loaded(loaded: LoadedRun) -> ReviewValidation:
                 raise ValueError("metadata must be an object")
             rendered_note = render_note(
                 metadata,
-                summary.model_dump(mode="json"),
+                resolved_summary_payload,
                 generated_date=loaded.run.created_at[:10],
             )
             rendered_html = render_note_html(rendered_note)
@@ -383,7 +419,10 @@ def _validate_review_run_loaded(loaded: LoadedRun) -> ReviewValidation:
         else:
             for message in validate_note(rendered_note):
                 blockers.append(_blocker("invalid_rendered_note", message))
-            for issue in lint_rendered_markdown(rendered_note):
+            for issue in lint_rendered_markdown(
+                rendered_note,
+                trusted_source_links=trusted_secondary_source_links,
+            ):
                 blockers.append(_blocker(issue["code"], issue["message"], "summary.json"))
 
     return ReviewValidation(

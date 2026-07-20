@@ -1,8 +1,8 @@
-# Paper Reader 2.0
+# Paper Reader 2.1
 
 **English** | [简体中文](README.zh-CN.md)
 
-Paper Reader `2.0.0` is a breaking, self-contained skill repository for Codex or Claude. It turns a Zotero paper title, a local PDF path, or a batch of papers into evidence-grounded Chinese reading notes through deterministic grouped CLI tooling plus agent-written summaries.
+Paper Reader `2.1.0` is a self-contained skill repository for Codex or Claude. It turns a Zotero paper title, a local PDF path, or a batch of papers into evidence-grounded Chinese reading notes through deterministic grouped CLI tooling plus agent-written summaries. For Zotero items only, eligible public links in `Extra` can now be captured read-only and used to cross-check—not replace—the PDF-backed analysis.
 
 The repository root is only a maintenance shell; it is not the runtime Python project. Install and run one or both skill sources:
 
@@ -17,7 +17,7 @@ Do not put a `README.md` inside `paper_reader/` or `paper_reader_batch/`; skills
 
 ## Install
 
-The Paper Reader 2.0 runtime currently supports macOS and Linux; on Windows, use WSL. The tracked-file installation helper below requires a POSIX shell.
+The Paper Reader 2.1 runtime currently supports macOS and Linux; on Windows, use WSL. The tracked-file installation helper below requires a POSIX shell.
 
 Install `uv` before staging the skill. Use the official installer or a package manager; common options are:
 
@@ -88,7 +88,7 @@ install_tracked_skill paper_reader_batch \
   "$HOME/.claude/skills/paper_reader_batch" paper_reader_batch
 ```
 
-If the target `paper_reader/` or `paper_reader_batch/` directory already exists, stop before installing. Paper Reader 2.0 requires a clean install into a new directory. An old installation may remain elsewhere as read-only history. A failed staging validation leaves the hidden staging directory in place for inspection; it is never promoted to the target.
+If the target `paper_reader/` or `paper_reader_batch/` directory already exists, stop before installing. Paper Reader 2.1 requires a clean install into a new directory. An old installation may remain elsewhere as read-only history. A failed staging validation leaves the hidden staging directory in place for inspection; it is never promoted to the target.
 
 The first `uv sync --locked` initializes each installed skill's local environment from its own lockfile. Re-run it after installing a newly exported revision.
 
@@ -109,7 +109,7 @@ The plugin includes the MCP server; no separate Zotero MCP server process is req
 
 Use `paper_reader` for one paper at a time. The CLI is deterministic tooling, not a standalone summarizer: it prepares immutable extraction artifacts and gates note readiness, while the agent writes strict summary and review inputs after reading the generated context files.
 
-- Zotero title or title fragment: ask the agent to use `$paper_reader` with the paper title. The agent searches Zotero through Zotero MCP, initializes a V2 run, seals a review package, previews an immutable candidate, creates a 300-second authorization only after explicit write intent, lets the external agent call MCP `write_note` at most once, and verifies or reconciles read-only.
+- Zotero title or title fragment: ask the agent to use `$paper_reader` with the paper title. The agent searches Zotero through Zotero MCP, initializes a V2 run, optionally cross-checks eligible public links found in the selected item's `Extra`, seals a review package, previews an immutable candidate, creates a 300-second authorization only after explicit write intent, lets the external agent call MCP `write_note` at most once, and verifies or reconciles read-only.
 - Local PDF path: give an absolute or relative `.pdf` path. V2 reserves `<pdf_stem>_analysis/` and `<pdf_stem>_note.md`, prepares immutable evidence, seals a review package, builds a local candidate, and publishes atomically without replacement. This workflow never searches Zotero for matching items and never writes Zotero.
 - Local directory path: use `paper_reader_batch` with the local PDF folder workflow. Existing local paths are not Zotero title fragments.
 
@@ -128,6 +128,21 @@ uv run paper_reader zotero authorize <candidate.json>
 uv run paper_reader zotero verify <authorization.json> --note-key <note_key>
 uv run paper_reader zotero reconcile <authorization.json>
 ```
+
+When a Zotero run's immutable `source/secondary-plan.json` contains eligible links, the outer agent uses strict capture mode for each `secondary-NNN`, stores the JSON files in a temporary closed-world directory, then passes that directory to `run prepare`:
+
+```bash
+node scripts/capture-secondary-url.mjs --plan <run_dir>/source/secondary-plan.json --source-id secondary-001 --output <temporary_capture_dir>/secondary-001.json
+uv run paper_reader run prepare <run_dir> --secondary-capture-dir <temporary_capture_dir>
+```
+
+This optional strict-capture path requires Node.js 22+ with native WebSocket support and a Chrome/Chromium raw debugging endpoint. It uses direct raw CDP, creates an isolated empty BrowserContext with no inherited login state, validates every HTTP(S) hop through CDP request/network interception plus a pinned-IP loopback egress proxy, and applies `Browser.setDownloadBehavior(deny)` before navigation. Only bodyless `GET`, `HEAD`, and `OPTIONS` requests may proceed. Request events, guarded target sessions, blocked CONNECT records, and fatal proxy diagnostics are bounded; the proxy is sealed on both success and failure before the target is disposed. Chrome-owned background CONNECT attempts outside the captured target are denied without an upstream dial and reported as audit warnings, while an unauthorized authority observed in the owned target is fatal. Strict-mode stdout is exactly one machine JSON result even for argument or setup errors; diagnostics go to stderr. On Chrome 144+, each new raw debugging connection can display an approval dialog; approve it explicitly in Chrome. The agent must not bypass or click the prompt. Plan-bound strict mode does not use the legacy 3456 relay; that helper remains available only to the positional diagnostic mode.
+
+For ambiguous punctuation in Zotero `Extra`, wrap an exact signed link as `<URL>`; every byte inside that delimiter is retained, while bare prose URLs accept a case-insensitive HTTP(S) scheme and drop unmatched wrappers or sentence punctuation. Every strict capture JSON binds the exact `run_id`, `item_key`, `source_snapshot_sha256`, and `secondary_plan_sha256`. An unsafe method or body is considered blocked only after an acknowledged `Fetch.failRequest`; cancellation failure makes the source unavailable. CDP accounts both decoded and encoded traffic with an 8 MiB per-response limit and a 32 MiB aggregate limit, while the cleartext proxy independently stops any response above 8 MiB.
+
+If a trusted local TUN/fake-IP proxy makes system DNS return non-public synthetic addresses for every public hostname, do not allow that address range. Re-run strict capture with explicit `--public-dns-over-https`; it reaches Cloudflare DNS through a fixed public-IP endpoint, validates both A and AAAA answers before navigation, and therefore discloses the source hostname to Cloudflare. The default remains system-DNS validation and fails closed.
+
+Do not use this option for local PDF runs. A failed or unreadable web page is audited as unavailable and does not block PDF analysis.
 
 ### Use `paper_reader_batch`
 
@@ -171,18 +186,18 @@ For Zotero-backed items, the default write policy is `zotero_write`. Pass `--wri
 
 paper_reader supports two inputs:
 
-- **Zotero title or title fragment**: use Zotero MCP to locate the paper, preserve the complete discovery inventory, prepare immutable evidence, seal review, and build exact Markdown/HTML candidate artifacts. Only the external agent can send an unexpired authorization's exact MCP create envelope, once, after explicit write intent.
+- **Zotero title or title fragment**: use Zotero MCP to locate the paper, preserve the complete discovery inventory, derive an immutable plan from `Extra`, optionally capture eligible public links read-only, prepare immutable evidence, seal review, and build exact Markdown/HTML candidate artifacts. Only the external agent can send an unexpired authorization's exact MCP create envelope, once, after explicit write intent.
 - **Local PDF path**: bind the normalized absolute path, size, SHA-256, device, and inode; prepare immutable evidence; seal review; build a local candidate; and atomically publish the final Markdown note beside the PDF without writing Zotero.
 
 Local PDF path and directory path inputs skip Zotero lookup and duplicate checks. Existing local paths are not Zotero title fragments; directory paths belong to `paper_reader_batch manifest from-pdf-folder`, which is non-recursive unless `--recursive` is explicit.
 
-Both workflows use full-PDF extraction by default. Final `evidence_summary` locators must use one of these canonical forms: `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, and secondary context paths are invalid. `section_context.md` is only a navigation aid. In the current grouped runtime, output from `scripts/capture-secondary-url.mjs` is unbound diagnostic material only: because no immutable secondary-capture ingestion command exists, it must not participate in review or candidate construction and cannot be cited in `evidence_summary`.
+Both workflows use full-PDF extraction by default. Final `evidence_summary` locators must use one of these canonical forms: `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, and secondary context paths are invalid. `section_context.md` is only a navigation aid. For Zotero runs, strict `capture-secondary-url.mjs --plan ... --source-id ... --output ...` results can enter the same immutable evidence bundle only through `run prepare --secondary-capture-dir`; review then requires one `secondary_cross_checks` assessment per eligible source and projects validated findings into existing note fields. Secondary material remains cross-check-only, can never support `30 秒结论` or `evidence_summary`, and an unavailable link only adds a deterministic notice under the existing applicability-boundary list. Without eligible `Extra` links, no web capture or cross-check text is produced. Local PDF runs reject this path before evidence allocation.
 
 paper_reader_batch supports four batch inputs: Zotero collection inventories, multiple Zotero titles, local PDF folders, and multiple PDF paths. It normalizes them into a strict manifest and uses an append-only hash-chain journal as authority; `state.json` is only a reconstructable snapshot. Worker and local-prepare leases default to 900 seconds, and the serial write claim defaults to 120 seconds. Zotero-backed items use `zotero_write` by default, while PDF items never enter the write queue. After durable `write.started`, a crash is uncertain and is never resent: `run recover --paper-reader-root ...` delegates read-only single-paper reconciliation, then records `written`, `retry_confirmation_required`, or `blocked`. Pass `--write-policy prepare_only` for dry-run. A pure local-PDF report uses `effective_write_policy=local_only`; each per-paper result is extracted from the single-paper note's `30 秒结论` row, falling back to `tldr` then `one_sentence_summary` without resummarizing.
 
 ## Output Locations
 
-- A single V2 run owns `run.json`, `source/`, `evidence/<evidence_id>/`, `reviews/<review_id>/`, `candidates/<candidate_id>/`, `authorizations/<authorization_id>.json`, `verifications/<authorization_id>/<note_key>.json`, and `reconciliations/<authorization_id>.json`.
+- A single V2 run owns `run.json`, `source/`, `evidence/<evidence_id>/`, `reviews/<review_id>/`, `candidates/<candidate_id>/`, `authorizations/<authorization_id>.json`, `verifications/<authorization_id>/<note_key>.json`, and `reconciliations/<authorization_id>.json`. New Zotero runs also bind `source/secondary-plan.json`; accepted captures, their inventory, and `secondary_context.md` live only inside the immutable evidence bundle.
 - Local PDF initialization reserves `<pdf_stem>_analysis/` and a fixed `<pdf_stem>_note.md`; occupied names allocate `_v2`, `_v3`, and later versions without modifying old output. Publication never overwrites or silently changes target.
 - A batch V2 run owns `manifest.json`, `events/<20-digit-sequence>.json`, `state.json`, `results/{worker,local-prepare,write,reconcile}/`, `batch-report.json`, `batch-report.md`, and `.run.lock`. Reports are regenerated solely by journal replay.
 
@@ -191,7 +206,7 @@ paper_reader_batch supports four batch inputs: Zotero collection inventories, mu
 - Install and run CLI: `uv` plus Python `>=3.13` available to `uv`; use `uv python install 3.13` if no compatible interpreter is present.
 - Local PDF workflow: no Zotero requirement and no Zotero duplicate check. Figure extraction may try an arXiv source download when an arXiv ID is detected in metadata or the PDF filename; this request uses a bounded network timeout and falls back to PDF-only extraction on failure.
 - Zotero title workflow: Zotero Desktop plus Zotero MCP tools or the local MCP endpoint.
-- Secondary web context capture: Node.js and a reachable CDP helper when this optional path is used.
+- Secondary web context capture: Node.js 22+ and a reachable raw Chrome/Chromium CDP endpoint when this optional path is used.
 - Batch workflow: installed `paper_reader` plus installed `paper_reader_batch`; deterministic child delegation requires and validates an explicit `--paper-reader-root`.
 
 ## Verification

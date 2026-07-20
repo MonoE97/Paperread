@@ -131,8 +131,8 @@ def _validate_release_metadata(
         else:
             if project.get("name") != "paper_reader_batch":
                 errors.append("pyproject project.name must be paper_reader_batch")
-            if project.get("version") != "2.0.0":
-                errors.append("pyproject project.version must be 2.0.0")
+            if project.get("version") != "2.1.0":
+                errors.append("pyproject project.version must be 2.1.0")
             scripts = project.get("scripts")
             if not isinstance(scripts, dict) or scripts.get("paper_reader_batch") != "paper_reader_batch.v2_cli:app":
                 errors.append(
@@ -153,8 +153,8 @@ def _validate_release_metadata(
             errors.append("uv.lock must contain exactly one paper-reader-batch package")
         else:
             package = matches[0]
-            if package.get("version") != "2.0.0":
-                errors.append("uv.lock paper-reader-batch package version must be 2.0.0")
+            if package.get("version") != "2.1.0":
+                errors.append("uv.lock paper-reader-batch package version must be 2.1.0")
             if package.get("source") != {"editable": "."}:
                 errors.append("uv.lock paper-reader-batch package must be the editable skill root")
 
@@ -311,9 +311,9 @@ def validate_skill(skill_root: Path, *, release_bundle: bool = False) -> list[st
     init_py = root / "src/paper_reader_batch/__init__.py"
     if (
         "src/paper_reader_batch/__init__.py" in regular_required_paths
-        and '__version__ = "2.0.0"' not in init_py.read_text(encoding="utf-8")
+        and '__version__ = "2.1.0"' not in init_py.read_text(encoding="utf-8")
     ):
-        errors.append("paper_reader_batch package version must be 2.0.0")
+        errors.append("paper_reader_batch package version must be 2.1.0")
 
     _validate_release_metadata(root, errors, regular_required_paths)
     _validate_no_v1_runtime_modules(root, errors)

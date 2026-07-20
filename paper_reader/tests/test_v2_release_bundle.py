@@ -26,9 +26,11 @@ def _build_bundle(
     validator: ModuleType,
     *,
     omit: set[str] | None = None,
-    project_version: str = "2.0.0",
+    project_version: str = "2.1.0",
     entrypoint: str = "paper_reader.public_cli:app",
-    lock_version: str = "2.0.0",
+    lock_version: str = "2.1.0",
+    pydantic_specifier: str = ">=2.12,<3",
+    lock_pydantic_specifier: str = ">=2.12,<3",
 ) -> None:
     omitted = omit or set()
     for relative in validator.REQUIRED_PATHS:
@@ -43,7 +45,7 @@ def _build_bundle(
         encoding="utf-8",
     )
     (root / "src/paper_reader/__init__.py").write_text(
-        '__version__ = "2.0.0"\n',
+        '__version__ = "2.1.0"\n',
         encoding="utf-8",
     )
     (root / "pyproject.toml").write_text(
@@ -52,6 +54,7 @@ def _build_bundle(
                 "[project]",
                 'name = "paper_reader"',
                 f'version = "{project_version}"',
+                f'dependencies = ["pydantic{pydantic_specifier}"]',
                 "[project.scripts]",
                 f'paper_reader = "{entrypoint}"',
                 "",
@@ -70,6 +73,13 @@ def _build_bundle(
                 'name = "paper-reader"',
                 f'version = "{lock_version}"',
                 'source = { editable = "." }',
+                'dependencies = [{ name = "pydantic" }]',
+                "",
+                "[package.metadata]",
+                (
+                    'requires-dist = [{ name = "pydantic", specifier = '
+                    f'"{lock_pydantic_specifier}" }}]'
+                ),
                 "",
             ]
         ),
@@ -89,6 +99,9 @@ def test_validator_requires_full_v2_runtime_closure(tmp_path: Path) -> None:
         "src/paper_reader/pdf_extract.py",
         "src/paper_reader/raw_schema.py",
         "src/paper_reader/zotero_authorization_reservations.py",
+        "scripts/lib/raw-cdp-capture.mjs",
+        "scripts/lib/secondary-network-policy.mjs",
+        "scripts/lib/strict-egress-proxy.mjs",
     }
     assert expected <= required
 
@@ -122,9 +135,25 @@ def test_validator_rejects_stale_project_entrypoint_and_lock(tmp_path: Path) -> 
     )
 
     errors = validator.validate_skill(tmp_path)
-    assert "pyproject project.version must be 2.0.0" in errors
+    assert "pyproject project.version must be 2.1.0" in errors
     assert "pyproject paper_reader entrypoint must be paper_reader.public_cli:app" in errors
-    assert "uv.lock paper-reader package version must be 2.0.0" in errors
+    assert "uv.lock paper-reader package version must be 2.1.0" in errors
+
+
+def test_validator_rejects_pydantic_constraint_without_exclude_if_support(
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator()
+    _build_bundle(
+        tmp_path,
+        validator,
+        pydantic_specifier=">=2.11,<3",
+        lock_pydantic_specifier=">=2.11,<3",
+    )
+
+    errors = validator.validate_skill(tmp_path)
+    assert "pyproject pydantic dependency must be pydantic>=2.12,<3" in errors
+    assert "uv.lock pydantic dependency must use >=2.12,<3" in errors
 
 
 def test_validator_accepts_minimal_closed_v2_bundle(tmp_path: Path) -> None:
