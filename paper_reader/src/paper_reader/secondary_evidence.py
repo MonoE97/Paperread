@@ -4,12 +4,19 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from paper_reader.candidate_integrity import LocalPublicationError, verify_artifact_ref
-from paper_reader.contracts import Identifier, Rfc3339Utc, Sha256, ZoteroSourceIdentity
+from paper_reader.contracts import (
+    ArtifactRef,
+    Identifier,
+    LocalSourceIdentity,
+    Rfc3339Utc,
+    Sha256,
+    ZoteroSourceIdentity,
+)
 from paper_reader.secondary_sources import (
     MAX_SECONDARY_PLAN_SOURCES,
     MAX_SECONDARY_URLS,
@@ -18,6 +25,7 @@ from paper_reader.secondary_sources import (
     build_secondary_source_plan,
     is_unsafe_secondary_url,
 )
+from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.storage import (
     HeldExactFileGuard,
     ImmutableTreeSnapshot,
@@ -25,12 +33,18 @@ from paper_reader.storage import (
     UnsafeStoragePathError,
     canonical_json_bytes,
     open_directory_anchor,
+    open_anchored_directory,
     open_anchored_regular_file,
     read_anchored_bytes,
     snapshot_directory_fd,
+    snapshot_anchored_tree,
+    tree_snapshot_from_hashes,
     validate_directory_anchor,
 )
 from paper_reader.v2_loader import LoadedRun
+
+if TYPE_CHECKING:
+    from paper_reader.evidence_manifest import BoundEvidence
 
 
 CAPTURE_FORMAT = "paper_reader.secondary-capture.v2-internal"
@@ -117,6 +131,45 @@ class SecondaryEvidenceError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+@dataclass(slots=True)
+class BoundSourceClosureGuard:
+    anchor: OwnedDirectoryAnchor
+    file_guards: tuple[HeldExactFileGuard, ...]
+    expected_tree: ImmutableTreeSnapshot
+
+    def close(self) -> None:
+        try:
+            for guard in self.file_guards:
+                guard.close()
+        finally:
+            self.anchor.close()
+
+    def __enter__(self) -> BoundSourceClosureGuard:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+    def verify(self) -> None:
+        validate_directory_anchor(self.anchor)
+        for guard in self.file_guards:
+            guard.verify()
+        observed = snapshot_directory_fd(
+            self.anchor.descriptor,
+            max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            max_total_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes * 3,
+            max_members=3,
+            max_depth=1,
+        )
+        for guard in self.file_guards:
+            guard.verify()
+        validate_directory_anchor(self.anchor)
+        if observed != self.expected_tree:
+            raise UnsafeStoragePathError(
+                "held run source closure changed before finalization"
+            )
 
 
 def _contains_forbidden_visible_text_control(value: str) -> bool:
@@ -369,6 +422,335 @@ def load_bound_secondary_plan(loaded: LoadedRun) -> BoundSecondaryPlan | None:
         run_id=loaded.run.run_id,
         plan_sha256=ref.sha256,
     )
+
+
+def _secondary_inventory_format_state(raw: bytes) -> tuple[bool, bool]:
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        payload: dict[str, object] = {}
+        for key, value in pairs:
+            if key in payload:
+                raise ValueError(f"duplicate JSON key: {key}")
+            payload[key] = value
+        return payload
+
+    try:
+        payload = json.loads(
+            raw,
+            parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+            object_pairs_hook=reject_duplicate_keys,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise SecondaryEvidenceError(
+            "secondary_plan_mismatch",
+            "secondary source inventory is not strict UTF-8 JSON",
+        ) from exc
+    declares_format = isinstance(payload, dict) and "format" in payload
+    return declares_format, (
+        declares_format and payload.get("format") == INVENTORY_FORMAT
+    )
+
+
+def _expected_current_source_refs(loaded: LoadedRun) -> dict[str, ArtifactRef]:
+    source = loaded.run.source
+    plan_refs = [
+        item for item in loaded.run.artifacts if item.role == "secondary_source_plan"
+    ]
+    if isinstance(source, LocalSourceIdentity):
+        if plan_refs:
+            raise SecondaryEvidenceError(
+                "secondary_plan_mismatch",
+                "local run must not bind a secondary source plan",
+            )
+        source_refs = [
+            item for item in loaded.run.artifacts if item.role == "source_snapshot"
+        ]
+        if (
+            len(source_refs) != 1
+            or source_refs[0].role != "source_snapshot"
+            or source_refs[0].path != "source/source.json"
+            or source_refs[0].media_type != "application/json"
+        ):
+            raise SecondaryEvidenceError(
+                "secondary_plan_mismatch",
+                "local run does not retain its exact source snapshot ref",
+            )
+        expected_refs = {"source.json": source_refs[0]}
+    elif isinstance(source, ZoteroSourceIdentity):
+        fixed_source_refs = (
+            (
+                source.raw_discovery_bundle,
+                "raw_discovery_bundle",
+                "source/discovery.raw.json",
+            ),
+            (
+                source.normalized_source,
+                "normalized_source",
+                "source/source.json",
+            ),
+        )
+        for source_ref, role, path in fixed_source_refs:
+            if (
+                source_ref.role != role
+                or source_ref.path != path
+                or source_ref.media_type != "application/json"
+            ):
+                raise SecondaryEvidenceError(
+                    "secondary_plan_mismatch",
+                    "Zotero source snapshot ref does not use its fixed role/path/media type",
+                )
+            if [item for item in loaded.run.artifacts if item == source_ref] != [
+                source_ref
+            ]:
+                raise SecondaryEvidenceError(
+                    "secondary_plan_mismatch",
+                    "Zotero run does not retain its exact source snapshot refs",
+                )
+        expected_refs = {
+            "discovery.raw.json": source.raw_discovery_bundle,
+            "source.json": source.normalized_source,
+        }
+        if len(plan_refs) > 1:
+            raise SecondaryEvidenceError(
+                "secondary_plan_mismatch",
+                "Zotero run must bind at most one secondary source plan",
+            )
+        if plan_refs:
+            plan_ref = plan_refs[0]
+            if (
+                plan_ref.role != "secondary_source_plan"
+                or plan_ref.path != "source/secondary-plan.json"
+                or plan_ref.media_type != "application/json"
+            ):
+                raise SecondaryEvidenceError(
+                    "secondary_plan_mismatch",
+                    "secondary source plan ref does not use its fixed role/path/media type",
+                )
+            expected_refs["secondary-plan.json"] = plan_refs[0]
+    else:  # pragma: no cover - strict source discriminator
+        raise SecondaryEvidenceError(
+            "secondary_plan_mismatch",
+            "run source type cannot own secondary evidence",
+        )
+    return expected_refs
+
+
+def _validate_current_source_closure(
+    loaded: LoadedRun,
+    plan_binding: BoundSecondaryPlan | None,
+) -> dict[str, ArtifactRef]:
+    expected_refs = _expected_current_source_refs(loaded)
+    if ("secondary-plan.json" in expected_refs) != (plan_binding is not None):
+        raise SecondaryEvidenceError(
+            "secondary_plan_mismatch",
+            "source closure plan ref and semantic binding disagree",
+        )
+
+    run_dir = loaded.manifest_path.parent
+    owned_anchor = None
+    anchor = loaded.run_directory_anchor
+    try:
+        if anchor is None:
+            owned_anchor = open_directory_anchor(run_dir)
+            if (owned_anchor.device, owned_anchor.inode) != (
+                loaded.run_directory_device,
+                loaded.run_directory_inode,
+            ):
+                raise SecondaryEvidenceError(
+                    "secondary_plan_mismatch",
+                    "run directory changed before source closure validation",
+                )
+            anchor = owned_anchor
+        snapshot = snapshot_anchored_tree(
+            anchor,
+            run_dir / "source",
+            max_file_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            max_total_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes * 3,
+            max_members=3,
+            max_depth=1,
+        )
+    except SecondaryEvidenceError:
+        raise
+    except (FileNotFoundError, OSError, UnsafeStoragePathError, ValueError) as exc:
+        raise SecondaryEvidenceError(
+            "secondary_plan_mismatch",
+            f"source closure cannot be verified safely: {exc}",
+        ) from exc
+    finally:
+        if owned_anchor is not None:
+            owned_anchor.close()
+    observed = {entry.path: entry for entry in snapshot.entries}
+    if set(observed) != set(expected_refs) or any(
+        observed[name].kind != "file"
+        or observed[name].sha256 != ref.sha256
+        or observed[name].size_bytes != ref.size_bytes
+        for name, ref in expected_refs.items()
+    ):
+        raise SecondaryEvidenceError(
+            "secondary_plan_mismatch",
+            "run source directory is not its exact plan-bound closure",
+        )
+    return expected_refs
+
+
+def open_bound_source_closure_guard(loaded: LoadedRun) -> BoundSourceClosureGuard:
+    """Hold the exact source tree through a locked mutation finalization."""
+
+    expected_refs = _expected_current_source_refs(loaded)
+    run_anchor = loaded.run_directory_anchor
+    if run_anchor is None:
+        raise SecondaryEvidenceError(
+            "secondary_plan_mismatch",
+            "source closure guard requires a locked run directory anchor",
+        )
+    source_dir = loaded.manifest_path.parent / "source"
+    source_anchor = None
+    file_guards: list[HeldExactFileGuard] = []
+    current_name: str | None = None
+    try:
+        source_anchor = open_anchored_directory(run_anchor, source_dir)
+        for current_name, ref in expected_refs.items():
+            expected_bytes = read_anchored_bytes(
+                source_anchor,
+                source_dir / current_name,
+                expected_size=ref.size_bytes,
+                max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
+            )
+            if (
+                len(expected_bytes) != ref.size_bytes
+                or hashlib.sha256(expected_bytes).hexdigest() != ref.sha256
+            ):
+                raise SecondaryEvidenceError(
+                    (
+                        "secondary_plan_tampered"
+                        if current_name == "secondary-plan.json"
+                        else "secondary_plan_mismatch"
+                    ),
+                    "held source closure member differs from its run-bound ref",
+                )
+            owned_file = open_anchored_regular_file(
+                source_anchor,
+                source_dir / current_name,
+                expected_size=ref.size_bytes,
+            )
+            file_guard = HeldExactFileGuard(
+                anchor=source_anchor,
+                owned_file=owned_file,
+                expected_bytes=expected_bytes,
+                label=f"run source closure member {current_name}",
+            )
+            file_guards.append(file_guard)
+            file_guard.verify()
+        guard = BoundSourceClosureGuard(
+            anchor=source_anchor,
+            file_guards=tuple(file_guards),
+            expected_tree=tree_snapshot_from_hashes(
+                {
+                    name: (ref.size_bytes, ref.sha256)
+                    for name, ref in expected_refs.items()
+                }
+            ),
+        )
+        guard.verify()
+        plan_binding = load_bound_secondary_plan(loaded)
+        _validate_current_source_closure(loaded, plan_binding)
+        guard.verify()
+        return guard
+    except SecondaryEvidenceError:
+        for file_guard in file_guards:
+            file_guard.close()
+        if source_anchor is not None:
+            source_anchor.close()
+        raise
+    except (OSError, UnsafeStoragePathError, ValueError) as exc:
+        for file_guard in file_guards:
+            file_guard.close()
+        if source_anchor is not None:
+            source_anchor.close()
+        raise SecondaryEvidenceError(
+            (
+                "secondary_plan_tampered"
+                if current_name == "secondary-plan.json"
+                else "secondary_plan_mismatch"
+            ),
+            f"source closure cannot be held safely: {exc}",
+        ) from exc
+
+
+def validate_bound_secondary_evidence(
+    loaded: LoadedRun,
+    evidence: BoundEvidence,
+) -> None:
+    """Rebind immutable secondary evidence to the current run source closure."""
+
+    try:
+        plan_binding = load_bound_secondary_plan(loaded)
+    except SecondaryEvidenceError:
+        raise
+    _validate_current_source_closure(loaded, plan_binding)
+
+    inventory = evidence.artifacts_by_role.get("secondary_sources", ())
+    if len(inventory) != 1:
+        raise SecondaryEvidenceError(
+            "secondary_plan_mismatch",
+            "evidence must bind exactly one secondary source inventory",
+        )
+    declares_inventory_format, versioned_inventory = (
+        _secondary_inventory_format_state(inventory[0].raw_bytes)
+    )
+    evidence_dir = evidence.manifest_path.parent
+    reserved_roles = {"secondary_plan", "secondary_capture", "secondary_context"}
+    reserved_paths = {"secondary-plan.json", "secondary_context.md"}
+    versioned_members = []
+    for artifact in evidence.manifest.files:
+        path = loaded.manifest_path.parent / artifact.path
+        try:
+            relative = path.relative_to(evidence_dir).as_posix()
+        except ValueError as exc:  # pragma: no cover - evidence loader already rejects it
+            raise SecondaryEvidenceError(
+                "secondary_plan_mismatch",
+                "secondary evidence member escapes its immutable bundle",
+            ) from exc
+        if (
+            artifact.role in reserved_roles
+            or relative in reserved_paths
+            or relative.startswith("secondary/")
+        ):
+            versioned_members.append((artifact, relative))
+
+    if plan_binding is None:
+        if declares_inventory_format or versioned_members:
+            raise SecondaryEvidenceError(
+                "secondary_plan_mismatch",
+                "no-plan run contains versioned secondary evidence members",
+            )
+        return
+
+    if not isinstance(loaded.run.source, ZoteroSourceIdentity):  # pragma: no cover
+        raise SecondaryEvidenceError(
+            "secondary_plan_mismatch",
+            "only Zotero evidence may bind a secondary source plan",
+        )
+    plan_members = evidence.artifacts_by_role.get("secondary_plan", ())
+    if len(plan_members) != 1 or not versioned_inventory:
+        raise SecondaryEvidenceError(
+            "secondary_plan_mismatch",
+            "plan-bound evidence lacks its exact plan snapshot or inventory",
+        )
+    member = plan_members[0]
+    expected_path = evidence_dir / "secondary-plan.json"
+    if (
+        member.path != expected_path
+        or member.ref.path
+        != expected_path.relative_to(loaded.manifest_path.parent).as_posix()
+        or member.ref.media_type != "application/json"
+        or member.raw_bytes != plan_binding.raw_bytes
+        or member.ref.sha256 != plan_binding.plan_sha256
+        or member.ref.size_bytes != len(plan_binding.raw_bytes)
+    ):
+        raise SecondaryEvidenceError(
+            "secondary_plan_mismatch",
+            "evidence secondary plan differs from the current run-bound source plan",
+        )
 
 
 def _validate_capture(
@@ -697,6 +1079,7 @@ def build_secondary_evidence_files(
 
 
 __all__ = [
+    "BoundSourceClosureGuard",
     "BoundSecondaryInputs",
     "BoundSecondaryPlan",
     "CAPTURE_TOTAL_TEXT_MAX_CHARS",
@@ -711,4 +1094,6 @@ __all__ = [
     "build_secondary_evidence_files",
     "load_bound_secondary_plan",
     "load_secondary_inputs",
+    "open_bound_source_closure_guard",
+    "validate_bound_secondary_evidence",
 ]

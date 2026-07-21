@@ -37,6 +37,11 @@ from paper_reader.secondary_projection import (
     SecondaryProjectionError,
     resolve_secondary_render_summary,
 )
+from paper_reader.secondary_evidence import (
+    BoundSourceClosureGuard,
+    SecondaryEvidenceError,
+    open_bound_source_closure_guard,
+)
 from paper_reader.storage import (
     HeldExactTreeGuard,
     OwnedPublishedTree,
@@ -494,28 +499,56 @@ def seal_review_run(run_path: Path) -> SealedReview:
 
 
 def _seal_review_run_locked(run_path: Path, loaded: LoadedRun) -> SealedReview:
-    validation = validate_review_run(run_path, loaded_run=loaded)
-    if validation.blockers:
-        raise ReviewSealError(
-            "review_blocked",
-            "review validation is blocked",
-            blockers=validation.blockers,
-            data={"run_id": validation.loaded_run.run.run_id},
-        )
-    if (
-        validation.summary is None
-        or validation.review is None
-        or validation.evidence is None
-        or validation.summary_bytes is None
-        or validation.review_bytes is None
-        or validation.summary_sha256 is None
-        or validation.review_sha256 is None
-        or validation.rendered_note_bytes is None
-        or validation.rendered_html_bytes is None
-        or validation.rendered_note_sha256 is None
-    ):
-        raise ReviewSealError("review_blocked", "validated review inputs are incomplete")
+    try:
+        source_guard = open_bound_source_closure_guard(loaded)
+    except SecondaryEvidenceError as exc:
+        raise ReviewSealError(exc.code, str(exc)) from exc
+    with source_guard:
+        try:
+            source_guard.verify()
+        except UnsafeStoragePathError as exc:
+            raise ReviewSealError(
+                "secondary_plan_mismatch",
+                f"source closure changed before review sealing: {exc}",
+            ) from exc
+        validation = validate_review_run(run_path, loaded_run=loaded)
+        if validation.blockers:
+            raise ReviewSealError(
+                "review_blocked",
+                "review validation is blocked",
+                blockers=validation.blockers,
+                data={"run_id": validation.loaded_run.run.run_id},
+            )
+        if (
+            validation.summary is None
+            or validation.review is None
+            or validation.evidence is None
+            or validation.summary_bytes is None
+            or validation.review_bytes is None
+            or validation.summary_sha256 is None
+            or validation.review_sha256 is None
+            or validation.rendered_note_bytes is None
+            or validation.rendered_html_bytes is None
+            or validation.rendered_note_sha256 is None
+        ):
+            raise ReviewSealError(
+                "review_blocked",
+                "validated review inputs are incomplete",
+            )
+        try:
+            source_guard.verify()
+        except UnsafeStoragePathError as exc:
+            raise ReviewSealError(
+                "secondary_plan_mismatch",
+                f"source closure changed during review validation: {exc}",
+            ) from exc
+        return _seal_validated_review(validation, source_guard)
 
+
+def _seal_validated_review(
+    validation: ReviewValidation,
+    source_guard: BoundSourceClosureGuard,
+) -> SealedReview:
     package_id = new_random_id("review-package")
     package_dir = validation.run_dir / "reviews" / package_id
     staging = validation.run_dir / f".{package_id}.{new_uuid()}.staging"
@@ -644,6 +677,7 @@ def _seal_review_run_locked(run_path: Path, loaded: LoadedRun) -> SealedReview:
             }
         )
         try:
+            source_guard.verify()
             published = atomic_publish_tree(
                 staging,
                 package_dir,
@@ -675,9 +709,10 @@ def _seal_review_run_locked(run_path: Path, loaded: LoadedRun) -> SealedReview:
                 cas_update_run(
                     validation.loaded_run,
                     updated_run,
-                    finalization_guards=(published_guard,),
+                    finalization_guards=(published_guard, source_guard),
                 )
                 published_guard.verify()
+                source_guard.verify()
         except Exception as exc:
             raise ReviewSealError(
                 "review_status_update_failed",

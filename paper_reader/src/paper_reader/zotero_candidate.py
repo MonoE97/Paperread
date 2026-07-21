@@ -37,9 +37,15 @@ from paper_reader.note_hash import canonicalize_note_html_for_hash, note_html_sh
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
+from paper_reader.secondary_evidence import (
+    BoundSourceClosureGuard,
+    SecondaryEvidenceError,
+    open_bound_source_closure_guard,
+)
 from paper_reader.storage import (
     HeldExactTreeGuard,
     OwnedPublishedTree,
+    UnsafeStoragePathError,
     atomic_publish_tree,
     atomic_write_bytes,
     atomic_write_json,
@@ -389,6 +395,39 @@ def _build_zotero_candidate_locked(
     if not isinstance(source, ZoteroSourceIdentity):
         raise LocalPublicationError("not_zotero_candidate", "Zotero candidate requires a Zotero run")
 
+    # Preserve the established source-snapshot error boundary before the
+    # broader held closure guard adds finalization protection.
+    verify_local_source(source.attachment)
+    _source_snapshot_bytes(loaded, source)
+    try:
+        source_guard = open_bound_source_closure_guard(loaded)
+    except SecondaryEvidenceError as exc:
+        raise LocalPublicationError(exc.code, str(exc)) from exc
+    with source_guard:
+        try:
+            source_guard.verify()
+        except UnsafeStoragePathError as exc:
+            raise LocalPublicationError(
+                "secondary_plan_mismatch",
+                f"source closure changed before candidate build: {exc}",
+            ) from exc
+        return _build_zotero_candidate_with_source_guard(
+            loaded,
+            provider,
+            source_guard,
+        )
+
+
+def _build_zotero_candidate_with_source_guard(
+    loaded: LoadedRun,
+    provider: ZoteroReadProvider,
+    source_guard: BoundSourceClosureGuard,
+) -> BuiltZoteroCandidate:
+    run_dir = loaded.manifest_path.parent
+    source = loaded.run.source
+    if not isinstance(source, ZoteroSourceIdentity):  # pragma: no cover
+        raise LocalPublicationError("not_zotero_candidate", "Zotero candidate requires a Zotero run")
+
     verify_local_source(source.attachment)
     raw_source_bytes, normalized_source_bytes = _source_snapshot_bytes(loaded, source)
     package, package_path, package_bytes = _latest_review_package(loaded)
@@ -398,10 +437,24 @@ def _build_zotero_candidate_locked(
     except EvidenceManifestError as exc:
         raise LocalPublicationError(exc.code, str(exc)) from exc
 
+    try:
+        source_guard.verify()
+    except UnsafeStoragePathError as exc:
+        raise LocalPublicationError(
+            "secondary_plan_mismatch",
+            f"source closure changed before Zotero candidate preflight: {exc}",
+        ) from exc
     parent, children, parent_bytes, children_bytes = _captured_live_snapshots(
         provider,
         parent_key=source.item_key,
     )
+    try:
+        source_guard.verify()
+    except UnsafeStoragePathError as exc:
+        raise LocalPublicationError(
+            "secondary_plan_mismatch",
+            f"source closure changed during Zotero candidate preflight: {exc}",
+        ) from exc
     try:
         observed_parent_fingerprint = parent_fingerprint(parent)
     except Exception as exc:
@@ -588,6 +641,7 @@ def _build_zotero_candidate_locked(
             {**files, "candidate.json": candidate_bytes}
         )
         try:
+            source_guard.verify()
             published = atomic_publish_tree(
                 staging,
                 candidate_dir,
@@ -617,9 +671,10 @@ def _build_zotero_candidate_locked(
                 cas_update_run(
                     loaded,
                     updated_run,
-                    finalization_guards=(published_guard,),
+                    finalization_guards=(published_guard, source_guard),
                 )
                 published_guard.verify()
+                source_guard.verify()
         except Exception as exc:
             raise LocalPublicationError(
                 "candidate_status_update_failed",

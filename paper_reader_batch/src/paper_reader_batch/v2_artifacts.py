@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 import hashlib
 from html import unescape
@@ -10,7 +10,7 @@ import os
 from pathlib import Path, PurePosixPath
 import stat
 import tomllib
-from typing import Iterator
+from typing import Callable, Iterator
 
 from paper_reader_batch.v2_contracts import (
     ArtifactRef,
@@ -31,12 +31,15 @@ from paper_reader_batch.v2_json import (
     _bounded_sorted_names,
     canonical_json_bytes,
     canonical_sha256,
+    held_exact_sibling_files,
     list_directory,
+    locked_file,
     normalized_absolute_path,
     open_directory_fd,
     read_bytes,
     read_relative_bytes,
     sha256_bytes,
+    validate_locked_path,
     walk_relative_regular_files,
 )
 from paper_reader_batch.v2_manifest import _pdf_source
@@ -51,6 +54,8 @@ _ARTIFACT_READ_LIMIT: ContextVar[int] = ContextVar(
     default=MAX_JSON_ARTIFACT_BYTES,
 )
 _MAX_FOREIGN_BUNDLE_MEMBERS = 100_000
+_MAX_HELD_COMMIT_CLOSURE_FILES = 256
+_MAX_HELD_COMMIT_CLOSURE_DIRECTORIES = 256
 _REQUIRED_REVIEW_PROOFS = frozenset(
     {
         "summary_schema",
@@ -113,6 +118,178 @@ class _OpaqueRecord:
 
     def as_dict(self) -> dict[str, object]:
         return self._payload
+
+
+class _ArtifactCommitClosure:
+    """Hold every consumed file and closed-world directory in one Reader run."""
+
+    def __init__(self, run_root: Path) -> None:
+        self.run_root = normalized_absolute_path(run_root)
+        self.files: dict[Path, bytes] = {}
+        self.closed_directories: dict[Path, frozenset[str]] = {}
+        self.frozen = False
+
+    def add(self, path: Path, raw: bytes) -> None:
+        normalized = normalized_absolute_path(path)
+        if not normalized.is_relative_to(self.run_root):
+            return
+        existing = self.files.get(normalized)
+        if existing is not None:
+            if existing != raw:
+                raise _invalid(
+                    "source_binding_mismatch",
+                    f"foreign artifact closure changed while read: {normalized}",
+                )
+            return
+        if self.frozen:
+                raise _invalid(
+                    "source_binding_mismatch",
+                    f"foreign artifact closure expanded after validation: {normalized}",
+                )
+        if len(self.files) >= _MAX_HELD_COMMIT_CLOSURE_FILES:
+                raise _invalid(
+                    "resource_limit",
+                    "foreign artifact commit closure has too many consumed files",
+                )
+        self.files[normalized] = raw
+
+    def close_tree(
+        self,
+        root: Path,
+        directory_memberships: dict[str, frozenset[str]],
+    ) -> None:
+        normalized_root = normalized_absolute_path(root)
+        if not normalized_root.is_relative_to(self.run_root):
+            return
+        normalized_memberships: dict[Path, frozenset[str]] = {}
+        for relative_value, names in directory_memberships.items():
+            relative = PurePosixPath(relative_value or ".")
+            if (
+                relative.is_absolute()
+                or relative_value not in {"", relative.as_posix()}
+                or any(part in {"", ".."} for part in relative.parts)
+            ):
+                raise _invalid(
+                    "artifact_closed_world_mismatch",
+                    "foreign artifact walker returned a noncanonical directory",
+                )
+            directory = (
+                normalized_root
+                if relative_value == ""
+                else normalized_root.joinpath(*relative.parts)
+            )
+            normalized_memberships[directory] = names
+        new_directories = set(normalized_memberships).difference(
+            self.closed_directories
+        )
+        if (
+            len(self.closed_directories) + len(new_directories)
+            > _MAX_HELD_COMMIT_CLOSURE_DIRECTORIES
+        ):
+            raise _invalid(
+                "resource_limit",
+                "foreign artifact commit closure has too many directories",
+            )
+        for directory, names in sorted(
+            normalized_memberships.items(),
+            key=lambda item: str(item[0]),
+        ):
+            existing = self.closed_directories.get(directory)
+            if existing is not None:
+                if existing != names:
+                    raise _invalid(
+                        "artifact_closed_world_mismatch",
+                        f"foreign artifact directory changed while read: {directory}",
+                    )
+                continue
+            if self.frozen:
+                raise _invalid(
+                    "artifact_closed_world_mismatch",
+                    f"foreign artifact directory closure expanded after validation: {directory}",
+                )
+            self.closed_directories[directory] = names
+
+    def freeze(self) -> None:
+        if self.run_root / "run.json" not in self.files:
+            raise _invalid(
+                "source_binding_mismatch",
+                "foreign source commit closure did not bind run.json",
+            )
+        if not self.closed_directories:
+            raise _invalid(
+                "artifact_closed_world_mismatch",
+                "foreign artifact commit closure did not bind any closed-world directory",
+            )
+        self.frozen = True
+
+    @contextmanager
+    def hold(self) -> Iterator[Callable[[], None]]:
+        if not self.frozen:
+            raise RuntimeError("foreign source commit closure must be frozen before hold")
+        by_parent: dict[Path, dict[str, bytes]] = {}
+        for path, raw in self.files.items():
+            by_parent.setdefault(path.parent, {})[path.name] = raw
+        with ExitStack() as stack:
+            guards = tuple(
+                stack.enter_context(
+                    held_exact_sibling_files(
+                        parent,
+                        expected,
+                        require_private=False,
+                        exact_membership=False,
+                    )
+                )
+                for parent, expected in sorted(
+                    by_parent.items(),
+                    key=lambda item: str(item[0]),
+                )
+            )
+            held_directories = tuple(
+                (
+                    directory,
+                    names,
+                    stack.enter_context(open_directory_fd(directory, create=False))[0],
+                )
+                for directory, names in sorted(
+                    self.closed_directories.items(),
+                    key=lambda item: str(item[0]),
+                )
+            )
+
+            def verify() -> None:
+                for guard in guards:
+                    guard()
+                for directory, expected_names, descriptor in held_directories:
+                    held = os.fstat(descriptor)
+                    named = os.stat(directory, follow_symlinks=False)
+                    if (
+                        not stat.S_ISDIR(held.st_mode)
+                        or not stat.S_ISDIR(named.st_mode)
+                        or (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino)
+                        or frozenset(
+                            _bounded_sorted_names(
+                                descriptor,
+                                max_entries=_MAX_FOREIGN_BUNDLE_MEMBERS,
+                                label="held foreign artifact directory",
+                            )
+                        )
+                        != expected_names
+                    ):
+                        raise _invalid(
+                            "artifact_closed_world_mismatch",
+                            f"held foreign artifact directory changed: {directory}",
+                        )
+                for guard in guards:
+                    guard()
+
+            verify()
+            yield verify
+
+
+_ACTIVE_ARTIFACT_COMMIT_CLOSURE = ContextVar(
+    "paper_reader_batch_artifact_commit_closure",
+    default=None,
+)
 
 
 def _opaque(value: object):
@@ -461,8 +638,13 @@ def _read_artifact_bytes(path: Path, *, code: str) -> bytes:
     normalized = normalized_absolute_path(path)
     if anchor is not None and normalized.is_relative_to(anchor[0]):
         relative = normalized.relative_to(anchor[0]).as_posix()
-        return read_relative_bytes(anchor[1], relative, code=code, max_bytes=max_bytes)
-    return read_bytes(path, code=code, max_bytes=max_bytes)
+        raw = read_relative_bytes(anchor[1], relative, code=code, max_bytes=max_bytes)
+    else:
+        raw = read_bytes(path, code=code, max_bytes=max_bytes)
+    collector = _ACTIVE_ARTIFACT_COMMIT_CLOSURE.get()
+    if collector is not None:
+        collector.add(normalized, raw)
+    return raw
 
 
 def _read_model(
@@ -676,10 +858,15 @@ def _validate_local_run_target(
 def _walk_regular_files(root: Path) -> set[str]:
     anchor = _RUN_ARTIFACT_ANCHOR.get()
     normalized_root = normalized_absolute_path(root)
+    directory_memberships: dict[str, frozenset[str]] = {}
     if anchor is not None and normalized_root.is_relative_to(anchor[0]):
         relative_root = normalized_root.relative_to(anchor[0]).as_posix()
         try:
-            return walk_relative_regular_files(anchor[1], relative_root)
+            found = walk_relative_regular_files(
+                anchor[1],
+                relative_root,
+                directory_memberships=directory_memberships,
+            )
         except BatchRuntimeError as exc:
             if exc.code == "resource_limit":
                 raise
@@ -688,49 +875,162 @@ def _walk_regular_files(root: Path) -> set[str]:
                 f"foreign bundle cannot be walked through its held run directory: {root}",
                 exc,
             ) from exc
-    found: set[str] = set()
-    member_count = 0
+    else:
+        found = set()
+        member_count = 0
 
-    def walk(directory: Path, prefix: PurePosixPath) -> None:
-        nonlocal member_count
-        with open_directory_fd(directory, create=False) as (descriptor, _normalized):
-            for name in _bounded_sorted_names(
-                descriptor,
-                max_entries=_MAX_FOREIGN_BUNDLE_MEMBERS - member_count,
-                label="foreign artifact bundle",
-            ):
-                member_count += 1
-                if member_count > _MAX_FOREIGN_BUNDLE_MEMBERS:
-                    raise _invalid(
-                        "resource_limit",
-                        "foreign artifact bundle has too many members",
+        def walk(directory: Path, prefix: PurePosixPath) -> None:
+            nonlocal member_count
+            with open_directory_fd(directory, create=False) as (descriptor, _normalized):
+                before_names = tuple(
+                    _bounded_sorted_names(
+                        descriptor,
+                        max_entries=_MAX_FOREIGN_BUNDLE_MEMBERS - member_count,
+                        label="foreign artifact bundle",
                     )
-                metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-                relative = prefix / name
-                if stat.S_ISLNK(metadata.st_mode):
-                    raise _invalid("artifact_closed_world_mismatch", f"foreign bundle contains symlink: {relative}")
-                if stat.S_ISDIR(metadata.st_mode):
-                    walk(directory / name, relative)
-                elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
-                    found.add(relative.as_posix())
-                else:
-                    raise _invalid("artifact_closed_world_mismatch", f"foreign bundle entry is unsafe: {relative}")
+                )
+                for name in before_names:
+                    member_count += 1
+                    if member_count > _MAX_FOREIGN_BUNDLE_MEMBERS:
+                        raise _invalid(
+                            "resource_limit",
+                            "foreign artifact bundle has too many members",
+                        )
+                    metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    relative = prefix / name
+                    if stat.S_ISLNK(metadata.st_mode):
+                        raise _invalid("artifact_closed_world_mismatch", f"foreign bundle contains symlink: {relative}")
+                    if stat.S_ISDIR(metadata.st_mode):
+                        walk(directory / name, relative)
+                    elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                        found.add(relative.as_posix())
+                    else:
+                        raise _invalid("artifact_closed_world_mismatch", f"foreign bundle entry is unsafe: {relative}")
+                if tuple(
+                    _bounded_sorted_names(
+                        descriptor,
+                        max_entries=len(before_names),
+                        label="foreign artifact bundle",
+                    )
+                ) != before_names:
+                    raise _invalid(
+                        "artifact_closed_world_mismatch",
+                        f"foreign bundle membership changed while walking: {directory}",
+                    )
+                directory_memberships[
+                    "" if not prefix.parts else prefix.as_posix()
+                ] = frozenset(before_names)
 
-    walk(root, PurePosixPath())
+        walk(root, PurePosixPath())
+    collector = _ACTIVE_ARTIFACT_COMMIT_CLOSURE.get()
+    if collector is not None:
+        collector.close_tree(normalized_root, directory_memberships)
     return found
 
 
-def _validate_source_directory(run_dir: Path, source: _OpaqueRecord) -> None:
-    expected = (
-        {"source.json"}
-        if source.get("source_type") == "local_pdf"
-        else {"discovery.raw.json", "source.json"}
-    )
+def _validate_source_directory(
+    run_dir: Path,
+    source: _OpaqueRecord,
+    run_artifacts: tuple[object, ...],
+) -> tuple[_OpaqueRecord, bytes] | None:
+    source_type = source.get("source_type")
+    plan_refs = [
+        _require_inner_ref(ref, code="source_binding_mismatch")
+        for ref in run_artifacts
+        if _require_object(
+            ref,
+            code="source_binding_mismatch",
+            label="run artifact",
+        ).get("role")
+        == "secondary_source_plan"
+    ]
+    if source_type == "local_pdf":
+        if plan_refs:
+            raise _invalid(
+                "source_binding_mismatch",
+                "local paper_reader source must not bind a secondary source plan",
+            )
+        expected = {"source.json"}
+        plan_binding = None
+    elif source_type == "zotero":
+        if len(plan_refs) > 1:
+            raise _invalid(
+                "source_binding_mismatch",
+                "Zotero paper_reader run must bind at most one secondary source plan",
+            )
+        expected = {"discovery.raw.json", "source.json"}
+        plan_binding = None
+        if plan_refs:
+            plan_ref = plan_refs[0]
+            _require_ref_shape(
+                plan_ref,
+                role="secondary_source_plan",
+                path="source/secondary-plan.json",
+                media_type="application/json",
+            )
+            if plan_ref.size_bytes > MAX_JSON_ARTIFACT_BYTES:
+                raise _invalid(
+                    "resource_limit",
+                    "secondary source plan exceeds the JSON artifact limit",
+                )
+            try:
+                plan_path, plan_bytes, _model = _read_inner(
+                    run_dir,
+                    plan_ref,
+                    canonical_json=True,
+                    code="source_binding_mismatch",
+                )
+            except BatchRuntimeError as exc:
+                if exc.code == "resource_limit":
+                    raise
+                raise _invalid(
+                    "source_binding_mismatch",
+                    "secondary source plan failed exact ref verification",
+                    exc,
+                ) from exc
+            if plan_path != run_dir / "source" / "secondary-plan.json":
+                raise _invalid(
+                    "source_binding_mismatch",
+                    "secondary source plan path does not match its fixed source member",
+                )
+            expected.add("secondary-plan.json")
+            plan_binding = (plan_ref, plan_bytes)
+    else:
+        raise _invalid(
+            "source_binding_mismatch",
+            "paper_reader source type is unsupported",
+        )
     if _walk_regular_files(run_dir / "source") != expected:
         raise _invalid(
             "artifact_closed_world_mismatch",
             "paper_reader source directory is not its exact immutable closure",
         )
+    if plan_binding is not None:
+        plan_ref, plan_bytes = plan_binding
+        try:
+            rechecked_path, rechecked_bytes, _model = _read_inner(
+                run_dir,
+                plan_ref,
+                canonical_json=True,
+                code="source_binding_mismatch",
+            )
+        except BatchRuntimeError as exc:
+            if exc.code == "resource_limit":
+                raise
+            raise _invalid(
+                "source_binding_mismatch",
+                "secondary source plan changed during source closure validation",
+                exc,
+            ) from exc
+        if (
+            rechecked_path != run_dir / "source" / "secondary-plan.json"
+            or rechecked_bytes != plan_bytes
+        ):
+            raise _invalid(
+                "source_binding_mismatch",
+                "secondary source plan changed during source closure validation",
+            )
+    return plan_binding
 
 
 def _validate_evidence(
@@ -738,6 +1038,7 @@ def _validate_evidence(
     evidence_path: Path,
     evidence: _OpaqueRecord,
     source_sha256: str,
+    secondary_plan_binding: tuple[_OpaqueRecord, bytes] | None,
 ) -> None:
     if not evidence.complete or evidence.preview_pages is not None:
         raise _invalid("evidence_incomplete", "batch accepts only complete, non-preview evidence")
@@ -745,13 +1046,22 @@ def _validate_evidence(
         raise _invalid("evidence_binding_mismatch", "evidence source digest differs from paper_reader source")
     expected_members: set[str] = set()
     evidence_dir = evidence_path.parent
-    for raw_ref in _require_sequence(
-        evidence.files,
-        code="evidence_binding_mismatch",
-        label="evidence files",
-    ):
-        ref = _require_inner_ref(raw_ref, code="evidence_binding_mismatch")
-        member_path, _raw, _model = _read_inner(run_dir, ref)
+    evidence_refs = tuple(
+        _require_inner_ref(raw_ref, code="evidence_binding_mismatch")
+        for raw_ref in _require_sequence(
+            evidence.files,
+            code="evidence_binding_mismatch",
+            label="evidence files",
+        )
+    )
+    secondary_plan_members: list[tuple[_OpaqueRecord, Path, bytes]] = []
+    secondary_inventory_members: list[tuple[_OpaqueRecord, str, bytes]] = []
+    reserved_secondary_paths = {
+        "secondary-plan.json",
+        "secondary_context.md",
+    }
+    for ref in evidence_refs:
+        member_path, raw, _model = _read_inner(run_dir, ref)
         try:
             relative = member_path.relative_to(evidence_dir).as_posix()
         except ValueError as exc:
@@ -759,10 +1069,136 @@ def _validate_evidence(
         if relative == "evidence.json" or relative in expected_members:
             raise _invalid("evidence_binding_mismatch", "evidence manifest has duplicate/recursive member")
         expected_members.add(relative)
+        if ref.role == "secondary_plan":
+            secondary_plan_members.append((ref, member_path, raw))
+        if ref.role == "secondary_sources":
+            secondary_inventory_members.append((ref, relative, raw))
+        if secondary_plan_binding is None and (
+            ref.role in {"secondary_plan", "secondary_capture", "secondary_context"}
+            or relative in reserved_secondary_paths
+            or relative.startswith("secondary/")
+        ):
+            raise _invalid(
+                "evidence_binding_mismatch",
+                "no-plan paper_reader closure contains versioned secondary evidence",
+            )
+    if len(secondary_inventory_members) != 1:
+        raise _invalid(
+            "evidence_binding_mismatch",
+            "evidence must bind exactly one secondary source inventory",
+        )
+    inventory_ref, inventory_relative, inventory_raw = secondary_inventory_members[0]
+    inventory_payload = _json_no_nonfinite(
+        inventory_raw,
+        code="evidence_binding_mismatch",
+    )
+    if (
+        inventory_relative != "secondary_sources.json"
+        or inventory_ref.media_type != "application/json"
+        or canonical_json_bytes(inventory_payload) != inventory_raw
+    ):
+        raise _invalid(
+            "evidence_binding_mismatch",
+            "secondary source inventory ref/path/bytes are not canonical",
+        )
+    declares_inventory_format = (
+        isinstance(inventory_payload, dict) and "format" in inventory_payload
+    )
+    versioned_inventory = declares_inventory_format and (
+        inventory_payload.get("format")
+        == "paper_reader.secondary-sources.v2-internal"
+    )
+    if secondary_plan_binding is None and declares_inventory_format:
+        raise _invalid(
+            "evidence_binding_mismatch",
+            "no-plan paper_reader closure contains a versioned secondary inventory",
+        )
+    if secondary_plan_binding is not None:
+        if not versioned_inventory:
+            raise _invalid(
+                "evidence_binding_mismatch",
+                "plan-bound evidence lacks its versioned secondary inventory",
+            )
+        if len(secondary_plan_members) != 1:
+            raise _invalid(
+                "evidence_binding_mismatch",
+                "plan-bound evidence must bind exactly one secondary plan member",
+            )
+        source_plan_ref, source_plan_bytes = secondary_plan_binding
+        evidence_plan_ref, evidence_plan_path, evidence_plan_bytes = secondary_plan_members[0]
+        expected_plan_path = evidence_dir / "secondary-plan.json"
+        expected_plan_relative = expected_plan_path.relative_to(run_dir).as_posix()
+        if (
+            evidence_plan_ref.role != "secondary_plan"
+            or evidence_plan_ref.path != expected_plan_relative
+            or evidence_plan_ref.media_type != "application/json"
+        ):
+            raise _invalid(
+                "evidence_binding_mismatch",
+                "evidence secondary plan ref has the wrong role, path, or media type",
+            )
+        if (
+            evidence_plan_path != expected_plan_path
+            or evidence_plan_bytes != source_plan_bytes
+            or evidence_plan_ref.sha256 != source_plan_ref.sha256
+            or evidence_plan_ref.size_bytes != source_plan_ref.size_bytes
+        ):
+            raise _invalid(
+                "evidence_binding_mismatch",
+                "evidence secondary plan differs from the run-bound source plan",
+            )
     actual = _walk_regular_files(evidence_dir)
     actual.discard("evidence.json")
     if actual != expected_members:
         raise _invalid("artifact_closed_world_mismatch", "evidence bundle membership differs from manifest")
+    _inventory_path, rechecked_inventory_raw, _inventory_model = _read_inner(
+        run_dir,
+        inventory_ref,
+        canonical_json=True,
+        code="evidence_binding_mismatch",
+    )
+    if rechecked_inventory_raw != inventory_raw:
+        raise _invalid(
+            "evidence_binding_mismatch",
+            "secondary source inventory changed during evidence closure validation",
+        )
+    if secondary_plan_binding is not None:
+        source_plan_ref, source_plan_bytes = secondary_plan_binding
+        try:
+            _source_plan_path, rechecked_source_plan, _source_plan_model = _read_inner(
+                run_dir,
+                source_plan_ref,
+                canonical_json=True,
+                code="source_binding_mismatch",
+            )
+        except BatchRuntimeError as exc:
+            if exc.code == "resource_limit":
+                raise
+            raise _invalid(
+                "source_binding_mismatch",
+                "secondary source plan changed during evidence closure validation",
+                exc,
+            ) from exc
+        (
+            evidence_plan_ref,
+            _evidence_plan_path,
+            original_evidence_plan,
+        ) = secondary_plan_members[0]
+        _plan_path, rechecked_evidence_plan, _plan_model = _read_inner(
+            run_dir,
+            evidence_plan_ref,
+            canonical_json=True,
+            code="evidence_binding_mismatch",
+        )
+        if (
+            rechecked_source_plan != source_plan_bytes
+            or rechecked_evidence_plan != original_evidence_plan
+            or rechecked_evidence_plan != rechecked_source_plan
+        ):
+            raise _invalid(
+                "evidence_binding_mismatch",
+                "source/evidence secondary plan changed during final closure validation",
+            )
 
 
 def _canonical_snapshot(
@@ -831,6 +1267,7 @@ def _validate_review_and_candidate(
     run: _OpaqueRecord,
     review_ref: ArtifactRef,
     candidate_ref: ArtifactRef,
+    secondary_plan_binding: tuple[_OpaqueRecord, bytes] | None,
     refingerprint: bool = True,
 ):
     run_dir = run_path.parent
@@ -1145,6 +1582,30 @@ def _validate_review_and_candidate(
     if [ref for ref in current_run_artifacts if ref == evidence_refs[0]] != [evidence_refs[0]]:
         raise _invalid("evidence_binding_mismatch", "current run does not retain canonical evidence")
 
+    run_snapshot_plan_refs = [
+        _require_inner_ref(ref, code="source_binding_mismatch")
+        for ref in run_snapshot_artifacts
+        if _require_object(
+            ref,
+            code="source_binding_mismatch",
+            label="candidate run snapshot artifact",
+        ).get("role")
+        == "secondary_source_plan"
+    ]
+    if secondary_plan_binding is None:
+        if run_snapshot_plan_refs:
+            raise _invalid(
+                "source_binding_mismatch",
+                "candidate run snapshot adds a secondary plan absent from the current run",
+            )
+    else:
+        source_plan_ref, _source_plan_bytes = secondary_plan_binding
+        if run_snapshot_plan_refs != [source_plan_ref]:
+            raise _invalid(
+                "source_binding_mismatch",
+                "candidate run snapshot does not retain the current secondary plan ref",
+            )
+
     source_sha = (
         _require_sha256(source.get("sha256"), code="source_binding_mismatch", label="source digest")
         if source_type == "local_pdf"
@@ -1158,7 +1619,13 @@ def _validate_review_and_candidate(
             label="attachment digest",
         )
     )
-    _validate_evidence(run_dir, evidence_path, canonical_evidence, source_sha)
+    _validate_evidence(
+        run_dir,
+        evidence_path,
+        canonical_evidence,
+        source_sha,
+        secondary_plan_binding,
+    )
     if run.get("source") != source:
         raise _invalid("candidate_binding_mismatch", "current run source differs from candidate")
     if refingerprint and (
@@ -1484,6 +1951,117 @@ def validate_worker_result_artifacts(
         )
 
 
+@contextmanager
+def _locked_foreign_reader_run(
+    run_root: Path,
+    *,
+    code: str,
+) -> Iterator[int]:
+    with ExitStack() as stack:
+        try:
+            descriptor = stack.enter_context(
+                locked_file(
+                    run_root / ".run.lock",
+                    create=False,
+                    guard_parent_replacement=False,
+                )
+            )
+        except BatchRuntimeError as exc:
+            if exc.code == "lease_secret_missing":
+                raise _invalid(
+                    code,
+                    "paper_reader run lock is missing before journal commit",
+                    exc,
+                ) from exc
+            raise
+        yield descriptor
+
+
+@contextmanager
+def worker_result_artifact_commit_guard(
+    manifest: BatchManifest,
+    result: WorkerResult,
+    *,
+    prepared_local_result: LocalPrepareResult | None = None,
+) -> Iterator[Callable[[], None]]:
+    """Hold the foreign run root and revalidate its closure through journal commit."""
+
+    if result.status != "succeeded" or result.paper_reader_run is None:
+        def validate_failure() -> None:
+            validate_worker_result_artifacts(
+                manifest,
+                result,
+                prepared_local_result=prepared_local_result,
+            )
+
+        validate_failure()
+        yield validate_failure
+        return
+    run_path = _require_normalized_absolute_path(
+        result.paper_reader_run.path,
+        code="source_binding_mismatch",
+        label="paper_reader worker run",
+    )
+    if run_path.name != "run.json":
+        raise _invalid(
+            "source_binding_mismatch",
+            "paper_reader worker run path must end in run.json",
+        )
+    expected_identity = (
+        prepared_local_result.paper_reader_run_directory
+        if prepared_local_result is not None
+        else None
+    )
+    with _locked_foreign_reader_run(
+        run_path.parent,
+        code="source_binding_mismatch",
+    ) as reader_lock_descriptor, open_directory_fd(
+        run_path.parent,
+        create=False,
+    ) as (descriptor, bound_run_dir):
+        validate_locked_path(run_path.parent / ".run.lock", reader_lock_descriptor)
+        metadata = os.fstat(descriptor)
+        if bound_run_dir != run_path.parent or (
+            expected_identity is not None
+            and (
+                metadata.st_dev != expected_identity.device
+                or metadata.st_ino != expected_identity.inode
+            )
+        ):
+            raise _invalid(
+                "source_binding_mismatch",
+                "paper_reader worker run directory changed before journal commit",
+            )
+        token = _RUN_ARTIFACT_ANCHOR.set((bound_run_dir, descriptor))
+        closure = _ArtifactCommitClosure(bound_run_dir)
+        closure_token = _ACTIVE_ARTIFACT_COMMIT_CLOSURE.set(closure)
+        try:
+            def validate_semantics() -> None:
+                _validate_worker_result_artifacts_unanchored(
+                    manifest,
+                    result,
+                    prepared_local_result=prepared_local_result,
+                )
+
+            validate_semantics()
+            closure.freeze()
+            with closure.hold() as held_closure:
+                def validate_closure() -> None:
+                    validate_locked_path(
+                        run_path.parent / ".run.lock",
+                        reader_lock_descriptor,
+                    )
+                    held_closure()
+                    validate_semantics()
+                    held_closure()
+
+                validate_closure()
+                yield validate_closure
+        finally:
+            _ACTIVE_ARTIFACT_COMMIT_CLOSURE.reset(closure_token)
+            _RUN_ARTIFACT_ANCHOR.reset(token)
+
+
 def _validate_worker_result_artifacts_unanchored(
     manifest: BatchManifest,
     result: WorkerResult,
@@ -1527,7 +2105,16 @@ def _validate_worker_result_artifacts_unanchored(
         id_field="run_id",
         bind_bytes=not allow_mutable_run,
     )
-    _validate_source_directory(run_path.parent, run.source)
+    run_artifacts = _require_sequence(
+        run.get("artifacts"),
+        code="source_binding_mismatch",
+        label="current run artifacts",
+    )
+    secondary_plan_binding = _validate_source_directory(
+        run_path.parent,
+        run.source,
+        run_artifacts,
+    )
     resolved_key = _source_matches(manifest_item, run.source, refingerprint=not allow_mutable_run)
     (
         _review_path,
@@ -1544,6 +2131,7 @@ def _validate_worker_result_artifacts_unanchored(
         run,
         result.review_package,
         result.candidate,
+        secondary_plan_binding,
         refingerprint=not allow_mutable_run,
     )
     if prepared_local_result is not None:
@@ -1751,6 +2339,71 @@ def validate_local_prepare_result_artifacts(
         )
 
 
+@contextmanager
+def local_prepare_result_artifact_commit_guard(
+    manifest: BatchManifest,
+    result: LocalPrepareResult,
+    *,
+    expected_root: Path | None = None,
+) -> Iterator[Callable[[], None]]:
+    """Hold a prepared Reader run root through local-prepare event commit."""
+
+    if result.status != "prepared" or result.paper_reader_run is None:
+        def validate_failure() -> None:
+            validate_local_prepare_result_artifacts(
+                manifest,
+                result,
+                expected_root=expected_root,
+            )
+
+        validate_failure()
+        yield validate_failure
+        return
+    if result.paper_reader_run_directory is None:
+        raise _invalid(
+            "local_prepare_binding_mismatch",
+            "prepared result lacks its stable paper_reader run directory identity",
+        )
+    run_path = _require_normalized_absolute_path(
+        result.paper_reader_run.path,
+        code="local_prepare_binding_mismatch",
+        label="prepared paper_reader run",
+    )
+    with _locked_foreign_reader_run(
+        run_path.parent,
+        code="local_prepare_binding_mismatch",
+    ) as reader_lock_descriptor, _bound_paper_reader_run_directory(
+        result.paper_reader_run,
+        result.paper_reader_run_directory,
+    ):
+        closure = _ArtifactCommitClosure(run_path.parent)
+        closure_token = _ACTIVE_ARTIFACT_COMMIT_CLOSURE.set(closure)
+        try:
+            def validate_semantics() -> None:
+                _validate_local_prepare_result_artifacts_unanchored(
+                    manifest,
+                    result,
+                    expected_root=expected_root,
+                )
+
+            validate_semantics()
+            closure.freeze()
+            with closure.hold() as held_closure:
+                def validate_closure() -> None:
+                    validate_locked_path(
+                        run_path.parent / ".run.lock",
+                        reader_lock_descriptor,
+                    )
+                    held_closure()
+                    validate_semantics()
+                    held_closure()
+
+                validate_closure()
+                yield validate_closure
+        finally:
+            _ACTIVE_ARTIFACT_COMMIT_CLOSURE.reset(closure_token)
+
+
 def _validate_local_prepare_result_artifacts_unanchored(
     manifest: BatchManifest,
     result: LocalPrepareResult,
@@ -1779,7 +2432,16 @@ def _validate_local_prepare_result_artifacts_unanchored(
         id_field="run_id",
         bind_bytes=not allow_mutable_run,
     )
-    _validate_source_directory(run_path.parent, run.source)
+    run_artifacts = _require_sequence(
+        run.get("artifacts"),
+        code="source_binding_mismatch",
+        label="current run artifacts",
+    )
+    secondary_plan_binding = _validate_source_directory(
+        run_path.parent,
+        run.source,
+        run_artifacts,
+    )
     if run.target.get("target_type") != "local" or (
         not allow_mutable_run
         and (run.status != "prepared" or run.gate.status == "blocked" or run.gate.blockers)
@@ -1803,11 +2465,19 @@ def _validate_local_prepare_result_artifacts_unanchored(
     if evidence.run_id != run.run_id:
         raise _invalid("evidence_binding_mismatch", "local prepare evidence run id differs")
     _run_ref_for(run, run_path.parent, evidence_path, result.evidence, "evidence_manifest")
-    _validate_evidence(run_path.parent, evidence_path, evidence, manifest_item.source.sha256)
+    _validate_evidence(
+        run_path.parent,
+        evidence_path,
+        evidence,
+        manifest_item.source.sha256,
+        secondary_plan_binding,
+    )
 
 
 __all__ = [
+    "local_prepare_result_artifact_commit_guard",
     "paper_reader_root_identity",
     "validate_local_prepare_result_artifacts",
     "validate_worker_result_artifacts",
+    "worker_result_artifact_commit_guard",
 ]

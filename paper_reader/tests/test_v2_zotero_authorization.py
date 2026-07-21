@@ -21,6 +21,7 @@ import paper_reader.storage as storage_module
 from paper_reader.contracts import PaperReaderCommandResult, PaperReaderWriteAuthorization
 from paper_reader.note import FORBIDDEN_RENDERED_HEADINGS, REQUIRED_SECTIONS
 from paper_reader.public_cli import app
+from paper_reader.storage import canonical_json_bytes
 
 from test_v2_local_publication import _built_candidate as _built_local_candidate
 from test_v2_zotero_candidate import (
@@ -446,6 +447,97 @@ def test_authorize_revalidates_original_bound_evidence_before_provider(
         _authorize(candidate_path, provider)
 
     assert getattr(exc_info.value, "code", None) == "evidence_artifact_hash_mismatch"
+    assert provider.calls == 0
+    assert not (run_dir / "authorizations").exists()
+
+
+def test_authorize_rejects_current_secondary_plan_tamper_before_provider(
+    tmp_path: Path,
+) -> None:
+    candidate_path, _provider = _candidate(tmp_path)
+    run_dir = candidate_path.parent.parent.parent
+    plan_path = run_dir / "source" / "secondary-plan.json"
+    plan_path.write_bytes(plan_path.read_bytes() + b"\n")
+
+    class ProviderSpy:
+        calls = 0
+
+        def get_parent(self, _item_key: str):
+            self.calls += 1
+            raise AssertionError("tampered secondary plan reached Zotero read")
+
+        def get_children(self, _parent_key: str):
+            self.calls += 1
+            raise AssertionError("tampered secondary plan reached Zotero read")
+
+    provider = ProviderSpy()
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider)
+
+    assert getattr(exc_info.value, "code", None) == "secondary_plan_tampered"
+    assert provider.calls == 0
+    assert not (run_dir / "authorizations").exists()
+
+
+def test_authorize_rejects_candidate_snapshot_that_drops_secondary_plan_before_provider(
+    tmp_path: Path,
+) -> None:
+    candidate_path, _provider = _candidate(tmp_path)
+    candidate_dir = candidate_path.parent
+    run_dir = candidate_dir.parent.parent
+    snapshot_path = candidate_dir / "run.json"
+    snapshot = json.loads(snapshot_path.read_bytes())
+    snapshot["artifacts"] = [
+        artifact
+        for artifact in snapshot["artifacts"]
+        if artifact["role"] != "secondary_source_plan"
+    ]
+    snapshot_bytes = canonical_json_bytes(snapshot)
+    snapshot_path.write_bytes(snapshot_bytes)
+
+    candidate = json.loads(candidate_path.read_bytes())
+    snapshot_ref = next(
+        artifact
+        for artifact in candidate["artifacts"]
+        if artifact["role"] == "run_snapshot"
+    )
+    snapshot_ref["sha256"] = hashlib.sha256(snapshot_bytes).hexdigest()
+    snapshot_ref["size_bytes"] = len(snapshot_bytes)
+    candidate_bytes = canonical_json_bytes(candidate)
+    candidate_path.write_bytes(candidate_bytes)
+    candidate_digest = hashlib.sha256(candidate_bytes).hexdigest()
+
+    run_path = run_dir / "run.json"
+    run = json.loads(run_path.read_bytes())
+    candidate_relative = candidate_path.relative_to(run_dir).as_posix()
+    current_candidate_ref = next(
+        artifact
+        for artifact in run["artifacts"]
+        if artifact["role"] == "candidate"
+        and artifact["path"] == candidate_relative
+    )
+    current_candidate_ref["sha256"] = candidate_digest
+    current_candidate_ref["size_bytes"] = len(candidate_bytes)
+    run_path.write_bytes(canonical_json_bytes(run))
+
+    class ProviderSpy:
+        calls = 0
+
+        def get_parent(self, _item_key: str):
+            self.calls += 1
+            raise AssertionError("invalid candidate snapshot reached Zotero read")
+
+        def get_children(self, _parent_key: str):
+            self.calls += 1
+            raise AssertionError("invalid candidate snapshot reached Zotero read")
+
+    provider = ProviderSpy()
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider)
+
+    assert getattr(exc_info.value, "code", None) == "secondary_plan_mismatch"
     assert provider.calls == 0
     assert not (run_dir / "authorizations").exists()
 

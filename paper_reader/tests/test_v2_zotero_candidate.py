@@ -123,6 +123,34 @@ def _build(run_dir: Path, provider: InMemoryZoteroProvider):
     return candidate_builder.build_candidate(run_dir, provider=provider)
 
 
+def test_zotero_candidate_rejects_current_secondary_plan_tamper_before_live_read(
+    tmp_path: Path,
+) -> None:
+    run_dir = _sealed_zotero_run(tmp_path)
+    plan_path = run_dir / "source" / "secondary-plan.json"
+    plan_path.write_bytes(plan_path.read_bytes() + b"\n")
+
+    class ProviderSpy:
+        calls = 0
+
+        def get_parent(self, _item_key: str):
+            self.calls += 1
+            raise AssertionError("tampered secondary plan reached Zotero read")
+
+        def get_children(self, _parent_key: str):
+            self.calls += 1
+            raise AssertionError("tampered secondary plan reached Zotero read")
+
+    provider = ProviderSpy()
+
+    with pytest.raises(LocalPublicationError) as exc_info:
+        _build(run_dir, provider)
+
+    assert exc_info.value.code == "secondary_plan_tampered"
+    assert provider.calls == 0
+    assert not (run_dir / "candidates").exists()
+
+
 @pytest.mark.parametrize(
     ("paper_title", "markdown_h1", "rendered_h1"),
     [

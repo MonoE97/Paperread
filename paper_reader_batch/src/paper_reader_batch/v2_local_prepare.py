@@ -17,6 +17,7 @@ from uuid import UUID, uuid4, uuid5
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
 
 from paper_reader_batch.v2_artifacts import (
+    local_prepare_result_artifact_commit_guard,
     paper_reader_root_identity,
     validate_local_prepare_result_artifacts,
 )
@@ -2354,6 +2355,13 @@ def finish_local_prepare(
             )
         _validate_local_pdf_source(view, item_id)
 
+    def artifact_commit_guard(view: RunView, _event):
+        return local_prepare_result_artifact_commit_guard(
+            view.manifest,
+            result,
+            expected_root=expected_root,
+        )
+
     return append_transaction(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
@@ -2366,6 +2374,7 @@ def finish_local_prepare(
         reconstruct=reconstruct,
         replay_validate=replay_validate,
         commit_validate=commit_validate,
+        commit_guard=artifact_commit_guard,
         fault=fault,
     )
 

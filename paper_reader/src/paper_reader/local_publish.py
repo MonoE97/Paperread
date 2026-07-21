@@ -40,6 +40,10 @@ from paper_reader.raw_schema import require_raw_schema_version
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import ExpectedRunArtifact, locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
+from paper_reader.secondary_evidence import (
+    SecondaryEvidenceError,
+    open_bound_source_closure_guard,
+)
 from paper_reader.storage import (
     HeldResolvedSourceGuard,
     ImmutableTreeSnapshot,
@@ -399,6 +403,51 @@ def revalidate_candidate_original_evidence(
         raise LocalPublicationError(exc.code, str(exc)) from exc
 
 
+def _validate_candidate_run_snapshot_plan_binding(
+    loaded: LoadedRun,
+    candidate: PaperReaderCandidate,
+    verified: dict[str, list[tuple[Path, bytes]]],
+) -> None:
+    snapshot_path, snapshot_bytes = verified["run_snapshot"][0]
+    require_raw_schema_version(
+        snapshot_bytes,
+        expected="paper_reader.run.v2",
+        artifact_path=snapshot_path,
+    )
+    try:
+        snapshot = PaperReaderRun.model_validate_json(snapshot_bytes)
+    except ValidationError as exc:
+        raise LocalPublicationError(
+            "candidate_tampered",
+            f"strict candidate run snapshot validation failed: {exc}",
+        ) from exc
+    if (
+        canonical_json_bytes(snapshot) != snapshot_bytes
+        or snapshot.run_id != candidate.run_id
+        or snapshot.source != candidate.source
+        or candidate.source != loaded.run.source
+    ):
+        raise LocalPublicationError(
+            "candidate_tampered",
+            "candidate run snapshot identity differs from the current run",
+        )
+    snapshot_plan_refs = tuple(
+        artifact
+        for artifact in snapshot.artifacts
+        if artifact.role == "secondary_source_plan"
+    )
+    current_plan_refs = tuple(
+        artifact
+        for artifact in loaded.run.artifacts
+        if artifact.role == "secondary_source_plan"
+    )
+    if snapshot_plan_refs != current_plan_refs:
+        raise LocalPublicationError(
+            "secondary_plan_mismatch",
+            "candidate run snapshot does not retain the current secondary source plan ref",
+        )
+
+
 def _load_candidate(
     candidate_input: Path,
     *,
@@ -544,6 +593,7 @@ def _load_candidate(
         len(items) != 1 for items in verified.values()
     ):
         raise LocalPublicationError("candidate_tampered", "candidate artifact membership is incomplete")
+    _validate_candidate_run_snapshot_plan_binding(loaded, candidate, verified)
     if candidate.evidence_manifest not in candidate.artifacts or candidate.sealed_review not in candidate.artifacts:
         raise LocalPublicationError("candidate_tampered", "candidate gate refs are not artifact members")
     revalidate_candidate_original_evidence(
@@ -1490,6 +1540,18 @@ def _publish_local_candidate_locked(
     with ExitStack() as stack:
         source_guard = stack.enter_context(source_guard_context)
         try:
+            source_closure_guard = stack.enter_context(
+                open_bound_source_closure_guard(loaded)
+            )
+            source_closure_guard.verify()
+        except SecondaryEvidenceError as exc:
+            raise LocalPublicationError(exc.code, str(exc)) from exc
+        except UnsafeStoragePathError as exc:
+            raise LocalPublicationError(
+                "secondary_plan_mismatch",
+                f"source closure changed before local publication: {exc}",
+            ) from exc
+        try:
             candidate_tree_guard = stack.enter_context(
                 _CandidateTreeGuard(
                     anchor=open_anchored_directory(run_anchor, candidate_path.parent),
@@ -1506,6 +1568,7 @@ def _publish_local_candidate_locked(
         )
         target_anchor = stack.enter_context(target_anchor_context)
         _verify_held_source(source_guard)
+        source_closure_guard.verify()
         candidate_tree_guard.verify()
         evidence_tree_guard.verify()
         if (
@@ -1526,6 +1589,7 @@ def _publish_local_candidate_locked(
         )
         with intent_guard:
             _verify_held_source(source_guard)
+            source_closure_guard.verify()
             candidate_tree_guard.verify()
             evidence_tree_guard.verify()
             target_guard = _publish_or_recover_target(
@@ -1537,6 +1601,7 @@ def _publish_local_candidate_locked(
             with target_guard:
                 try:
                     _verify_held_source(source_guard)
+                    source_closure_guard.verify()
                     candidate_tree_guard.verify()
                     evidence_tree_guard.verify()
                     intent_guard.verify()
@@ -1560,6 +1625,7 @@ def _publish_local_candidate_locked(
                 with receipt_guard:
                     try:
                         _verify_held_source(source_guard)
+                        source_closure_guard.verify()
                         candidate_tree_guard.verify()
                         evidence_tree_guard.verify()
                         intent_guard.verify()
@@ -1579,6 +1645,7 @@ def _publish_local_candidate_locked(
                                 hold_new=True,
                                 finalization_guards=(
                                     source_guard,
+                                    source_closure_guard,
                                     candidate_tree_guard,
                                     evidence_tree_guard,
                                     intent_guard,
@@ -1614,6 +1681,7 @@ def _publish_local_candidate_locked(
                         assert run_guard is not None
                         with run_guard:
                             _verify_held_source(source_guard)
+                            source_closure_guard.verify()
                             candidate_tree_guard.verify()
                             evidence_tree_guard.verify()
                             intent_guard.verify()
@@ -1627,6 +1695,7 @@ def _publish_local_candidate_locked(
                             )
                             evidence_tree_guard.verify()
                             _verify_held_source(source_guard)
+                            source_closure_guard.verify()
                             candidate_tree_guard.verify()
                             evidence_tree_guard.verify()
                             intent_guard.verify()

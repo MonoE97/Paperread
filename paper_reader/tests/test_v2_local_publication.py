@@ -1511,6 +1511,44 @@ def test_local_publish_preserves_published_run_if_target_changes_after_run_commi
     assert json.loads((run_dir / "run.json").read_text())["status"] == "published"
 
 
+def test_local_publish_detects_source_snapshot_replacement_after_run_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir, candidate_path = _built_candidate(tmp_path)
+    source_snapshot = run_dir / "source" / "source.json"
+    detached_snapshot = run_dir / "source" / "source.detached.json"
+    snapshot_raw = source_snapshot.read_bytes()
+    original_cas = local_publish_module.cas_update_run
+    replaced = False
+
+    def replace_source_after_published_run(loaded, value, **kwargs):
+        nonlocal replaced
+        result = original_cas(loaded, value, **kwargs)
+        if (
+            loaded.manifest_path == run_dir / "run.json"
+            and getattr(value, "status", None) == "published"
+            and not replaced
+        ):
+            source_snapshot.rename(detached_snapshot)
+            source_snapshot.write_bytes(snapshot_raw)
+            replaced = True
+        return result
+
+    monkeypatch.setattr(
+        local_publish_module,
+        "cas_update_run",
+        replace_source_after_published_run,
+    )
+
+    result = _invoke(["local", "publish", str(candidate_path)])
+
+    assert replaced is True
+    assert result.exit_code == 1
+    assert _result_payload(result)["code"] == "publication_recovery_required"
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "published"
+
+
 def test_local_publish_never_rolls_back_if_run_write_commits_then_raises(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -13,6 +13,7 @@ from pydantic import ValidationError, model_validator
 from paper_reader_batch.v2_artifacts import (
     validate_local_prepare_result_artifacts,
     validate_worker_result_artifacts,
+    worker_result_artifact_commit_guard,
 )
 from paper_reader_batch.v2_contracts import (
     LOCAL_PREPARE_RESULT_SCHEMA_VERSION,
@@ -825,6 +826,24 @@ def finish_worker(
     def commit_validate(view: RunView) -> None:
         _validate_worker_pdf_source(view, item_id)
 
+    def artifact_commit_guard(view: RunView, _event):
+        state_item = next(
+            entry for entry in view.state.items if entry.item_id == item_id
+        )
+        manifest_item = next(
+            entry for entry in view.manifest.items if entry.item_id == item_id
+        )
+        prepared = _load_prepared_local_result(
+            view,
+            item=state_item,
+            manifest_item=manifest_item,
+        )
+        return worker_result_artifact_commit_guard(
+            view.manifest,
+            result,
+            prepared_local_result=prepared,
+        )
+
     return append_transaction(
         run_dir,
         expected_manifest_sha256=preflight.manifest_sha256,
@@ -837,6 +856,7 @@ def finish_worker(
         reconstruct=reconstruct,
         replay_validate=replay_validate,
         commit_validate=commit_validate,
+        commit_guard=artifact_commit_guard,
         fault=fault,
     )
 

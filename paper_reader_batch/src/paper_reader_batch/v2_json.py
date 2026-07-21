@@ -627,6 +627,8 @@ def read_relative_bytes(
 def walk_relative_regular_files(
     directory_fd: int,
     relative_root: str,
+    *,
+    directory_memberships: dict[str, frozenset[str]] | None = None,
 ) -> set[str]:
     root = PurePosixPath(relative_root)
     if (
@@ -688,6 +690,10 @@ def walk_relative_regular_files(
                 )
             ) != before_names:
                 raise BatchRuntimeError("storage_path_changed", "bundle membership changed during walk")
+            if directory_memberships is not None:
+                directory_memberships[
+                    "" if not prefix.parts else prefix.as_posix()
+                ] = frozenset(before_names)
 
         walk(descriptor, PurePosixPath())
         return found

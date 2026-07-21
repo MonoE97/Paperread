@@ -16,8 +16,11 @@ from paper_reader.contracts import (
     PaperReaderSummary,
     ReviewIssue,
 )
+from paper_reader.evidence_manifest import EvidenceManifestError, load_bound_evidence
 from paper_reader.public_cli import app
+from paper_reader.secondary_sources import build_secondary_source_plan
 from paper_reader.storage import canonical_json_bytes, canonical_json_sha256, rfc3339_utc
+from paper_reader.v2_loader import load_v2_run
 
 
 FIXTURE_PDF = Path(__file__).parent / "fixtures" / "minimal.pdf"
@@ -161,6 +164,112 @@ def _write_summary_and_review(
     return summary, review
 
 
+def _rewrite_current_secondary_plan(run_dir: Path, *, extra: str) -> bytes:
+    """Create another internally coherent current source/plan over the same PDF."""
+
+    run_path = run_dir / "run.json"
+    run = json.loads(run_path.read_bytes())
+    source_path = run_dir / "source" / "source.json"
+    source = json.loads(source_path.read_bytes())
+    source["selected_item"]["extra"] = extra
+    raw_path = run_dir / "source" / "discovery.raw.json"
+    raw_source = json.loads(raw_path.read_bytes())
+    raw_source["selected_item"]["extra"] = extra
+    raw_parent = raw_source["selected_item"]["_paper_reader"]["discovery"][
+        "raw_parent_snapshots"
+    ]["PARENT1"]
+    raw_parent["data"]["extra"] = extra
+    raw_bytes = canonical_json_bytes(raw_source)
+    raw_digest = hashlib.sha256(raw_bytes).hexdigest()
+    raw_ref = run["source"]["raw_discovery_bundle"]
+    raw_ref["sha256"] = raw_digest
+    raw_ref["size_bytes"] = len(raw_bytes)
+    run_raw_ref = next(
+        item for item in run["artifacts"] if item["role"] == "raw_discovery_bundle"
+    )
+    run_raw_ref.update(raw_ref)
+    source_bytes = canonical_json_bytes(source)
+    source_digest = hashlib.sha256(source_bytes).hexdigest()
+    normalized_ref = run["source"]["normalized_source"]
+    normalized_ref["sha256"] = source_digest
+    normalized_ref["size_bytes"] = len(source_bytes)
+    run_normalized_ref = next(
+        item for item in run["artifacts"] if item["role"] == "normalized_source"
+    )
+    run_normalized_ref.update(normalized_ref)
+
+    plan = build_secondary_source_plan(
+        source["selected_item"],
+        source_snapshot_sha256=source_digest,
+    )
+    plan_bytes = canonical_json_bytes(plan)
+    plan_ref = next(
+        item for item in run["artifacts"] if item["role"] == "secondary_source_plan"
+    )
+    plan_ref["sha256"] = hashlib.sha256(plan_bytes).hexdigest()
+    plan_ref["size_bytes"] = len(plan_bytes)
+
+    raw_path.write_bytes(raw_bytes)
+    source_path.write_bytes(source_bytes)
+    (run_dir / "source" / "secondary-plan.json").write_bytes(plan_bytes)
+    run_path.write_bytes(canonical_json_bytes(run))
+    return plan_bytes
+
+
+def _remove_current_secondary_plan_binding(
+    run_dir: Path,
+    *,
+    retain_file: bool,
+) -> None:
+    run_path = run_dir / "run.json"
+    run = json.loads(run_path.read_bytes())
+    run["artifacts"] = [
+        item for item in run["artifacts"] if item["role"] != "secondary_source_plan"
+    ]
+    run_path.write_bytes(canonical_json_bytes(run))
+    if not retain_file:
+        (run_dir / "source" / "secondary-plan.json").rename(
+            run_dir / "detached-secondary-plan.json"
+        )
+
+
+def _rebind_evidence_manifest(
+    run_dir: Path,
+    mutate,
+) -> str:
+    run_path = run_dir / "run.json"
+    run = json.loads(run_path.read_bytes())
+    evidence_ref = next(
+        item for item in run["artifacts"] if item["role"] == "evidence_manifest"
+    )
+    evidence_path = run_dir / evidence_ref["path"]
+    evidence = json.loads(evidence_path.read_bytes())
+    mutate(evidence, evidence_path.parent)
+    evidence_bytes = canonical_json_bytes(evidence)
+    evidence_path.write_bytes(evidence_bytes)
+    evidence_ref["sha256"] = hashlib.sha256(evidence_bytes).hexdigest()
+    evidence_ref["size_bytes"] = len(evidence_bytes)
+    run_path.write_bytes(canonical_json_bytes(run))
+    return evidence_ref["sha256"]
+
+
+def _member_ref(
+    run_dir: Path,
+    path: Path,
+    *,
+    role: str,
+    media_type: str,
+) -> dict[str, object]:
+    raw = path.read_bytes()
+    return {
+        "role": role,
+        "path": path.relative_to(run_dir).as_posix(),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
+        "media_type": media_type,
+    }
+
+
 def test_review_validate_is_read_only_and_accepts_fully_bound_chinese_render(tmp_path: Path) -> None:
     run_dir, evidence_digest = _prepared_run(tmp_path)
     summary, _review = _write_summary_and_review(run_dir, evidence_digest)
@@ -177,6 +286,376 @@ def test_review_validate_is_read_only_and_accepts_fully_bound_chinese_render(tmp
     assert len(payload["data"]["rendered_note_sha256"]) == 64
     assert payload["data"]["blockers"] == []
     assert _tree_snapshot(run_dir) == before
+
+
+def test_review_rejects_current_secondary_plan_tamper_before_seal(
+    tmp_path: Path,
+) -> None:
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(tmp_path, urls=())
+    _write_summary_and_review(run_dir, evidence_digest)
+    plan_path = run_dir / "source" / "secondary-plan.json"
+    plan_path.write_bytes(plan_path.read_bytes() + b"\n")
+    before = _tree_snapshot(run_dir)
+
+    validated = _invoke(["review", "validate", str(run_dir)])
+    sealed = _invoke(["review", "seal", str(run_dir)])
+
+    assert validated.exit_code == 1
+    assert {
+        item["code"] for item in _result_payload(validated)["data"]["blockers"]
+    } == {"secondary_plan_tampered"}
+    assert sealed.exit_code == 1
+    assert not (run_dir / "reviews").exists()
+    assert _tree_snapshot(run_dir) == before
+
+
+def test_review_rejects_secondary_plan_file_without_current_run_ref(
+    tmp_path: Path,
+) -> None:
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(tmp_path, urls=())
+    _write_summary_and_review(run_dir, evidence_digest)
+    _remove_current_secondary_plan_binding(run_dir, retain_file=True)
+
+    result = _invoke(["review", "validate", str(run_dir)])
+
+    assert result.exit_code == 1
+    assert {
+        item["code"] for item in _result_payload(result)["data"]["blockers"]
+    } == {"secondary_plan_mismatch"}
+
+
+def test_review_rejects_versioned_evidence_plan_for_historical_no_plan_run(
+    tmp_path: Path,
+) -> None:
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(tmp_path, urls=())
+    _write_summary_and_review(run_dir, evidence_digest)
+    _remove_current_secondary_plan_binding(run_dir, retain_file=False)
+
+    result = _invoke(["review", "validate", str(run_dir)])
+
+    assert result.exit_code == 1
+    assert {
+        item["code"] for item in _result_payload(result)["data"]["blockers"]
+    } == {"secondary_plan_mismatch"}
+
+
+def test_review_rejects_evidence_plan_from_another_current_source_snapshot(
+    tmp_path: Path,
+) -> None:
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(tmp_path, urls=())
+    _write_summary_and_review(run_dir, evidence_digest)
+    evidence_plan = next((run_dir / "evidence").glob("*/secondary-plan.json"))
+    replacement_plan = _rewrite_current_secondary_plan(
+        run_dir,
+        extra="https://example.test/replacement-source",
+    )
+    assert replacement_plan != evidence_plan.read_bytes()
+
+    result = _invoke(["review", "validate", str(run_dir)])
+
+    assert result.exit_code == 1
+    assert {
+        item["code"] for item in _result_payload(result)["data"]["blockers"]
+    } == {"secondary_plan_mismatch"}
+
+
+def test_zero_eligible_secondary_plan_remains_bound_without_context_text(
+    tmp_path: Path,
+) -> None:
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(tmp_path, urls=())
+    _write_summary_and_review(run_dir, evidence_digest)
+    run = json.loads((run_dir / "run.json").read_bytes())
+    evidence_dir = next((run_dir / "evidence").iterdir())
+
+    result = _invoke(["review", "validate", str(run_dir)])
+
+    assert result.exit_code == 0, result.stderr
+    assert len(
+        [item for item in run["artifacts"] if item["role"] == "secondary_source_plan"]
+    ) == 1
+    assert (evidence_dir / "secondary-plan.json").read_bytes() == (
+        run_dir / "source" / "secondary-plan.json"
+    ).read_bytes()
+    assert not (evidence_dir / "secondary_context.md").exists()
+
+
+@pytest.mark.parametrize(
+    "illegal_member",
+    [
+        "secondary_plan",
+        "secondary_capture",
+        "secondary_context",
+        "versioned_inventory",
+        "unknown_inventory",
+    ],
+)
+def test_local_evidence_rejects_versioned_secondary_members(
+    illegal_member: str,
+    tmp_path: Path,
+) -> None:
+    run_dir, _evidence_digest = _prepared_run(tmp_path)
+
+    def mutate(evidence: dict[str, object], evidence_dir: Path) -> None:
+        files = evidence["files"]
+        if illegal_member in {"versioned_inventory", "unknown_inventory"}:
+            inventory_path = evidence_dir / "secondary_sources.json"
+            inventory = {
+                "format": (
+                    "paper_reader.secondary-sources.v2-internal"
+                    if illegal_member == "versioned_inventory"
+                    else "paper_reader.secondary-sources.unknown"
+                ),
+                "run_id": evidence["run_id"],
+                "item_key": "",
+                "title": "测试论文",
+                "source_snapshot_sha256": evidence["source_sha256"],
+                "secondary_plan_sha256": "0" * 64,
+                "usage_boundary": "cross-check only; must not be cited in evidence_summary",
+                "eligible_source_count": 0,
+                "captured_source_count": 0,
+                "sources": [],
+                "warnings": [],
+            }
+            inventory_path.write_bytes(canonical_json_bytes(inventory))
+            replacement = _member_ref(
+                run_dir,
+                inventory_path,
+                role="secondary_sources",
+                media_type="application/json",
+            )
+            evidence["files"] = [
+                replacement if item["role"] == "secondary_sources" else item
+                for item in files
+            ]
+            return
+        specs = {
+            "secondary_plan": (
+                evidence_dir / "secondary-plan.json",
+                "application/json",
+                canonical_json_bytes({"opaque": "plan"}),
+            ),
+            "secondary_capture": (
+                evidence_dir / "secondary" / "secondary-001.json",
+                "application/json",
+                canonical_json_bytes({"opaque": "capture"}),
+            ),
+            "secondary_context": (
+                evidence_dir / "secondary_context.md",
+                "text/markdown",
+                b"# Secondary Context\n",
+            ),
+        }
+        path, media_type, raw = specs[illegal_member]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        files.append(
+            _member_ref(
+                run_dir,
+                path,
+                role=illegal_member,
+                media_type=media_type,
+            )
+        )
+
+    evidence_digest = _rebind_evidence_manifest(run_dir, mutate)
+    loaded = load_v2_run(run_dir)
+
+    with pytest.raises(EvidenceManifestError) as exc_info:
+        load_bound_evidence(loaded, evidence_digest)
+
+    assert exc_info.value.code == "secondary_plan_mismatch"
+
+
+def test_reader_accepts_coherent_historical_v2_zotero_no_plan_evidence(
+    tmp_path: Path,
+) -> None:
+    run_dir, _evidence_digest = _prepared_zotero_secondary_run(tmp_path, urls=())
+    _remove_current_secondary_plan_binding(run_dir, retain_file=False)
+
+    def mutate(evidence: dict[str, object], evidence_dir: Path) -> None:
+        evidence["files"] = [
+            item for item in evidence["files"] if item["role"] != "secondary_plan"
+        ]
+        (evidence_dir / "secondary-plan.json").rename(
+            run_dir / "detached-evidence-secondary-plan.json"
+        )
+        inventory_path = evidence_dir / "secondary_sources.json"
+        inventory_path.write_bytes(
+            canonical_json_bytes(
+                {
+                    "item_key": "PARENT1",
+                    "title": "A Useful Paper & Result",
+                    "usage_boundary": "cross-check only; must not be cited in evidence_summary",
+                    "sources": [],
+                    "warnings": [],
+                }
+            )
+        )
+        replacement = _member_ref(
+            run_dir,
+            inventory_path,
+            role="secondary_sources",
+            media_type="application/json",
+        )
+        evidence["files"] = [
+            replacement if item["role"] == "secondary_sources" else item
+            for item in evidence["files"]
+        ]
+        evidence["resource_checks"] = [
+            item
+            for item in evidence["resource_checks"]
+            if item["name"] != "secondary_capture_chars"
+        ]
+
+    evidence_digest = _rebind_evidence_manifest(run_dir, mutate)
+
+    bound = load_bound_evidence(load_v2_run(run_dir), evidence_digest)
+
+    assert bound.digest == evidence_digest
+
+
+def test_reader_rejects_source_plan_change_between_binding_and_source_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.secondary_evidence as secondary_evidence
+
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(tmp_path, urls=())
+    plan_path = run_dir / "source" / "secondary-plan.json"
+    original_load = secondary_evidence.load_bound_secondary_plan
+    replaced = False
+
+    def replace_after_binding(loaded):
+        nonlocal replaced
+        binding = original_load(loaded)
+        if not replaced:
+            replaced = True
+            plan_path.write_bytes(canonical_json_bytes({"replaced": True}))
+        return binding
+
+    monkeypatch.setattr(
+        secondary_evidence,
+        "load_bound_secondary_plan",
+        replace_after_binding,
+    )
+
+    with pytest.raises(EvidenceManifestError) as exc_info:
+        load_bound_evidence(load_v2_run(run_dir), evidence_digest)
+
+    assert exc_info.value.code == "secondary_plan_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("source_ref_name", "mutation"),
+    [
+        ("raw_discovery_bundle", "role"),
+        ("raw_discovery_bundle", "path"),
+        ("raw_discovery_bundle", "media_type"),
+        ("normalized_source", "role"),
+        ("normalized_source", "path"),
+        ("normalized_source", "media_type"),
+    ],
+)
+def test_reader_rejects_noncanonical_zotero_source_ref_shape(
+    source_ref_name: str,
+    mutation: str,
+    tmp_path: Path,
+) -> None:
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(tmp_path, urls=())
+    run_path = run_dir / "run.json"
+    run = json.loads(run_path.read_bytes())
+    source_ref = run["source"][source_ref_name]
+    artifact_ref = next(
+        artifact
+        for artifact in run["artifacts"]
+        if artifact == source_ref
+    )
+    if mutation == "role":
+        source_ref["role"] = f"wrong_{source_ref_name}"
+        artifact_ref["role"] = source_ref["role"]
+    elif mutation == "media_type":
+        source_ref["media_type"] = "text/plain"
+        artifact_ref["media_type"] = "text/plain"
+    else:
+        original = run_dir / source_ref["path"]
+        renamed = original.with_name(f"renamed-{original.name}")
+        original.rename(renamed)
+        source_ref["path"] = renamed.relative_to(run_dir).as_posix()
+        artifact_ref["path"] = source_ref["path"]
+    run_path.write_bytes(canonical_json_bytes(run))
+
+    with pytest.raises(EvidenceManifestError) as exc_info:
+        load_bound_evidence(load_v2_run(run_dir), evidence_digest)
+
+    assert exc_info.value.code == "secondary_plan_mismatch"
+
+
+def test_review_seal_rechecks_source_guard_after_validation_snapshot_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.secondary_evidence as secondary_evidence
+
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(tmp_path, urls=())
+    _write_summary_and_review(run_dir, evidence_digest)
+    plan_path = run_dir / "source" / "secondary-plan.json"
+    original_snapshot = secondary_evidence.snapshot_anchored_tree
+    replaced = False
+
+    def replace_after_snapshot(*args, **kwargs):
+        nonlocal replaced
+        snapshot = original_snapshot(*args, **kwargs)
+        if not replaced:
+            replaced = True
+            plan_path.write_bytes(canonical_json_bytes({"replaced": True}))
+        return snapshot
+
+    monkeypatch.setattr(
+        secondary_evidence,
+        "snapshot_anchored_tree",
+        replace_after_snapshot,
+    )
+
+    result = _invoke(["review", "seal", str(run_dir)])
+
+    assert result.exit_code == 1
+    assert not (run_dir / "reviews").exists()
+
+
+def test_review_seal_rejects_same_bytes_raw_source_inode_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.secondary_evidence as secondary_evidence
+
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(tmp_path, urls=())
+    _write_summary_and_review(run_dir, evidence_digest)
+    raw_path = run_dir / "source" / "discovery.raw.json"
+    detached_path = run_dir / "source" / "discovery.raw.detached.json"
+    original_load = secondary_evidence.load_bound_secondary_plan
+    replaced = False
+
+    def replace_after_guard_open(loaded):
+        nonlocal replaced
+        binding = original_load(loaded)
+        if not replaced:
+            replaced = True
+            raw = raw_path.read_bytes()
+            raw_path.rename(detached_path)
+            raw_path.write_bytes(raw)
+        return binding
+
+    monkeypatch.setattr(
+        secondary_evidence,
+        "load_bound_secondary_plan",
+        replace_after_guard_open,
+    )
+
+    result = _invoke(["review", "seal", str(run_dir)])
+
+    assert replaced is True
+    assert result.exit_code == 1
+    assert not (run_dir / "reviews").exists()
 
 
 def test_review_seal_projects_secondary_findings_into_allowed_existing_fields_only(

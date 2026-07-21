@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import ast
 from html import escape
@@ -222,6 +223,45 @@ def _rewrite_candidate_notes(
     )
 
 
+def _rewrite_candidate_run_snapshot(
+    built: BuiltWorkerFixture,
+    mutate,
+) -> None:
+    candidate = json.loads(built.candidate_path.read_bytes())
+    snapshot_path = built.candidate_path.parent / "run.json"
+    snapshot = json.loads(snapshot_path.read_bytes())
+    mutate(snapshot)
+    _json(snapshot_path, snapshot)
+    snapshot_ref = next(
+        ref for ref in candidate["artifacts"] if ref["role"] == "run_snapshot"
+    )
+    snapshot_ref.update(
+        _foreign_ref(built.run_dir, snapshot_path, "run_snapshot", "application/json")
+    )
+    _json(built.candidate_path, candidate)
+    candidate_ref = _foreign_ref(
+        built.run_dir,
+        built.candidate_path,
+        "candidate",
+        "application/json",
+    )
+    run = json.loads(built.run_path.read_bytes())
+    run["artifacts"] = [
+        candidate_ref if ref["role"] == "candidate" else ref
+        for ref in run["artifacts"]
+    ]
+    built.rewrite_final_run(run)
+    built.result = built.result.model_copy(
+        update={
+            "candidate": _outer_ref(
+                built.candidate_path,
+                "paper_reader.candidate.v2",
+                "candidate_test",
+            )
+        }
+    )
+
+
 def _make_pdf_source(path: Path) -> PdfSource:
     stat = path.stat()
     return PdfSource(
@@ -238,8 +278,21 @@ def _make_evidence(
     run_id: str,
     source_sha256: str,
     evidence_id: str = "evidence_test",
+    secondary_sources_raw: bytes | None = None,
+    secondary_members: dict[str, tuple[str, str, bytes]] | None = None,
+    degraded: bool = False,
 ) -> tuple[Path, dict[str, object], dict[str, object]]:
     evidence_dir = run_dir / "evidence" / evidence_id
+    if secondary_sources_raw is None:
+        secondary_sources_raw = canonical_json_bytes(
+            {
+                "item_key": "",
+                "title": "测试论文",
+                "usage_boundary": "cross-check only; must not be cited in evidence_summary",
+                "sources": [],
+                "warnings": [],
+            }
+        )
     files: list[dict[str, object]] = []
     specs = {
         "metadata.json": ("metadata", "application/json", canonical_json_bytes({"title": "测试论文"})),
@@ -250,8 +303,13 @@ def _make_evidence(
         ),
         "context.md": ("context", "text/markdown", b"# Methods\n\npage 1 evidence\n"),
         "section_context.md": ("section_context", "text/markdown", b"# Methods\n"),
-        "secondary_sources.json": ("secondary_sources", "application/json", b"[]"),
+        "secondary_sources.json": (
+            "secondary_sources",
+            "application/json",
+            secondary_sources_raw,
+        ),
     }
+    specs.update(secondary_members or {})
     for name, (role, media, raw) in specs.items():
         path = evidence_dir / name
         _write(path, raw)
@@ -263,7 +321,7 @@ def _make_evidence(
         "created_at": NOW,
         "source_sha256": source_sha256,
         "complete": True,
-        "degraded": False,
+        "degraded": degraded,
         "preview_pages": None,
         "files": files,
         "pages": [1],
@@ -571,6 +629,8 @@ def _local_fixture(
     noncanonical_validation: bool = False,
     candidate_checks: tuple[str, ...] = LOCAL_CANDIDATE_CHECKS,
     review_checks: tuple[str, ...] = REVIEW_CHECKS,
+    versioned_secondary_without_plan: bool = False,
+    unknown_secondary_inventory_without_plan: bool = False,
 ) -> BuiltWorkerFixture:
     pdf_path = tmp_path / "paper.pdf"
     _write(pdf_path, b"%PDF-1.7\nfixture\n")
@@ -584,6 +644,7 @@ def _local_fixture(
         items=[PdfManifestItem(item_id="001", source=batch_source)],
     )
     run_dir = tmp_path / "paper_analysis"
+    _write(run_dir / ".run.lock", b"")
     run_id = "run_local"
     source = {
         "source_type": "local_pdf",
@@ -598,7 +659,35 @@ def _local_fixture(
     source_raw = _json(source_path, source)
     source_ref = _foreign_ref(run_dir, source_path, "source_snapshot", "application/json")
     evidence_path, _evidence, evidence_ref = _make_evidence(
-        run_dir, run_id=run_id, source_sha256=batch_source.sha256
+        run_dir,
+        run_id=run_id,
+        source_sha256=batch_source.sha256,
+        secondary_sources_raw=(
+            canonical_json_bytes(
+                {
+                    "format": (
+                        "paper_reader.secondary-sources.v2-internal"
+                        if versioned_secondary_without_plan
+                        else "paper_reader.secondary-sources.unknown"
+                    ),
+                    "run_id": run_id,
+                    "item_key": "",
+                    "title": "测试论文",
+                    "source_snapshot_sha256": batch_source.sha256,
+                    "secondary_plan_sha256": "0" * 64,
+                    "usage_boundary": "cross-check only; must not be cited in evidence_summary",
+                    "eligible_source_count": 0,
+                    "captured_source_count": 0,
+                    "sources": [],
+                    "warnings": [],
+                }
+            )
+            if (
+                versioned_secondary_without_plan
+                or unknown_secondary_inventory_without_plan
+            )
+            else None
+        ),
     )
     review_path, package, review_snapshots = _make_review(
         run_dir,
@@ -742,6 +831,7 @@ def _prepared_then_claimed_worker_fixture(tmp_path: Path) -> PreparedWorkerFixtu
     built_worker = _local_fixture(tmp_path)
     source = json.loads(built_worker.source_path.read_text(encoding="utf-8"))
     prepared_run_dir = tmp_path / "paper_analysis_v2"
+    _write(prepared_run_dir / ".run.lock", b"")
     prepared_source_path = prepared_run_dir / "source" / "source.json"
     source_raw = _json(prepared_source_path, source)
     source_ref = _foreign_ref(
@@ -853,6 +943,129 @@ def _prepared_then_claimed_worker_fixture(tmp_path: Path) -> PreparedWorkerFixtu
     )
 
 
+def _secondary_plan_fixture(
+    run_dir: Path,
+    *,
+    run_id: str,
+    item_key: str,
+    source_snapshot_sha256: str,
+    state: str,
+) -> tuple[dict[str, object], bytes, dict[str, tuple[str, str, bytes]], bool]:
+    if state not in {"zero_eligible", "not_attempted", "unavailable", "captured"}:
+        raise AssertionError(f"unknown secondary state: {state}")
+    url = "https://mp.weixin.qq.com/s/example?scene=334"
+    sources = []
+    if state != "zero_eligible":
+        sources = [
+            {
+                "source_id": "secondary-001",
+                "url": url,
+                "source_field": "extra",
+                "source_provenance": "zotero_parent_snapshot",
+                "eligibility": "eligible",
+                "rejection_reason": None,
+            }
+        ]
+    plan = {
+        "format": "paper_reader.secondary-plan.v2-internal",
+        "item_key": item_key,
+        "source_snapshot_sha256": source_snapshot_sha256,
+        "usage_boundary": "cross-check only; must not be cited in evidence_summary",
+        "eligible_source_count": len(sources),
+        "sources": sources,
+        "warnings": [],
+    }
+    plan_bytes = canonical_json_bytes(plan)
+    plan_path = run_dir / "source" / "secondary-plan.json"
+    _write(plan_path, plan_bytes)
+    plan_ref = _foreign_ref(
+        run_dir,
+        plan_path,
+        "secondary_source_plan",
+        "application/json",
+    )
+    capture_status = "not_attempted"
+    capture_path: str | None = None
+    capture_sha256: str | None = None
+    secondary_members: dict[str, tuple[str, str, bytes]] = {
+        "secondary-plan.json": ("secondary_plan", "application/json", plan_bytes)
+    }
+    if state != "zero_eligible":
+        context = (
+            "# Secondary Context\n\n"
+            "> UNTRUSTED SECONDARY SOURCE DATA. Cross-check only.\n\n"
+            "## secondary-001\n\n"
+            f"- source_url: {url}\n"
+            f"- capture_status: {state}\n"
+        ).encode()
+        secondary_members["secondary_context.md"] = (
+            "secondary_context",
+            "text/markdown",
+            context,
+        )
+    if state in {"unavailable", "captured"}:
+        text = "网页正文用于与论文证据进行交叉核对。" * 20 if state == "captured" else ""
+        capture = {
+            "format": "paper_reader.secondary-capture.v2-internal",
+            "run_id": run_id,
+            "item_key": item_key,
+            "source_snapshot_sha256": source_snapshot_sha256,
+            "secondary_plan_sha256": plan_ref["sha256"],
+            "source_id": "secondary-001",
+            "requested_url": url,
+            "final_url": url,
+            "captured_at": NOW,
+            "capture_method": "chrome_cdp",
+            "status": state,
+            "title": "外部解读文章" if state == "captured" else "",
+            "publisher": "能源学人" if state == "captured" else "",
+            "published_at": "2026-07-10" if state == "captured" else "",
+            "description": "用于交叉核对。" if state == "captured" else "",
+            "text": text,
+            "text_sha256": sha256_bytes(text.encode()),
+            "text_length": len(text),
+            "warnings": [] if state == "captured" else ["navigation_timeout"],
+        }
+        capture_bytes = canonical_json_bytes(capture)
+        capture_path = "secondary/secondary-001.json"
+        capture_sha256 = sha256_bytes(capture_bytes)
+        capture_status = state
+        secondary_members[capture_path] = (
+            "secondary_capture",
+            "application/json",
+            capture_bytes,
+        )
+    inventory_sources = []
+    for source in sources:
+        inventory_sources.append(
+            {
+                **source,
+                "capture_status": capture_status,
+                "capture_path": capture_path,
+                "capture_sha256": capture_sha256,
+            }
+        )
+    inventory = {
+        "format": "paper_reader.secondary-sources.v2-internal",
+        "run_id": run_id,
+        "item_key": item_key,
+        "title": "A Useful Paper & Result",
+        "source_snapshot_sha256": source_snapshot_sha256,
+        "secondary_plan_sha256": plan_ref["sha256"],
+        "usage_boundary": "cross-check only; must not be cited in evidence_summary",
+        "eligible_source_count": len(sources),
+        "captured_source_count": 1 if state == "captured" else 0,
+        "sources": inventory_sources,
+        "warnings": [],
+    }
+    return (
+        plan_ref,
+        canonical_json_bytes(inventory),
+        secondary_members,
+        state in {"not_attempted", "unavailable"},
+    )
+
+
 def _zotero_fixture(
     tmp_path: Path,
     *,
@@ -860,6 +1073,12 @@ def _zotero_fixture(
     raw_inventory_title: str | None = None,
     result_inventory_sha256: str | None = None,
     mismatched_rendered_html: bool = False,
+    secondary_state: str | None = "zero_eligible",
+    secondary_plan_mismatch: bool = False,
+    secondary_member_mutation: str | None = None,
+    versioned_secondary_without_plan: bool = False,
+    unknown_secondary_inventory_without_plan: bool = False,
+    noncanonical_source_plan: bool = False,
 ) -> BuiltWorkerFixture:
     attachment_path = tmp_path / "zotero-paper.pdf"
     _write(attachment_path, b"%PDF-1.7\nzotero fixture\n")
@@ -875,6 +1094,7 @@ def _zotero_fixture(
         items=[ZoteroTitleManifestItem(item_id="001", source=manifest_source)],
     )
     run_dir = tmp_path / "a-useful-paper-result"
+    _write(run_dir / ".run.lock", b"")
     run_id = "run_zotero"
     item_key = "PARENT1"
     title = paper_title
@@ -907,6 +1127,8 @@ def _zotero_fixture(
         ],
         "notes": [],
     }
+    if secondary_state not in {None, "zero_eligible"}:
+        raw_selected["extra"] = "https://mp.weixin.qq.com/s/example?scene=334"
     raw_payload = {"search_results": raw_inventory, "selected_item": raw_selected}
     raw_path = run_dir / "source" / "discovery.raw.json"
     raw_bytes = _json(raw_path, raw_payload, canonical=False)
@@ -952,8 +1174,96 @@ def _zotero_fixture(
         "attachment_key": "ATTACH1",
         "attachment": attachment_source,
     }
+    plan_ref: dict[str, object] | None = None
+    secondary_sources_raw = canonical_json_bytes(
+        {
+            "item_key": item_key,
+            "title": title,
+            "usage_boundary": "cross-check only; must not be cited in evidence_summary",
+            "sources": [],
+            "warnings": [],
+        }
+    )
+    secondary_members: dict[str, tuple[str, str, bytes]] = {}
+    secondary_degraded = False
+    if secondary_state is not None:
+        (
+            plan_ref,
+            secondary_sources_raw,
+            secondary_members,
+            secondary_degraded,
+        ) = _secondary_plan_fixture(
+            run_dir,
+            run_id=run_id,
+            item_key=item_key,
+            source_snapshot_sha256=str(normalized_ref["sha256"]),
+            state=secondary_state,
+        )
+        if noncanonical_source_plan:
+            source_plan_path = run_dir / "source" / "secondary-plan.json"
+            source_plan_path.write_bytes(source_plan_path.read_bytes() + b"\n")
+            plan_ref = _foreign_ref(
+                run_dir,
+                source_plan_path,
+                "secondary_source_plan",
+                "application/json",
+            )
+        if secondary_plan_mismatch:
+            evidence_plan = json.loads(secondary_members["secondary-plan.json"][2])
+            evidence_plan["warnings"] = ["different opaque plan snapshot"]
+            secondary_members["secondary-plan.json"] = (
+                "secondary_plan",
+                "application/json",
+                canonical_json_bytes(evidence_plan),
+            )
+        if secondary_member_mutation == "wrong_role":
+            _role, media, raw = secondary_members["secondary-plan.json"]
+            secondary_members["secondary-plan.json"] = (
+                "not_secondary_plan",
+                media,
+                raw,
+            )
+        elif secondary_member_mutation == "wrong_media":
+            role, _media, raw = secondary_members["secondary-plan.json"]
+            secondary_members["secondary-plan.json"] = (role, "text/plain", raw)
+        elif secondary_member_mutation == "wrong_path":
+            member = secondary_members.pop("secondary-plan.json")
+            secondary_members["renamed-secondary-plan.json"] = member
+        elif secondary_member_mutation == "duplicate_role":
+            secondary_members["secondary-plan-copy.json"] = secondary_members[
+                "secondary-plan.json"
+            ]
+        elif secondary_member_mutation is not None:
+            raise AssertionError(
+                f"unknown secondary member mutation: {secondary_member_mutation}"
+            )
+    elif versioned_secondary_without_plan or unknown_secondary_inventory_without_plan:
+        secondary_sources_raw = canonical_json_bytes(
+            {
+                "format": (
+                    "paper_reader.secondary-sources.v2-internal"
+                    if versioned_secondary_without_plan
+                    else "paper_reader.secondary-sources.unknown"
+                ),
+                "run_id": run_id,
+                "item_key": item_key,
+                "title": title,
+                "source_snapshot_sha256": normalized_ref["sha256"],
+                "secondary_plan_sha256": "0" * 64,
+                "usage_boundary": "cross-check only; must not be cited in evidence_summary",
+                "eligible_source_count": 0,
+                "captured_source_count": 0,
+                "sources": [],
+                "warnings": [],
+            }
+        )
     evidence_path, _evidence, evidence_ref = _make_evidence(
-        run_dir, run_id=run_id, source_sha256=attachment_batch.sha256
+        run_dir,
+        run_id=run_id,
+        source_sha256=attachment_batch.sha256,
+        secondary_sources_raw=secondary_sources_raw,
+        secondary_members=secondary_members,
+        degraded=secondary_degraded,
     )
     review_path, package, review_snapshots = _make_review(
         run_dir,
@@ -970,7 +1280,13 @@ def _zotero_fixture(
         "source": source,
         "target": None,
         "status": "reviewed",
-        "artifacts": [raw_ref, normalized_ref, evidence_ref, review_ref],
+        "artifacts": [
+            raw_ref,
+            normalized_ref,
+            *([plan_ref] if plan_ref is not None else []),
+            evidence_ref,
+            review_ref,
+        ],
         "gate": package["gate"],
         "live_preflight": None,
     }
@@ -1031,7 +1347,14 @@ def _zotero_fixture(
         **reviewed_run,
         "target": target,
         "status": "candidate_built",
-        "artifacts": [raw_ref, normalized_ref, evidence_ref, review_ref, candidate_ref],
+        "artifacts": [
+            raw_ref,
+            normalized_ref,
+            *([plan_ref] if plan_ref is not None else []),
+            evidence_ref,
+            review_ref,
+            candidate_ref,
+        ],
         "gate": candidate["gate"],
         "live_preflight": candidate["live_preflight"],
     }
@@ -1238,10 +1561,19 @@ def test_run_recover_replays_worker_success_against_exact_prepared_attempt(
     # Simulate a worker.finished event written by the pre-fix runtime, whose
     # finish-time validator did not retain the prepared-attempt continuation.
     with monkeypatch.context() as finish_context:
+        @contextmanager
+        def pre_fix_commit_guard(*_args, **_kwargs):
+            yield lambda: None
+
         finish_context.setattr(
             worker_module,
             "validate_worker_result_artifacts",
             lambda *_args, **_kwargs: None,
+        )
+        finish_context.setattr(
+            worker_module,
+            "worker_result_artifact_commit_guard",
+            pre_fix_commit_guard,
         )
         finish_worker(
             prepared.batch_run,
@@ -1535,12 +1867,380 @@ def test_worker_finish_rejects_same_run_candidate_using_other_than_prepared_evid
     assert load_run_view(batch_run).state.items[0].worker_status == "claimed"
 
 
-def test_accepts_real_local_and_zotero_success_artifact_shapes(tmp_path: Path) -> None:
+def test_accepts_real_local_success_artifact_shape(tmp_path: Path) -> None:
     local = _local_fixture(tmp_path / "local")
-    zotero = _zotero_fixture(tmp_path / "zotero")
 
     assert validate_worker_result_artifacts(local.manifest, local.result) is None
+
+
+@pytest.mark.parametrize(
+    "secondary_state",
+    ["zero_eligible", "not_attempted", "unavailable", "captured"],
+)
+def test_accepts_reader_2_1_zotero_secondary_plan_closures(
+    secondary_state: str,
+    tmp_path: Path,
+) -> None:
+    zotero = _zotero_fixture(
+        tmp_path / secondary_state,
+        secondary_state=secondary_state,
+    )
+
     assert validate_worker_result_artifacts(zotero.manifest, zotero.result) == "PARENT1"
+
+
+def test_accepts_coherent_historical_v2_zotero_no_plan_closure(
+    tmp_path: Path,
+) -> None:
+    zotero = _zotero_fixture(tmp_path, secondary_state=None)
+
+    assert validate_worker_result_artifacts(zotero.manifest, zotero.result) == "PARENT1"
+
+
+def test_replays_committed_historical_v2_zotero_no_plan_worker_result(
+    tmp_path: Path,
+) -> None:
+    built = _zotero_fixture(tmp_path / "reader", secondary_state=None)
+    manifest_path = tmp_path / "manifest.json"
+    _json(manifest_path, built.manifest.model_dump(mode="json"))
+    skill_root = tmp_path / "batch-skill-root"
+    skill_root.mkdir()
+    batch_run = tmp_path / "batch-run"
+    initialize_run(
+        manifest_path,
+        request_id="61616161-6161-4161-8161-616161616161",
+        skill_root=skill_root,
+        output=batch_run,
+        initialized_at=NOW,
+    )
+    assignment = claim_worker(
+        batch_run,
+        worker_id="historical-reader",
+        request_id="62626262-6262-4262-8262-626262626262",
+        now="2026-07-10T00:00:01Z",
+    ).result["assignments"][0]
+    result = built.result.model_copy(
+        update={
+            "manifest_sha256": load_run_view(batch_run).manifest_sha256,
+            "worker_id": assignment["worker_id"],
+            "claim_id": assignment["claim_id"],
+            "attempt_id": assignment["attempt_id"],
+            "attempt_number": assignment["attempt_number"],
+            "lease_token_sha256": sha256_bytes(
+                str(assignment["lease_token"]).encode()
+            ),
+        }
+    )
+    result_path = tmp_path / "historical-worker-result.json"
+    result_path.write_bytes(canonical_json_bytes(result))
+    finish_worker(
+        batch_run,
+        str(assignment["item_id"]),
+        worker_id=str(assignment["worker_id"]),
+        claim_id=str(assignment["claim_id"]),
+        lease_token=str(assignment["lease_token"]),
+        attempt_id=str(assignment["attempt_id"]),
+        result_path=result_path,
+        request_id="63636363-6363-4363-8363-636363636363",
+        now="2026-07-10T00:00:02Z",
+    )
+
+    replayed = load_run_view(batch_run)
+
+    assert replayed.state.items[0].worker_status == "succeeded"
+    assert replayed.state.items[0].worker_result_sha256 == sha256_bytes(
+        canonical_json_bytes(result)
+    )
+
+
+@pytest.mark.parametrize("source_type", ["local", "zotero"])
+@pytest.mark.parametrize("inventory_format", ["versioned", "unknown"])
+def test_no_plan_closure_rejects_versioned_secondary_inventory(
+    source_type: str,
+    inventory_format: str,
+    tmp_path: Path,
+) -> None:
+    options = {
+        "versioned_secondary_without_plan": inventory_format == "versioned",
+        "unknown_secondary_inventory_without_plan": inventory_format == "unknown",
+    }
+    built = (
+        _local_fixture(tmp_path, **options)
+        if source_type == "local"
+        else _zotero_fixture(
+            tmp_path,
+            secondary_state=None,
+            **options,
+        )
+    )
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == "evidence_binding_mismatch"
+
+
+def test_rejects_current_and_candidate_run_secondary_plan_ref_mismatch(
+    tmp_path: Path,
+) -> None:
+    built = _zotero_fixture(tmp_path)
+
+    def drop_plan(snapshot: dict[str, object]) -> None:
+        snapshot["artifacts"] = [
+            ref
+            for ref in snapshot["artifacts"]
+            if ref["role"] != "secondary_source_plan"
+        ]
+
+    _rewrite_candidate_run_snapshot(built, drop_plan)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == "source_binding_mismatch"
+
+
+def test_rejects_secondary_plan_file_without_current_or_candidate_ref(
+    tmp_path: Path,
+) -> None:
+    built = _zotero_fixture(tmp_path)
+
+    def drop_plan(snapshot: dict[str, object]) -> None:
+        snapshot["artifacts"] = [
+            ref
+            for ref in snapshot["artifacts"]
+            if ref["role"] != "secondary_source_plan"
+        ]
+
+    _rewrite_candidate_run_snapshot(built, drop_plan)
+    current = json.loads(built.run_path.read_bytes())
+    drop_plan(current)
+    built.rewrite_final_run(current)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == "artifact_closed_world_mismatch"
+
+
+def test_rejects_secondary_plan_ref_without_exact_source_file(
+    tmp_path: Path,
+) -> None:
+    built = _zotero_fixture(tmp_path)
+    plan_path = built.run_dir / "source" / "secondary-plan.json"
+    plan_path.rename(built.run_dir / "detached-secondary-plan.json")
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == "source_binding_mismatch"
+
+
+@pytest.mark.parametrize("unsafe_link", ["symlink", "hardlink"])
+def test_rejects_unsafe_secondary_plan_source_member(
+    unsafe_link: str,
+    tmp_path: Path,
+) -> None:
+    built = _zotero_fixture(tmp_path)
+    plan_path = built.run_dir / "source" / "secondary-plan.json"
+    if unsafe_link == "symlink":
+        held = built.run_dir / "detached-secondary-plan.json"
+        plan_path.rename(held)
+        plan_path.symlink_to(held)
+    else:
+        (built.run_dir / "secondary-plan-hardlink.json").hardlink_to(plan_path)
+
+    with pytest.raises(BatchRuntimeError):
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+
+@pytest.mark.parametrize("unsafe_link", ["symlink", "hardlink"])
+def test_rejects_unsafe_secondary_plan_evidence_member(
+    unsafe_link: str,
+    tmp_path: Path,
+) -> None:
+    built = _zotero_fixture(tmp_path)
+    plan_path = built.evidence_path.parent / "secondary-plan.json"
+    if unsafe_link == "symlink":
+        held = built.run_dir / "detached-evidence-secondary-plan.json"
+        plan_path.rename(held)
+        plan_path.symlink_to(held)
+    else:
+        (built.run_dir / "evidence-secondary-plan-hardlink.json").hardlink_to(
+            plan_path
+        )
+
+    with pytest.raises(BatchRuntimeError):
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+
+def test_rejects_local_source_plan_ref_and_file(
+    tmp_path: Path,
+) -> None:
+    built = _local_fixture(tmp_path)
+    plan_path = built.run_dir / "source" / "secondary-plan.json"
+    _json(plan_path, {"opaque": "forbidden local plan"})
+    plan_ref = _foreign_ref(
+        built.run_dir,
+        plan_path,
+        "secondary_source_plan",
+        "application/json",
+    )
+
+    def add_plan(snapshot: dict[str, object]) -> None:
+        snapshot["artifacts"].append(plan_ref)
+
+    _rewrite_candidate_run_snapshot(built, add_plan)
+    current = json.loads(built.run_path.read_bytes())
+    add_plan(current)
+    built.rewrite_final_run(current)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == "source_binding_mismatch"
+
+
+def test_rejects_source_plan_bytes_that_differ_from_fixed_evidence_member(
+    tmp_path: Path,
+) -> None:
+    built = _zotero_fixture(tmp_path, secondary_plan_mismatch=True)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == "evidence_binding_mismatch"
+
+
+def test_rejects_ref_updated_noncanonical_source_plan_before_closure_use(
+    tmp_path: Path,
+) -> None:
+    built = _zotero_fixture(tmp_path, noncanonical_source_plan=True)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == "source_binding_mismatch"
+
+
+def test_preserves_resource_limit_from_secondary_plan_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built = _zotero_fixture(tmp_path)
+    run = artifact_module._OpaqueRecord(json.loads(built.run_path.read_bytes()))
+    plan_ref = next(
+        ref for ref in run.artifacts if ref.role == "secondary_source_plan"
+    )
+    monkeypatch.setattr(
+        artifact_module,
+        "MAX_JSON_ARTIFACT_BYTES",
+        plan_ref.size_bytes - 1,
+    )
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        artifact_module._validate_source_directory(
+            built.run_dir,
+            run.source,
+            run.artifacts,
+        )
+
+    assert exc_info.value.code == "resource_limit"
+
+
+def test_rejects_source_plan_change_between_read_and_closed_world_walk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built = _zotero_fixture(tmp_path)
+    original_read_inner = artifact_module._read_inner
+    replaced = False
+
+    def replace_after_first_plan_read(run_dir, ref, **kwargs):
+        nonlocal replaced
+        result = original_read_inner(run_dir, ref, **kwargs)
+        if getattr(ref, "role", None) == "secondary_source_plan" and not replaced:
+            replaced = True
+            (built.run_dir / "source" / "secondary-plan.json").write_bytes(
+                canonical_json_bytes({"replaced": True})
+            )
+        return result
+
+    monkeypatch.setattr(artifact_module, "_read_inner", replace_after_first_plan_read)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == "source_binding_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("replaced_member", "expected_code"),
+    [
+        ("source_plan", "source_binding_mismatch"),
+        ("evidence_plan", "artifact_binding_mismatch"),
+        ("inventory", "artifact_binding_mismatch"),
+    ],
+)
+def test_rejects_secondary_binding_change_during_evidence_closure_validation(
+    replaced_member: str,
+    expected_code: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built = _zotero_fixture(tmp_path)
+    original_read_inner = artifact_module._read_inner
+    replaced = False
+
+    def replace_after_consumed_member_read(run_dir, ref, **kwargs):
+        nonlocal replaced
+        result = original_read_inner(run_dir, ref, **kwargs)
+        role = getattr(ref, "role", None)
+        trigger_role = (
+            "secondary_sources"
+            if replaced_member == "inventory"
+            else "secondary_plan"
+        )
+        if role == trigger_role and not replaced:
+            replaced = True
+            if replaced_member == "source_plan":
+                target = built.run_dir / "source" / "secondary-plan.json"
+            elif replaced_member == "evidence_plan":
+                target = built.evidence_path.parent / "secondary-plan.json"
+            else:
+                target = built.evidence_path.parent / "secondary_sources.json"
+            target.write_bytes(canonical_json_bytes({"replaced": True}))
+        return result
+
+    monkeypatch.setattr(
+        artifact_module,
+        "_read_inner",
+        replace_after_consumed_member_read,
+    )
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == expected_code
+
+
+@pytest.mark.parametrize(
+    "secondary_member_mutation",
+    ["wrong_role", "wrong_media", "wrong_path", "duplicate_role"],
+)
+def test_rejects_noncanonical_secondary_plan_evidence_member_shape(
+    secondary_member_mutation: str,
+    tmp_path: Path,
+) -> None:
+    built = _zotero_fixture(
+        tmp_path,
+        secondary_member_mutation=secondary_member_mutation,
+    )
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == "evidence_binding_mismatch"
 
 
 @pytest.mark.parametrize(
@@ -1934,3 +2634,219 @@ def test_rejects_raw_inventory_that_does_not_normalize_to_source_inventory(
         validate_worker_result_artifacts(built.manifest, built.result)
 
     assert exc_info.value.code == "source_binding_mismatch"
+
+
+@pytest.mark.parametrize(
+    "changed_member",
+    ["secondary_plan", "context", "nested_empty_directory"],
+)
+def test_worker_finish_commit_guard_rejects_reader_closure_change_before_event(
+    changed_member: str,
+    tmp_path: Path,
+) -> None:
+    built = _zotero_fixture(tmp_path / "reader", secondary_state="captured")
+    manifest_path = tmp_path / "manifest.json"
+    _json(manifest_path, built.manifest.model_dump(mode="json"))
+    skill_root = tmp_path / "batch-skill-root"
+    skill_root.mkdir()
+    batch_run = tmp_path / "batch-run"
+    initialize_run(
+        manifest_path,
+        request_id="17171717-1717-4171-8171-171717171717",
+        skill_root=skill_root,
+        output=batch_run,
+        initialized_at=NOW,
+    )
+    assignment = claim_worker(
+        batch_run,
+        worker_id="reader",
+        request_id="18181818-1818-4181-8181-181818181818",
+        now="2026-07-10T00:00:01Z",
+    ).result["assignments"][0]
+    result = built.result.model_copy(
+        update={
+            "manifest_sha256": load_run_view(batch_run).manifest_sha256,
+            "worker_id": assignment["worker_id"],
+            "claim_id": assignment["claim_id"],
+            "attempt_id": assignment["attempt_id"],
+            "attempt_number": assignment["attempt_number"],
+            "lease_token_sha256": sha256_bytes(
+                str(assignment["lease_token"]).encode()
+            ),
+        }
+    )
+    result_path = tmp_path / "worker-result.json"
+    result_path.write_bytes(canonical_json_bytes(result))
+    if changed_member == "secondary_plan":
+        changed_path = built.run_dir / "source" / "secondary-plan.json"
+    elif changed_member == "context":
+        changed_path = built.evidence_path.parent / "context.md"
+    else:
+        nested_empty = built.evidence_path.parent / "junk" / "deep"
+        nested_empty.mkdir(parents=True)
+        changed_path = nested_empty / "unexpected.bin"
+    changed_raw = changed_path.read_bytes() if changed_path.exists() else b""
+    before = load_run_view(batch_run)
+    changed = False
+
+    def fault(stage: str) -> None:
+        nonlocal changed
+        if stage == "after_pre_recovery_validation" and not changed:
+            if changed_member == "context":
+                changed_path.rename(tmp_path / "detached-context.md")
+                changed_path.write_bytes(changed_raw)
+            elif changed_member == "nested_empty_directory":
+                changed_path.write_bytes(b"unexpected")
+            else:
+                changed_path.write_bytes(changed_raw + b" ")
+            changed = True
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        finish_worker(
+            batch_run,
+            str(assignment["item_id"]),
+            worker_id=str(assignment["worker_id"]),
+            claim_id=str(assignment["claim_id"]),
+            lease_token=str(assignment["lease_token"]),
+            attempt_id=str(assignment["attempt_id"]),
+            result_path=result_path,
+            request_id="19191919-1919-4191-8191-191919191919",
+            now="2026-07-10T00:00:02Z",
+            fault=fault,
+        )
+
+    after = load_run_view(batch_run)
+    assert changed is True
+    assert exc_info.value.code in {
+        "artifact_binding_mismatch",
+        "artifact_closed_world_mismatch",
+        "source_binding_mismatch",
+        "storage_path_changed",
+    }
+    assert len(after.events) == len(before.events)
+    assert after.state.items[0].worker_status == "claimed"
+    assert not list((batch_run / "results" / "worker").glob("*.json"))
+
+
+def test_local_prepare_finish_commit_guard_rejects_evidence_change_before_event(
+    tmp_path: Path,
+) -> None:
+    built = _local_fixture(tmp_path / "reader")
+    final_run = json.loads(built.run_path.read_bytes())
+    source_ref = next(
+        ref for ref in final_run["artifacts"] if ref["role"] == "source_snapshot"
+    )
+    evidence_ref = next(
+        ref for ref in final_run["artifacts"] if ref["role"] == "evidence_manifest"
+    )
+    prepared_run = {
+        **final_run,
+        "status": "prepared",
+        "artifacts": [source_ref, evidence_ref],
+        "gate": _gate("passed", ()),
+    }
+    _json(built.run_path, prepared_run)
+
+    manifest_path = tmp_path / "manifest.json"
+    _json(manifest_path, built.manifest.model_dump(mode="json"))
+    skill_root = tmp_path / "batch-skill-root"
+    skill_root.mkdir()
+    batch_run = tmp_path / "batch-run"
+    initialize_run(
+        manifest_path,
+        request_id="20202020-2020-4202-8202-202020202020",
+        skill_root=skill_root,
+        output=batch_run,
+        initialized_at=NOW,
+    )
+    assignment = claim_local_prepare(
+        batch_run,
+        worker_id="preparer",
+        request_id="21212121-2121-4212-8212-212121212121",
+        now="2026-07-10T00:00:01Z",
+    ).result["assignments"][0]
+    view = load_run_view(batch_run)
+    paper_reader_root = _fake_paper_reader_root(tmp_path)
+    result = LocalPrepareResult(
+        schema_version="paper_reader_batch.local-prepare-result.v2",
+        manifest_sha256=view.manifest_sha256,
+        item_id=assignment["item_id"],
+        worker_id=assignment["worker_id"],
+        claim_id=assignment["claim_id"],
+        attempt_id=assignment["attempt_id"],
+        attempt_number=assignment["attempt_number"],
+        lease_token_sha256=sha256_bytes(str(assignment["lease_token"]).encode()),
+        status="prepared",
+        source=view.manifest.items[0].source,
+        paper_reader_root=paper_reader_root_identity(paper_reader_root),
+        paper_reader_run_directory={
+            "device": built.run_dir.stat().st_dev,
+            "inode": built.run_dir.stat().st_ino,
+        },
+        paper_reader_run=_outer_ref(
+            built.run_path,
+            "paper_reader.run.v2",
+            str(prepared_run["run_id"]),
+        ),
+        evidence=_outer_ref(
+            built.evidence_path,
+            "paper_reader.evidence.v2-internal",
+            str(json.loads(built.evidence_path.read_bytes())["evidence_id"]),
+        ),
+    )
+    result_path = tmp_path / "local-prepare-result.json"
+    result_path.write_bytes(canonical_json_bytes(result))
+    evidence_raw = built.evidence_path.read_bytes()
+    before = load_run_view(batch_run)
+    changed = False
+
+    def fault(stage: str) -> None:
+        nonlocal changed
+        if stage == "after_pre_recovery_validation" and not changed:
+            built.evidence_path.rename(tmp_path / "detached-evidence.json")
+            built.evidence_path.write_bytes(evidence_raw)
+            changed = True
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        finish_local_prepare(
+            batch_run,
+            str(assignment["item_id"]),
+            worker_id=str(assignment["worker_id"]),
+            claim_id=str(assignment["claim_id"]),
+            lease_token=str(assignment["lease_token"]),
+            attempt_id=str(assignment["attempt_id"]),
+            result_path=result_path,
+            expected_root=paper_reader_root,
+            request_id="22222222-2222-4222-8222-222222222223",
+            now="2026-07-10T00:00:02Z",
+            fault=fault,
+        )
+
+    after = load_run_view(batch_run)
+    assert changed is True
+    assert exc_info.value.code in {
+        "artifact_binding_mismatch",
+        "source_binding_mismatch",
+        "storage_path_changed",
+    }
+    assert len(after.events) == len(before.events)
+    assert after.state.items[0].local_prepare_status == "claimed"
+    assert not list((batch_run / "results" / "local-prepare").glob("*.json"))
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["source_binding_mismatch", "local_prepare_binding_mismatch"],
+)
+def test_foreign_reader_commit_lock_missing_uses_artifact_error_contract(
+    code: str,
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "reader-run"
+    run_root.mkdir()
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        with artifact_module._locked_foreign_reader_run(run_root, code=code):
+            raise AssertionError("missing Reader lock entered commit window")
+
+    assert exc_info.value.code == code

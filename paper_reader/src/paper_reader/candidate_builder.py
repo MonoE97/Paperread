@@ -38,9 +38,15 @@ from paper_reader.raw_schema import require_raw_schema_version
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import ExpectedRunArtifact, locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
+from paper_reader.secondary_evidence import (
+    BoundSourceClosureGuard,
+    SecondaryEvidenceError,
+    open_bound_source_closure_guard,
+)
 from paper_reader.storage import (
     HeldExactTreeGuard,
     OwnedPublishedTree,
+    UnsafeStoragePathError,
     atomic_publish_tree,
     atomic_write_bytes,
     atomic_write_json,
@@ -557,6 +563,25 @@ def build_candidate(run_path: Path, *, provider=None):
 
 
 def _build_local_candidate_locked(loaded: LoadedRun) -> BuiltLocalCandidate:
+    try:
+        source_guard = open_bound_source_closure_guard(loaded)
+    except SecondaryEvidenceError as exc:
+        raise LocalPublicationError(exc.code, str(exc)) from exc
+    with source_guard:
+        try:
+            source_guard.verify()
+        except UnsafeStoragePathError as exc:
+            raise LocalPublicationError(
+                "secondary_plan_mismatch",
+                f"source closure changed before local candidate build: {exc}",
+            ) from exc
+        return _build_local_candidate_with_source_guard(loaded, source_guard)
+
+
+def _build_local_candidate_with_source_guard(
+    loaded: LoadedRun,
+    source_guard: BoundSourceClosureGuard,
+) -> BuiltLocalCandidate:
     run_dir = loaded.manifest_path.parent
     source = loaded.run.source
     target = loaded.run.target
@@ -689,6 +714,7 @@ def _build_local_candidate_locked(loaded: LoadedRun) -> BuiltLocalCandidate:
             {**files, "candidate.json": candidate_bytes}
         )
         try:
+            source_guard.verify()
             published = atomic_publish_tree(
                 staging,
                 candidate_dir,
@@ -718,9 +744,10 @@ def _build_local_candidate_locked(loaded: LoadedRun) -> BuiltLocalCandidate:
                 cas_update_run(
                     loaded,
                     updated_run,
-                    finalization_guards=(published_guard,),
+                    finalization_guards=(published_guard, source_guard),
                 )
                 published_guard.verify()
+                source_guard.verify()
         except Exception as exc:
             raise LocalPublicationError(
                 "candidate_status_update_failed",

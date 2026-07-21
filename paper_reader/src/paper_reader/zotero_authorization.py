@@ -40,11 +40,18 @@ from paper_reader.raw_schema import require_raw_schema_version
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.run_lock import ExpectedRunArtifact, locked_v2_run
 from paper_reader.run_size import RunSizeLimitError, enforce_projected_run_size
+from paper_reader.secondary_evidence import (
+    BoundSourceClosureGuard,
+    SecondaryEvidenceError,
+    open_bound_source_closure_guard,
+)
 from paper_reader.storage import (
     HeldExactFileGuard,
+    HeldExactTreeGuard,
     ImmutableTreeSnapshot,
     OwnedDirectoryAnchor,
     OwnedPublishedFile,
+    UnsafeStoragePathError,
     atomic_write_bytes,
     atomic_write_json,
     cas_update_run,
@@ -693,9 +700,11 @@ def _recover_matching_orphan_authorization(
     candidate_digest: str,
     candidate_guard: _CandidateTreeGuard,
     evidence_guard: _CandidateTreeGuard,
+    source_guard: BoundSourceClosureGuard,
     reservations: tuple[ZoteroAuthorizationReservation, ...],
     required_reservation: ZoteroAuthorizationReservation | None = None,
 ) -> bool:
+    source_guard.verify()
     run_dir = loaded.manifest_path.parent
     authorizations_dir = run_dir / "authorizations"
     run_anchor = loaded.run_directory_anchor
@@ -821,10 +830,12 @@ def _recover_matching_orphan_authorization(
             "multiple exact unbound authorizations match this candidate",
         )
     if not matches:
+        source_guard.verify()
         return False
 
     recovered = matches[0]
     if not anchored_entry_exists(run_anchor, recovered.authorization_path):
+        source_guard.verify()
         recovery_record = recovered.authorization_path.with_suffix("") / "record.json"
         recovery_bytes = read_anchored_bytes(
             run_anchor,
@@ -850,6 +861,7 @@ def _recover_matching_orphan_authorization(
                     recovery_record,
                     expected_bytes=recovery_bytes,
                 )
+            source_guard.verify()
         except UnsafeZoteroArtifactPathError as exc:
             raise ZoteroAuthorizationError(exc.code, str(exc), data=exc.data) from exc
         except Exception as exc:
@@ -896,6 +908,7 @@ def _recover_matching_orphan_authorization(
             authorization_guard.verify()
             candidate_guard.verify()
             evidence_guard.verify()
+            source_guard.verify()
             cas_update_run(
                 loaded,
                 updated_run,
@@ -903,8 +916,10 @@ def _recover_matching_orphan_authorization(
                     authorization_guard,
                     candidate_guard,
                     evidence_guard,
+                    source_guard,
                 ),
             )
+            source_guard.verify()
             evidence_guard.verify()
             candidate_guard.verify()
             authorization_guard.verify()
@@ -1050,6 +1065,18 @@ def _authorize_zotero_candidate_once(
                 )
             _preflight_existing_authorization_schemas(loaded, run_anchor)
             try:
+                source_guard = finalization_stack.enter_context(
+                    open_bound_source_closure_guard(loaded)
+                )
+                source_guard.verify()
+            except SecondaryEvidenceError as exc:
+                raise ZoteroAuthorizationError(exc.code, str(exc)) from exc
+            except UnsafeStoragePathError as exc:
+                raise ZoteroAuthorizationError(
+                    "secondary_plan_mismatch",
+                    f"source closure changed before authorization: {exc}",
+                ) from exc
+            try:
                 loaded, candidate_path, candidate, candidate_digest, verified = _load_candidate(
                     candidate_path,
                     loaded_run=loaded,
@@ -1144,22 +1171,26 @@ def _authorize_zotero_candidate_once(
                     or active.candidate_digest != candidate_digest
                 ):
                     raise _active_reservation_error(active)
+                source_guard.verify()
                 recovered = _recover_matching_orphan_authorization(
                     loaded,
                     candidate_digest=candidate_digest,
                     candidate_guard=candidate_guard,
                     evidence_guard=evidence_guard,
+                    source_guard=source_guard,
                     reservations=reservations,
                     required_reservation=active,
                 )
                 if not recovered:
                     raise _active_reservation_error(active)
             else:
+                source_guard.verify()
                 _recover_matching_orphan_authorization(
                     loaded,
                     candidate_digest=candidate_digest,
                     candidate_guard=candidate_guard,
                     evidence_guard=evidence_guard,
+                    source_guard=source_guard,
                     reservations=reservations,
                 )
             try:
@@ -1173,7 +1204,21 @@ def _authorize_zotero_candidate_once(
                 allow_existing_sidecar=False,
                 allow_existing_main=False,
             )
+            try:
+                source_guard.verify()
+            except UnsafeStoragePathError as exc:
+                raise ZoteroAuthorizationError(
+                    "secondary_plan_mismatch",
+                    f"source closure changed before live authorization preflight: {exc}",
+                ) from exc
             parent_bytes, children_bytes = _fresh_live_preflight(candidate, resolved_provider)
+            try:
+                source_guard.verify()
+            except UnsafeStoragePathError as exc:
+                raise ZoteroAuthorizationError(
+                    "secondary_plan_mismatch",
+                    f"source closure changed during live authorization preflight: {exc}",
+                ) from exc
             try:
                 revalidate_candidate_original_evidence(loaded, candidate, verified)
             except LocalPublicationError as exc:
@@ -1332,6 +1377,7 @@ def _authorize_zotero_candidate_once(
                         data={"run_size_bytes": exc.actual_bytes, "max_bytes": exc.max_bytes},
                     ) from exc
                 try:
+                    source_guard.verify()
                     append_authorization_reservation(
                         parent_lock,
                         authorization_id=authorization.authorization_id,
@@ -1342,6 +1388,7 @@ def _authorize_zotero_candidate_once(
                         now=grant_instant,
                         ttl_seconds=authorization.ttl_seconds,
                     )
+                    source_guard.verify()
                 except ZoteroAuthorizationReservationError as exc:
                     raise ZoteroAuthorizationError(exc.code, str(exc), data=exc.data) from exc
                 publication_phase = "sidecar"
@@ -1385,6 +1432,7 @@ def _authorize_zotero_candidate_once(
                                 authorization_guard,
                                 candidate_guard,
                                 evidence_guard,
+                                source_guard,
                             ),
                         )
                     except Exception as exc:
@@ -1414,6 +1462,7 @@ def _authorize_zotero_candidate_once(
                                 verified,
                             )
                             evidence_guard.verify()
+                            source_guard.verify()
                             candidate_guard.verify()
                             authorization_guard.verify()
                             updated_run_guard.verify()
@@ -1437,6 +1486,7 @@ def _authorize_zotero_candidate_once(
                                 },
                             )
                         try:
+                            source_guard.verify()
                             evidence_guard.verify()
                             candidate_guard.verify()
                             authorization_guard.verify()
@@ -1447,6 +1497,7 @@ def _authorize_zotero_candidate_once(
                             candidate_guard.verify()
                             updated_run_guard.verify()
                             evidence_guard.verify()
+                            source_guard.verify()
                         except (LocalPublicationError, OSError, ValueError) as exc:
                             _raise_after_authorization_commit_failure(exc)
                         return AuthorizedZoteroWrite(

@@ -337,7 +337,7 @@ def load_bound_evidence(loaded: LoadedRun, evidence_digest: str) -> BoundEvidenc
         manifest_bundle_dir=manifest_dir,
         anchor=loaded.run_directory_anchor,
     )
-    return BoundEvidence(
+    bound = BoundEvidence(
         manifest=manifest,
         manifest_ref=manifest_ref,
         manifest_path=manifest_path,
@@ -345,6 +345,20 @@ def load_bound_evidence(loaded: LoadedRun, evidence_digest: str) -> BoundEvidenc
         digest=evidence_digest,
         artifacts_by_role={role: tuple(paths) for role, paths in artifacts_by_role.items()},
     )
+    from paper_reader.secondary_evidence import (
+        SecondaryEvidenceError,
+        validate_bound_secondary_evidence,
+    )
+
+    try:
+        validate_bound_secondary_evidence(loaded, bound)
+    except SecondaryEvidenceError as exc:
+        raise EvidenceManifestError(
+            exc.code,
+            str(exc),
+            artifact_path=manifest_ref.path,
+        ) from exc
+    return bound
 
 
 def build_evidence_manifest(
