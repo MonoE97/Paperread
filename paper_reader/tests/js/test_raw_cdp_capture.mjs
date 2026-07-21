@@ -93,6 +93,12 @@ class CdpHarness {
     invalidFetchResourceType = "Document",
     invalidNetworkResourceType = "Fetch",
     invalidFetchCompanionNetworkResourceType = null,
+    invalidNetworkLoadingFailedReason = null,
+    invalidNetworkLoadingFailedFirst = false,
+    invalidNetworkLoadingFailedResourceType = null,
+    invalidNetworkRequestId = "network-invalid-url",
+    invalidNetworkEventRepeats = 1,
+    invalidNetworkLoadingFailedRepeats = 1,
   } = {}) {
     this.unsafeUrl = unsafeUrl;
     this.download = download;
@@ -131,6 +137,13 @@ class CdpHarness {
     this.invalidNetworkResourceType = invalidNetworkResourceType;
     this.invalidFetchCompanionNetworkResourceType =
       invalidFetchCompanionNetworkResourceType;
+    this.invalidNetworkLoadingFailedReason = invalidNetworkLoadingFailedReason;
+    this.invalidNetworkLoadingFailedFirst = invalidNetworkLoadingFailedFirst;
+    this.invalidNetworkLoadingFailedResourceType =
+      invalidNetworkLoadingFailedResourceType;
+    this.invalidNetworkRequestId = invalidNetworkRequestId;
+    this.invalidNetworkEventRepeats = invalidNetworkEventRepeats;
+    this.invalidNetworkLoadingFailedRepeats = invalidNetworkLoadingFailedRepeats;
     this.captureEvaluateCount = 0;
     this.commands = [];
     this.closed = false;
@@ -438,20 +451,60 @@ class CdpHarness {
               return;
             }
             if (this.invalidNetworkUrlValue !== undefined) {
-              queueMicrotask(() => socket.emitMessage({
-                method: "Network.requestWillBeSent",
+              const emitLoadingFailed = () => socket.emitMessage({
+                method: "Network.loadingFailed",
                 sessionId: "session-1",
                 params: {
-                  requestId: "network-invalid-url",
-                  request: {
-                    url: this.invalidNetworkUrlValue,
-                    method: "GET",
-                    headers: {},
-                  },
-                  type: this.invalidNetworkResourceType,
-                  frameId: "frame-1",
+                  requestId: this.invalidNetworkRequestId,
+                  timestamp: 2,
+                  type:
+                    this.invalidNetworkLoadingFailedResourceType ||
+                    this.invalidNetworkResourceType,
+                  errorText: "net::ERR_BLOCKED_BY_CLIENT",
+                  canceled: true,
+                  blockedReason: this.invalidNetworkLoadingFailedReason,
                 },
-              }));
+              });
+              if (
+                this.invalidNetworkLoadingFailedReason !== null &&
+                this.invalidNetworkLoadingFailedFirst
+              ) {
+                for (
+                  let index = 0;
+                  index < this.invalidNetworkLoadingFailedRepeats;
+                  index += 1
+                ) {
+                  queueMicrotask(emitLoadingFailed);
+                }
+              }
+              for (let index = 0; index < this.invalidNetworkEventRepeats; index += 1) {
+                queueMicrotask(() => socket.emitMessage({
+                  method: "Network.requestWillBeSent",
+                  sessionId: "session-1",
+                  params: {
+                    requestId: this.invalidNetworkRequestId,
+                    request: {
+                      url: this.invalidNetworkUrlValue,
+                      method: "GET",
+                      headers: {},
+                    },
+                    type: this.invalidNetworkResourceType,
+                    frameId: "frame-1",
+                  },
+                }));
+              }
+              if (
+                this.invalidNetworkLoadingFailedReason !== null &&
+                !this.invalidNetworkLoadingFailedFirst
+              ) {
+                for (
+                  let index = 0;
+                  index < this.invalidNetworkLoadingFailedRepeats;
+                  index += 1
+                ) {
+                  queueMicrotask(emitLoadingFailed);
+                }
+              }
               this.finishNavigation(socket);
               return;
             }
@@ -1188,42 +1241,122 @@ test("classifies invalid Fetch and Network URL values without disclosing them", 
 });
 
 
-test("blocks oversized inline passive data resources without network URL failures", async () => {
+test("blocks oversized inline passive data resources at Fetch without URL failures", async () => {
   const inlineDataUrl = `data:application/octet-stream;base64,${"A".repeat(5000)}`;
   for (const resourceType of ["Font", "Image", "Media", "Prefetch", "TextTrack"]) {
-    for (const checkpoint of ["fetch_request_paused", "network_request_will_be_sent"]) {
-      const harness = new CdpHarness(
-        checkpoint === "fetch_request_paused"
-          ? {
-              invalidFetchUrlValue: inlineDataUrl,
-              invalidFetchResourceType: resourceType,
-            }
-          : {
-              invalidNetworkUrlValue: inlineDataUrl,
-              invalidNetworkResourceType: resourceType,
-            },
-      );
-      const {capture} = await runCapture(harness);
-      const label = `${checkpoint}:${resourceType}`;
+    const harness = new CdpHarness({
+      invalidFetchUrlValue: inlineDataUrl,
+      invalidFetchResourceType: resourceType,
+    });
+    const {capture} = await runCapture(harness);
 
-      assert.equal(capture.status, "captured", label);
-      assert.equal(
-        capture.warnings.includes("invalid_network_request_url"),
-        false,
-        label,
-      );
-      const cancellation = harness.commands.find(
-        (command) =>
-          command.method === "Fetch.failRequest" &&
-          command.params.requestId === "fetch-invalid-url",
-      );
-      if (checkpoint === "fetch_request_paused") {
-        assert.equal(cancellation.params.errorReason, "BlockedByClient", label);
-      } else {
-        assert.equal(cancellation, undefined, label);
-      }
-    }
+    assert.equal(capture.status, "captured", resourceType);
+    assert.equal(capture.warnings.includes("invalid_network_request_url"), false);
+    const cancellation = harness.commands.find(
+      (command) =>
+        command.method === "Fetch.failRequest" &&
+        command.params.requestId === "fetch-invalid-url",
+    );
+    assert.equal(cancellation.params.errorReason, "BlockedByClient", resourceType);
   }
+});
+
+
+test("accepts oversized passive data only after an inspector block proof", async () => {
+  const inlineDataUrl = `data:font/woff2;base64,${"A".repeat(5000)}`;
+  for (const loadingFailedFirst of [false, true]) {
+    const harness = new CdpHarness({
+      invalidNetworkUrlValue: inlineDataUrl,
+      invalidNetworkResourceType: "Font",
+      invalidNetworkLoadingFailedReason: "inspector",
+      invalidNetworkLoadingFailedFirst: loadingFailedFirst,
+    });
+    const {capture} = await runCapture(harness);
+
+    assert.equal(capture.status, "captured", String(loadingFailedFirst));
+    assert.equal(capture.warnings.includes("invalid_network_request_url"), false);
+  }
+});
+
+
+test("fails closed for oversized passive data observed only by Network", async () => {
+  const harness = new CdpHarness({
+    invalidNetworkUrlValue: `data:font/woff2;base64,${"A".repeat(5000)}`,
+    invalidNetworkResourceType: "Font",
+  });
+  const {capture} = await runCapture(harness);
+
+  assert.equal(capture.status, "unavailable");
+  assert.ok(capture.warnings.includes("unproven_passive_data_block"));
+});
+
+
+test("does not accept a non-inspector or type-drifted passive data block proof", async () => {
+  for (const options of [
+    {invalidNetworkLoadingFailedReason: "other"},
+    {
+      invalidNetworkLoadingFailedReason: "inspector",
+      invalidNetworkLoadingFailedResourceType: "Fetch",
+    },
+  ]) {
+    const harness = new CdpHarness({
+      invalidNetworkUrlValue: `data:font/woff2;base64,${"A".repeat(5000)}`,
+      invalidNetworkResourceType: "Font",
+      ...options,
+    });
+    const {capture} = await runCapture(harness);
+
+    assert.equal(capture.status, "unavailable");
+    assert.ok(capture.warnings.includes("unproven_passive_data_block"));
+  }
+});
+
+
+test("accepts matching Fetch cancellation and Network observation for passive data", async () => {
+  const harness = new CdpHarness({
+    invalidFetchUrlValue: `data:font/woff2;base64,${"A".repeat(5000)}`,
+    invalidFetchResourceType: "Font",
+    invalidFetchCompanionNetworkResourceType: "Font",
+  });
+  const {capture} = await runCapture(harness);
+
+  assert.equal(capture.status, "captured");
+  assert.equal(capture.warnings.includes("invalid_network_request_url"), false);
+});
+
+
+test("fails closed for duplicate or malformed passive data Network identities", async () => {
+  for (const options of [
+    {invalidNetworkEventRepeats: 2},
+    {invalidNetworkRequestId: ""},
+    {invalidNetworkRequestId: "x".repeat(513)},
+  ]) {
+    const harness = new CdpHarness({
+      invalidNetworkUrlValue: `data:font/woff2;base64,${"A".repeat(5000)}`,
+      invalidNetworkResourceType: "Font",
+      invalidNetworkLoadingFailedReason: "inspector",
+      ...options,
+    });
+    const {capture} = await runCapture(harness);
+
+    assert.equal(capture.status, "unavailable");
+  }
+});
+
+
+test("bounds passive data block proof events", async () => {
+  const harness = new CdpHarness({
+    invalidNetworkUrlValue: `data:font/woff2;base64,${"A".repeat(5000)}`,
+    invalidNetworkResourceType: "Font",
+    invalidNetworkLoadingFailedReason: "inspector",
+    invalidNetworkLoadingFailedRepeats: 3,
+  });
+
+  await assert.rejects(
+    runCapture(harness, {maxRequestEvents: 3}),
+    /request_resource_limit/,
+  );
+  assert.equal(harness.closed, true);
 });
 
 

@@ -9,6 +9,7 @@ from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import stat
 import tomllib
 from typing import Callable, Iterator
@@ -56,6 +57,7 @@ _ARTIFACT_READ_LIMIT: ContextVar[int] = ContextVar(
 _MAX_FOREIGN_BUNDLE_MEMBERS = 100_000
 _MAX_HELD_COMMIT_CLOSURE_FILES = 256
 _MAX_HELD_COMMIT_CLOSURE_DIRECTORIES = 256
+_ZOTERO_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 _REQUIRED_REVIEW_PROOFS = frozenset(
     {
         "summary_schema",
@@ -707,16 +709,85 @@ def _visible_title(value: object) -> str:
     return " ".join("".join(parser.parts).split())
 
 
+def _zotero_identifier(
+    value: object,
+    *,
+    label: str,
+    code: str = "source_binding_mismatch",
+) -> str:
+    if not isinstance(value, str) or _ZOTERO_IDENTIFIER_RE.fullmatch(value) is None:
+        raise _invalid(code, f"{label} is invalid")
+    return value
+
+
 def _parent_fingerprint(payload: object) -> tuple[str, str, str, int, str]:
     if not isinstance(payload, dict):
         raise _invalid("zotero_snapshot_invalid", "Zotero parent snapshot must be an object")
-    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-    key = str(payload.get("key") or data.get("key") or "").strip()
+    if "data" in payload:
+        data = payload["data"]
+        if not isinstance(data, dict):
+            raise _invalid(
+                "zotero_snapshot_invalid",
+                "Zotero parent snapshot data must be an object",
+            )
+    else:
+        data = payload
+    top_key = (
+        _zotero_identifier(
+            payload["key"],
+            label="Zotero parent snapshot key",
+            code="zotero_snapshot_invalid",
+        )
+        if "key" in payload
+        else None
+    )
+    nested_key = (
+        _zotero_identifier(
+            data["key"],
+            label="Zotero parent snapshot data key",
+            code="zotero_snapshot_invalid",
+        )
+        if data is not payload and "key" in data
+        else None
+    )
+    if top_key is not None and nested_key is not None and top_key != nested_key:
+        raise _invalid(
+            "zotero_snapshot_invalid",
+            "Zotero parent snapshot wrapper and data keys differ",
+        )
+    key = top_key if top_key is not None else nested_key
     title = _visible_title(data.get("title", ""))
     doi = str(data.get("DOI") or "").strip().casefold()
-    version = payload.get("version", data.get("version", 0))
-    if not key or not title or type(version) is not int or version < 0:
+    if key is None or not title:
         raise _invalid("zotero_snapshot_invalid", "Zotero parent snapshot identity is invalid")
+    missing_version = object()
+    top_version = payload.get("version", missing_version)
+    nested_version = (
+        data.get("version", missing_version)
+        if data is not payload
+        else missing_version
+    )
+    for version in (top_version, nested_version):
+        if version is not missing_version and (type(version) is not int or version < 0):
+            raise _invalid(
+                "zotero_snapshot_invalid",
+                "Zotero parent snapshot version is invalid",
+            )
+    if (
+        top_version is not missing_version
+        and nested_version is not missing_version
+        and top_version != nested_version
+    ):
+        raise _invalid(
+            "zotero_snapshot_invalid",
+            "Zotero parent snapshot wrapper and data versions differ",
+        )
+    version = top_version if top_version is not missing_version else nested_version
+    if version is missing_version:
+        raise _invalid(
+            "zotero_snapshot_invalid",
+            "Zotero parent snapshot version is required",
+        )
     fingerprint = canonical_sha256(
         {"key": key, "title": title.casefold(), "DOI": doi, "version": version}
     )
@@ -760,10 +831,21 @@ def _raw_selected_item(value: object) -> dict[str, object]:
 def _normalized_inventory_entry(value: object, *, label: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise _invalid("source_binding_mismatch", f"{label} must be an object")
-    key = str(value.get("key") or "").strip()
+    key = _zotero_identifier(value.get("key"), label=f"{label} key")
     title = _visible_title(value.get("title", ""))
     doi = str(value.get("DOI") or "").strip().casefold()
-    version = value.get("version", 0)
+    raw_item_type = value.get("itemType")
+    if not isinstance(raw_item_type, str) or not raw_item_type.strip():
+        raise _invalid("source_binding_mismatch", f"{label} itemType is invalid")
+    item_type = raw_item_type.strip()
+    if item_type in {"attachment", "note"}:
+        raise _invalid(
+            "source_binding_mismatch",
+            f"{label} itemType must identify a regular Zotero item",
+        )
+    if "version" not in value:
+        raise _invalid("source_binding_mismatch", f"{label} version is required")
+    version = value["version"]
     if not key or not title or type(version) is not int or version < 0:
         raise _invalid("source_binding_mismatch", f"{label} identity is invalid")
     return {
@@ -771,6 +853,7 @@ def _normalized_inventory_entry(value: object, *, label: str) -> dict[str, objec
         "title": title,
         "normalized_title": title.casefold(),
         "DOI": doi,
+        "itemType": item_type,
         "version": version,
     }
 
@@ -831,29 +914,43 @@ def _validate_zotero_source_snapshots(
         "DOI": source.doi,
         "version": source.parent_version,
     }
-    if selected_identity != expected_identity:
+    selected_source_identity = {
+        key: selected_identity[key]
+        for key in expected_identity
+    }
+    if selected_source_identity != expected_identity:
         raise _invalid("source_binding_mismatch", "normalized selected item differs from run source")
     selected_attachments = normalized_selected.get("attachments")
-    if not isinstance(selected_attachments, list):
+    if not isinstance(selected_attachments, list) or not all(
+        isinstance(item, dict) for item in selected_attachments
+    ):
         raise _invalid("source_binding_mismatch", "normalized selected item attachments are invalid")
+    normalized_attachment_key = _zotero_identifier(
+        normalized_attachment.get("key"),
+        label="normalized selected attachment key",
+    )
     matching_attachments = [
         item
         for item in selected_attachments
-        if isinstance(item, dict) and str(item.get("key") or "") == source.attachment_key
+        if item.get("key") == source.attachment_key
     ]
     if (
         len(matching_attachments) != 1
         or matching_attachments[0] != normalized_attachment
-        or str(normalized_attachment.get("key") or "") != source.attachment_key
+        or normalized_attachment_key != source.attachment_key
         or str(normalized_attachment.get("path") or "") != source.attachment.resolved_path
     ):
         raise _invalid("source_binding_mismatch", "normalized selected attachment differs from run source")
     raw_attachments = raw_selected.get("attachments")
+    if not isinstance(raw_attachments, list) or not all(
+        isinstance(item, dict) for item in raw_attachments
+    ):
+        raise _invalid("source_binding_mismatch", "raw selected item attachments are invalid")
     raw_matches = [
         item
         for item in raw_attachments
-        if isinstance(item, dict) and str(item.get("key") or "") == source.attachment_key
-    ] if isinstance(raw_attachments, list) else []
+        if item.get("key") == source.attachment_key
+    ]
     if len(raw_matches) != 1 or str(raw_matches[0].get("path") or "") != source.attachment.requested_path:
         raise _invalid("source_binding_mismatch", "raw selected attachment differs from run source")
     return sha256_bytes(canonical_json_bytes(raw_inventory))

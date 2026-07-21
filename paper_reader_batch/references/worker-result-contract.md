@@ -22,7 +22,7 @@ V1/unversioned/unknown files are historical-only. Loaders reject them read-only 
 
 Zotero workers delegate the current secondary-plan policy, `secondary_cross_checks`, and finding-anchor assessment to `$paper_reader`. Batch validates only the sealed artifact identities, hash closure and rendered-note proof; it does not copy, parse, reinterpret, or validate the single-paper finding-anchor schema, and local PDF workers never enable that path.
 
-For `zotero_title`, `inventory_sha256` is exactly `SHA-256(canonical_json_bytes(raw_discovery.search_results))`. The raw selected record must normalize to the candidate source inventory, selected key/title/DOI/version and attachment identity. A manifest `inventory_sha256=null` may be filled once by the successful result; a non-null manifest value must match exactly. Duplicate normalized-title parents remain blocked.
+For `zotero_title`, `inventory_sha256` is exactly `SHA-256(canonical_json_bytes(raw_discovery.search_results))`. The raw selected record must normalize to the candidate source inventory, selected key/title/DOI/regular `itemType`/version and attachment identity. A manifest `inventory_sha256=null` may be filled once by the successful result; a non-null manifest value must match exactly. Duplicate normalized-title parents remain blocked.
 
 ## Local PDF Success
 

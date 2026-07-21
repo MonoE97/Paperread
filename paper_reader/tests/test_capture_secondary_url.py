@@ -15,7 +15,11 @@ from typing import Any
 
 import pytest
 
-from paper_reader.secondary_sources import SECONDARY_PLAN_MAX_BYTES
+from paper_reader.secondary_sources import (
+    MAX_SECONDARY_WARNING_BYTES,
+    MAX_SECONDARY_WARNINGS,
+    SECONDARY_PLAN_MAX_BYTES,
+)
 
 
 SCRIPT = Path("scripts/capture-secondary-url.mjs")
@@ -591,7 +595,12 @@ def _write_plan(
 
 
 def _rewrite_plan_binding(plan_path: Path, plan: dict[str, object]) -> None:
-    plan_bytes = json.dumps(plan, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    plan_bytes = json.dumps(
+        plan,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
     _rewrite_plan_raw_binding(plan_path, plan_bytes)
 
 
@@ -1000,6 +1009,74 @@ def test_plan_bound_capture_accepts_finding_anchor_policy(tmp_path: Path) -> Non
     plan_path = _write_plan(tmp_path)
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     plan["finding_anchor_policy"] = "codepoint_sha256_v1"
+    _rewrite_plan_binding(plan_path, plan)
+
+    result, _ = run_raw_strict_capture(tmp_path, plan_path=plan_path)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "captured"
+
+
+@pytest.mark.parametrize(
+    "warnings",
+    [
+        [f"warning-{index}" for index in range(MAX_SECONDARY_WARNINGS + 1)],
+        ["界" * ((MAX_SECONDARY_WARNING_BYTES // 3) + 1)],
+        [123],
+    ],
+    ids=["too-many", "multibyte-too-large", "non-string"],
+)
+def test_plan_bound_capture_rejects_invalid_current_warning_inventory_before_browser(
+    warnings: list[object],
+    tmp_path: Path,
+) -> None:
+    plan_path = _write_plan(tmp_path)
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan["finding_anchor_policy"] = "codepoint_sha256_v1"
+    plan["warnings"] = warnings
+    _rewrite_plan_binding(plan_path, plan)
+
+    result, raw_cdp = run_raw_strict_capture(tmp_path, plan_path=plan_path)
+
+    assert result.returncode == 2
+    assert len(result.stdout.splitlines()) == 1
+    assert_strict_machine_error(result)
+    assert raw_cdp.commands == []
+    assert not (tmp_path / "secondary-001.json").exists()
+
+
+def test_plan_bound_capture_accepts_exact_current_warning_inventory_boundaries(
+    tmp_path: Path,
+) -> None:
+    plan_path = _write_plan(tmp_path)
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    exact_utf8_boundary = (
+        "界" * (MAX_SECONDARY_WARNING_BYTES // len("界".encode("utf-8")))
+        + "a"
+    )
+    assert len(exact_utf8_boundary.encode("utf-8")) == MAX_SECONDARY_WARNING_BYTES
+    plan["finding_anchor_policy"] = "codepoint_sha256_v1"
+    plan["warnings"] = [
+        exact_utf8_boundary,
+        *(f"warning-{index}" for index in range(MAX_SECONDARY_WARNINGS - 1)),
+    ]
+    _rewrite_plan_binding(plan_path, plan)
+
+    result, _ = run_raw_strict_capture(tmp_path, plan_path=plan_path)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "captured"
+
+
+def test_plan_bound_capture_preserves_legacy_warning_inventory_compatibility(
+    tmp_path: Path,
+) -> None:
+    plan_path = _write_plan(tmp_path)
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan["warnings"] = [
+        "x" * (MAX_SECONDARY_WARNING_BYTES + 1),
+        *(f"warning-{index}" for index in range(MAX_SECONDARY_WARNINGS)),
+    ]
     _rewrite_plan_binding(plan_path, plan)
 
     result, _ = run_raw_strict_capture(tmp_path, plan_path=plan_path)

@@ -58,6 +58,8 @@ const cdpBaseUrl = (process.env.ZOTERO_PAPER_READER_CDP_BASE_URL || "http://loca
 const DOH_ENDPOINT = "https://1.1.1.1/dns-query";
 const DOH_RESPONSE_MAX_BYTES = 64 * 1024;
 const SECONDARY_PLAN_MAX_BYTES = 2 * 1024 * 1024;
+const MAX_SECONDARY_WARNINGS = 256;
+const MAX_SECONDARY_WARNING_BYTES = 4096;
 const STRUCTURED_ARTIFACT_MAX_BYTES = 512 * 1024 * 1024;
 const CONTRACT_IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 
@@ -703,6 +705,15 @@ function validatePlanAndSelectSource(plan, requestedSourceId) {
     "warnings",
   ];
   const anchoredPlanKeys = [...legacyPlanKeys, "finding_anchor_policy"];
+  const isObjectPlan = Boolean(
+    plan && typeof plan === "object" && !Array.isArray(plan),
+  );
+  const isLegacyPlan = isObjectPlan && hasExactKeys(plan, legacyPlanKeys);
+  const isAnchoredPlan = (
+    isObjectPlan &&
+    hasExactKeys(plan, anchoredPlanKeys) &&
+    plan.finding_anchor_policy === "codepoint_sha256_v1"
+  );
   const sourceKeys = [
     "source_id",
     "url",
@@ -712,16 +723,8 @@ function validatePlanAndSelectSource(plan, requestedSourceId) {
     "rejection_reason",
   ];
   if (
-    !plan ||
-    typeof plan !== "object" ||
-    Array.isArray(plan) ||
-    !(
-      hasExactKeys(plan, legacyPlanKeys) ||
-      (
-        hasExactKeys(plan, anchoredPlanKeys) &&
-        plan.finding_anchor_policy === "codepoint_sha256_v1"
-      )
-    ) ||
+    !isObjectPlan ||
+    !(isLegacyPlan || isAnchoredPlan) ||
     plan.format !== "paper_reader.secondary-plan.v2-internal" ||
     !isContractIdentifier(plan.item_key) ||
     !/^[0-9a-f]{64}$/.test(plan.source_snapshot_sha256) ||
@@ -731,7 +734,16 @@ function validatePlanAndSelectSource(plan, requestedSourceId) {
     !Array.isArray(plan.sources) ||
     plan.sources.length > 256 ||
     !Array.isArray(plan.warnings) ||
-    plan.warnings.some((warning) => typeof warning !== "string")
+    plan.warnings.some((warning) => typeof warning !== "string") ||
+    (
+      isAnchoredPlan &&
+      (
+        plan.warnings.length > MAX_SECONDARY_WARNINGS ||
+        plan.warnings.some(
+          (warning) => Buffer.byteLength(warning, "utf8") > MAX_SECONDARY_WARNING_BYTES,
+        )
+      )
+    )
   ) {
     throw new Error("invalid secondary plan");
   }

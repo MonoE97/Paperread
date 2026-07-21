@@ -270,13 +270,37 @@ function recordRequestAccountingError(warnings, error) {
 
 
 function isOversizedBlockedPassiveInlineDataUrl(value, resourceType) {
-  // data: has no proxy hop; Fetch still must cancel the passive request below.
+  // data: has no proxy hop; final accounting still requires a proven browser block.
   return (
     typeof value === "string" &&
     value.length > 4096 &&
     PASSIVE_BINARY_RESOURCE_TYPES.has(resourceType) &&
     value.slice(0, 5).toLowerCase() === "data:"
   );
+}
+
+
+function passiveDataProofKey(sessionId, requestId, resourceType) {
+  if (
+    typeof sessionId !== "string" ||
+    sessionId.length === 0 ||
+    sessionId.length > 512 ||
+    typeof requestId !== "string" ||
+    requestId.length === 0 ||
+    requestId.length > 512 ||
+    !PASSIVE_BINARY_RESOURCE_TYPES.has(resourceType)
+  ) {
+    throw new Error("invalid_network_request_identity");
+  }
+  return JSON.stringify([sessionId, requestId, resourceType]);
+}
+
+
+function passiveDataAccountingKey(sessionId, requestId, value, resourceType) {
+  if (!isOversizedBlockedPassiveInlineDataUrl(value, resourceType)) {
+    return null;
+  }
+  return passiveDataProofKey(sessionId, requestId, resourceType);
 }
 
 
@@ -869,6 +893,9 @@ export async function capturePageWithRawCdp({
   const guardedSessions = new Set();
   const networkRequestCounts = new Map();
   const fetchRequestCounts = new Map();
+  const passiveDataNetworkSeen = new Map();
+  const passiveDataFetchBlocked = new Map();
+  const passiveDataInspectorBlocked = new Map();
   const responseByteCounts = new Map();
   const observedNetworkAuthorities = new Set();
   const documentResponses = [];
@@ -985,7 +1012,11 @@ export async function capturePageWithRawCdp({
     }
     if (
       guardedSessions.has(sessionId) &&
-      ["Fetch.requestPaused", "Network.requestWillBeSent"].includes(event.method)
+      [
+        "Fetch.requestPaused",
+        "Network.requestWillBeSent",
+        "Network.loadingFailed",
+      ].includes(event.method)
     ) {
       requestEventCount += 1;
       if (requestEventCount > maxRequestEvents) {
@@ -1019,18 +1050,27 @@ export async function capturePageWithRawCdp({
         }
         const method = String(event.params?.request?.method || "").toUpperCase();
         const isDocumentRequest = event.params?.resourceType === "Document";
+        let passiveDataKey = null;
         try {
-          const key = requestAccountingKey(
+          passiveDataKey = passiveDataAccountingKey(
             sessionId,
             event.params?.networkId,
             event.params?.request?.url,
-            {
-              checkpoint: "fetch_request_paused",
-              resourceType: event.params?.resourceType,
-            },
+            event.params?.resourceType,
           );
-          if (key) {
-            incrementCount(fetchRequestCounts, key);
+          if (passiveDataKey === null) {
+            const key = requestAccountingKey(
+              sessionId,
+              event.params?.networkId,
+              event.params?.request?.url,
+              {
+                checkpoint: "fetch_request_paused",
+                resourceType: event.params?.resourceType,
+              },
+            );
+            if (key) {
+              incrementCount(fetchRequestCounts, key);
+            }
           }
         } catch (error) {
           recordRequestAccountingError(warnings, error);
@@ -1048,16 +1088,24 @@ export async function capturePageWithRawCdp({
           return;
         }
         if (PASSIVE_BINARY_RESOURCE_TYPES.has(event.params?.resourceType)) {
-          try {
-            await policy.validateUrl(event.params?.request?.url);
-          } catch {
-            recordUnsafeRequest(
-              auditWarnings,
-              event.params?.request?.url,
-              "unsafe_subresource_blocked",
-            );
+          if (passiveDataKey !== null) {
+            auditWarnings.add("unsafe_subresource_blocked");
+            auditWarnings.add("unsafe_request_scheme:data");
+          } else {
+            try {
+              await policy.validateUrl(event.params?.request?.url);
+            } catch {
+              recordUnsafeRequest(
+                auditWarnings,
+                event.params?.request?.url,
+                "unsafe_subresource_blocked",
+              );
+            }
           }
-          await failPausedRequest(event.params.requestId, sessionId);
+          const blocked = await failPausedRequest(event.params.requestId, sessionId);
+          if (passiveDataKey !== null && blocked) {
+            incrementCount(passiveDataFetchBlocked, passiveDataKey);
+          }
           return;
         }
         try {
@@ -1098,24 +1146,52 @@ export async function capturePageWithRawCdp({
     }
     if (event.method === "Network.requestWillBeSent" && guardedSessions.has(sessionId)) {
       try {
-        const key = requestAccountingKey(
+        const passiveDataKey = passiveDataAccountingKey(
           sessionId,
           event.params?.requestId,
           event.params?.request?.url,
-          {
-            checkpoint: "network_request_will_be_sent",
-            resourceType: event.params?.type,
-          },
+          event.params?.type,
         );
-        if (key) {
-          incrementCount(networkRequestCounts, key);
-        }
-        const authority = requestAuthorityKey(event.params?.request?.url);
-        if (authority) {
-          observedNetworkAuthorities.add(authority);
+        if (passiveDataKey !== null) {
+          incrementCount(passiveDataNetworkSeen, passiveDataKey);
+        } else {
+          const key = requestAccountingKey(
+            sessionId,
+            event.params?.requestId,
+            event.params?.request?.url,
+            {
+              checkpoint: "network_request_will_be_sent",
+              resourceType: event.params?.type,
+            },
+          );
+          if (key) {
+            incrementCount(networkRequestCounts, key);
+          }
+          const authority = requestAuthorityKey(event.params?.request?.url);
+          if (authority) {
+            observedNetworkAuthorities.add(authority);
+          }
         }
       } catch (error) {
         recordRequestAccountingError(warnings, error);
+      }
+      return;
+    }
+    if (event.method === "Network.loadingFailed" && guardedSessions.has(sessionId)) {
+      if (
+        event.params?.blockedReason === "inspector" &&
+        PASSIVE_BINARY_RESOURCE_TYPES.has(event.params?.type)
+      ) {
+        try {
+          const key = passiveDataProofKey(
+            sessionId,
+            event.params?.requestId,
+            event.params?.type,
+          );
+          incrementCount(passiveDataInspectorBlocked, key);
+        } catch (error) {
+          recordRequestAccountingError(warnings, error);
+        }
       }
       return;
     }
@@ -1429,6 +1505,23 @@ export async function capturePageWithRawCdp({
       (key) => networkRequestCounts.get(key) !== fetchRequestCounts.get(key),
     )) {
       warnings.add("unintercepted_network_request");
+    }
+    const passiveDataKeys = new Set([
+      ...passiveDataNetworkSeen.keys(),
+      ...passiveDataFetchBlocked.keys(),
+    ]);
+    if ([...passiveDataKeys].some((key) => {
+      const networkSeen = passiveDataNetworkSeen.get(key) || 0;
+      const fetchBlocked = passiveDataFetchBlocked.get(key) || 0;
+      const inspectorBlocked = passiveDataInspectorBlocked.get(key) || 0;
+      return (
+        networkSeen > 1 ||
+        fetchBlocked > 1 ||
+        inspectorBlocked > 1 ||
+        (networkSeen === 1 && fetchBlocked === 0 && inspectorBlocked === 0)
+      );
+    })) {
+      warnings.add("unproven_passive_data_block");
     }
     for (const response of documentResponses) {
       if (

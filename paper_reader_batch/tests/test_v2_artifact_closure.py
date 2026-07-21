@@ -67,6 +67,7 @@ ZOTERO_CANDIDATE_CHECKS = (
     "live_title_availability",
     "canonical_html_binding",
 )
+_MISSING_ITEM_TYPE = object()
 
 
 def _escape_markdown_title(note_title: str) -> str:
@@ -1080,6 +1081,14 @@ def _zotero_fixture(
     versioned_secondary_without_plan: bool = False,
     unknown_secondary_inventory_without_plan: bool = False,
     noncanonical_source_plan: bool = False,
+    raw_inventory_item_type: object = "journalArticle",
+    raw_selected_item_type: object = "journalArticle",
+    normalized_inventory_item_type: object = "journalArticle",
+    normalized_selected_item_type: object = "journalArticle",
+    source_attachment_key: str = "ATTACH1",
+    snapshot_attachment_key: object = "ATTACH1",
+    raw_attachment_extra: object | None = None,
+    normalized_attachment_extra: object | None = None,
 ) -> BuiltWorkerFixture:
     attachment_path = tmp_path / "zotero-paper.pdf"
     _write(attachment_path, b"%PDF-1.7\nzotero fixture\n")
@@ -1101,24 +1110,23 @@ def _zotero_fixture(
     title = paper_title
     doi = "10.1000/example.doi"
     version = 17
-    raw_inventory = [
-        {
-            "key": item_key,
-            "version": version,
-            "itemType": "journalArticle",
-            "title": raw_inventory_title or title,
-            "DOI": doi,
-        }
-    ]
+    raw_inventory_entry: dict[str, object] = {
+        "key": item_key,
+        "version": version,
+        "title": raw_inventory_title or title,
+        "DOI": doi,
+    }
+    if raw_inventory_item_type is not _MISSING_ITEM_TYPE:
+        raw_inventory_entry["itemType"] = raw_inventory_item_type
+    raw_inventory = [raw_inventory_entry]
     raw_selected = {
         "key": item_key,
         "version": version,
-        "itemType": "journalArticle",
         "title": title,
         "DOI": doi,
         "attachments": [
             {
-                "key": "ATTACH1",
+                "key": snapshot_attachment_key,
                 "version": 3,
                 "itemType": "attachment",
                 "title": "Full Text PDF",
@@ -1128,25 +1136,38 @@ def _zotero_fixture(
         ],
         "notes": [],
     }
+    if raw_attachment_extra is not None:
+        raw_selected["attachments"].append(raw_attachment_extra)
+    if raw_selected_item_type is not _MISSING_ITEM_TYPE:
+        raw_selected["itemType"] = raw_selected_item_type
     if secondary_state not in {None, "zero_eligible"}:
         raw_selected["extra"] = "https://mp.weixin.qq.com/s/example?scene=334"
     raw_payload = {"search_results": raw_inventory, "selected_item": raw_selected}
     raw_path = run_dir / "source" / "discovery.raw.json"
     raw_bytes = _json(raw_path, raw_payload, canonical=False)
-    normalized_inventory = [
-        {
-            "key": item_key,
-            "title": title,
-            "normalized_title": title.casefold(),
-            "DOI": doi,
-            "version": version,
-        }
-    ]
-    normalized_attachment = raw_selected["attachments"][0]
+    normalized_inventory_entry: dict[str, object] = {
+        "key": item_key,
+        "title": title,
+        "normalized_title": title.casefold(),
+        "DOI": doi,
+        "version": version,
+    }
+    if normalized_inventory_item_type is not _MISSING_ITEM_TYPE:
+        normalized_inventory_entry["itemType"] = normalized_inventory_item_type
+    normalized_inventory = [normalized_inventory_entry]
+    normalized_attachment = dict(raw_selected["attachments"][0])
+    normalized_selected = dict(raw_selected)
+    normalized_selected["attachments"] = [dict(normalized_attachment)]
+    if normalized_attachment_extra is not None:
+        normalized_selected["attachments"].append(normalized_attachment_extra)
+    if normalized_selected_item_type is _MISSING_ITEM_TYPE:
+        normalized_selected.pop("itemType", None)
+    else:
+        normalized_selected["itemType"] = normalized_selected_item_type
     normalized = {
         "format": "paper_reader.zotero-source.v2-internal",
         "search_inventory": normalized_inventory,
-        "selected_item": raw_selected,
+        "selected_item": normalized_selected,
         "selected_attachment": normalized_attachment,
     }
     normalized_path = run_dir / "source" / "source.json"
@@ -1172,7 +1193,7 @@ def _zotero_fixture(
         "parent_fingerprint": fingerprint,
         "raw_discovery_bundle": raw_ref,
         "normalized_source": normalized_ref,
-        "attachment_key": "ATTACH1",
+        "attachment_key": source_attachment_key,
         "attachment": attachment_source,
     }
     plan_ref: dict[str, object] | None = None
@@ -2705,6 +2726,216 @@ def test_zotero_title_inventory_provenance_is_canonical_raw_inventory_digest(
     tmp_path: Path,
 ) -> None:
     built = _zotero_fixture(tmp_path, result_inventory_sha256="f" * 64)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == "source_binding_mismatch"
+
+
+@pytest.mark.parametrize(
+    "item_type",
+    [
+        _MISSING_ITEM_TYPE,
+        None,
+        17,
+        "",
+        "   ",
+        "attachment",
+        "note",
+    ],
+)
+def test_zotero_inventory_identity_rejects_missing_or_invalid_item_type(
+    item_type: object,
+) -> None:
+    entry: dict[str, object] = {
+        "key": "PARENT1",
+        "title": "A Useful Paper",
+        "DOI": "10.1000/example.doi",
+        "version": 17,
+    }
+    if item_type is not _MISSING_ITEM_TYPE:
+        entry["itemType"] = item_type
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        artifact_module._normalized_inventory_entry(entry, label="search_results[0]")
+
+    assert exc_info.value.code == "source_binding_mismatch"
+
+
+def test_zotero_inventory_identity_normalizes_regular_item_type() -> None:
+    identity = artifact_module._normalized_inventory_entry(
+        {
+            "key": "PARENT1",
+            "title": "A Useful Paper",
+            "DOI": "10.1000/example.doi",
+            "itemType": "  journalArticle  ",
+            "version": 17,
+        },
+        label="search_results[0]",
+    )
+
+    assert identity["itemType"] == "journalArticle"
+
+
+@pytest.mark.parametrize(
+    "key",
+    [None, 17, "", "   ", " PARENT1", "PARENT1 ", "bad/key", "x" * 161],
+)
+def test_zotero_inventory_identity_rejects_non_identifier_key(key: object) -> None:
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        artifact_module._normalized_inventory_entry(
+            {
+                "key": key,
+                "title": "A Useful Paper",
+                "DOI": "10.1000/example.doi",
+                "itemType": "journalArticle",
+                "version": 17,
+            },
+            label="search_results[0]",
+        )
+
+    assert exc_info.value.code == "source_binding_mismatch"
+
+
+def test_zotero_inventory_identity_requires_explicit_version() -> None:
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        artifact_module._normalized_inventory_entry(
+            {
+                "key": "PARENT1",
+                "title": "A Useful Paper",
+                "DOI": "10.1000/example.doi",
+                "itemType": "journalArticle",
+            },
+            label="search_results[0]",
+        )
+
+    assert exc_info.value.code == "source_binding_mismatch"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"key": 17, "version": 1, "title": "A Useful Paper"},
+        {"key": "PARENT1", "title": "A Useful Paper"},
+        {
+            "key": "PARENT1",
+            "version": 1,
+            "data": {"key": "OTHER", "version": 1, "title": "A Useful Paper"},
+        },
+        {
+            "key": "PARENT1",
+            "version": 1,
+            "data": {"key": "PARENT1", "version": 2, "title": "A Useful Paper"},
+        },
+    ],
+    ids=["numeric-key", "missing-version", "key-drift", "version-drift"],
+)
+def test_zotero_parent_fingerprint_rejects_non_reader_identity(payload: object) -> None:
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        artifact_module._parent_fingerprint(payload)
+
+    assert exc_info.value.code == "zotero_snapshot_invalid"
+
+
+def test_zotero_parent_fingerprint_accepts_exact_data_only_identity() -> None:
+    key, title, doi, version, _digest = artifact_module._parent_fingerprint(
+        {
+            "data": {
+                "key": "PARENT1",
+                "version": 17,
+                "title": "A Useful Paper",
+                "DOI": "10.1000/example.doi",
+            },
+        }
+    )
+
+    assert (key, title, doi, version) == (
+        "PARENT1",
+        "A Useful Paper",
+        "10.1000/example.doi",
+        17,
+    )
+
+
+@pytest.mark.parametrize(
+    ("source_key", "snapshot_key"),
+    [("17", 17), ("ATTACH1", " ATTACH1 ")],
+)
+def test_rejects_coerced_zotero_attachment_key_identity(
+    source_key: str,
+    snapshot_key: object,
+    tmp_path: Path,
+) -> None:
+    built = _zotero_fixture(
+        tmp_path,
+        source_attachment_key=source_key,
+        snapshot_attachment_key=snapshot_key,
+    )
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == "source_binding_mismatch"
+
+
+@pytest.mark.parametrize(
+    "extra_field",
+    ["raw_attachment_extra", "normalized_attachment_extra"],
+)
+def test_rejects_non_object_zotero_attachment_inventory_member(
+    extra_field: str,
+    tmp_path: Path,
+) -> None:
+    built = _zotero_fixture(tmp_path, **{extra_field: 17})
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == "source_binding_mismatch"
+
+
+@pytest.mark.parametrize(
+    "missing_member",
+    [
+        "raw_inventory",
+        "raw_selected",
+        "normalized_inventory",
+        "normalized_selected",
+    ],
+)
+def test_rejects_missing_item_type_in_any_zotero_parent_identity_member(
+    missing_member: str,
+    tmp_path: Path,
+) -> None:
+    built = _zotero_fixture(
+        tmp_path,
+        **{f"{missing_member}_item_type": _MISSING_ITEM_TYPE},
+    )
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == "source_binding_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("drifted_member", "item_type"),
+    [
+        ("raw_selected", "book"),
+        ("normalized_inventory", "book"),
+        ("normalized_selected", "book"),
+    ],
+)
+def test_rejects_item_type_drift_across_raw_and_normalized_zotero_identity(
+    drifted_member: str,
+    item_type: str,
+    tmp_path: Path,
+) -> None:
+    built = _zotero_fixture(
+        tmp_path,
+        **{f"{drifted_member}_item_type": item_type},
+    )
 
     with pytest.raises(BatchRuntimeError) as exc_info:
         validate_worker_result_artifacts(built.manifest, built.result)
