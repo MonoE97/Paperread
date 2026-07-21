@@ -269,7 +269,21 @@ function recordRequestAccountingError(warnings, error) {
 }
 
 
+function isOversizedBlockedPassiveInlineDataUrl(value, resourceType) {
+  // data: has no proxy hop; Fetch still must cancel the passive request below.
+  return (
+    typeof value === "string" &&
+    value.length > 4096 &&
+    PASSIVE_BINARY_RESOURCE_TYPES.has(resourceType) &&
+    value.slice(0, 5).toLowerCase() === "data:"
+  );
+}
+
+
 function requestAccountingKey(sessionId, requestId, value, context) {
+  if (isOversizedBlockedPassiveInlineDataUrl(value, context?.resourceType)) {
+    return null;
+  }
   if (typeof value !== "string" || value.length === 0 || value.length > 4096) {
     throw invalidNetworkRequestUrlError(value, context);
   }

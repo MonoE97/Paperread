@@ -92,6 +92,7 @@ class CdpHarness {
     invalidNetworkUrlValue = undefined,
     invalidFetchResourceType = "Document",
     invalidNetworkResourceType = "Fetch",
+    invalidFetchCompanionNetworkResourceType = null,
   } = {}) {
     this.unsafeUrl = unsafeUrl;
     this.download = download;
@@ -128,6 +129,8 @@ class CdpHarness {
     this.invalidNetworkUrlValue = invalidNetworkUrlValue;
     this.invalidFetchResourceType = invalidFetchResourceType;
     this.invalidNetworkResourceType = invalidNetworkResourceType;
+    this.invalidFetchCompanionNetworkResourceType =
+      invalidFetchCompanionNetworkResourceType;
     this.captureEvaluateCount = 0;
     this.commands = [];
     this.closed = false;
@@ -416,6 +419,22 @@ class CdpHarness {
                   networkId: "network-invalid-url",
                 },
               }));
+              if (this.invalidFetchCompanionNetworkResourceType !== null) {
+                queueMicrotask(() => socket.emitMessage({
+                  method: "Network.requestWillBeSent",
+                  sessionId: "session-1",
+                  params: {
+                    requestId: "network-invalid-url",
+                    request: {
+                      url: this.invalidFetchUrlValue,
+                      method: "GET",
+                      headers: {},
+                    },
+                    type: this.invalidFetchCompanionNetworkResourceType,
+                    frameId: "frame-1",
+                  },
+                }));
+              }
               return;
             }
             if (this.invalidNetworkUrlValue !== undefined) {
@@ -1166,6 +1185,106 @@ test("classifies invalid Fetch and Network URL values without disclosing them", 
       }
     }
   }
+});
+
+
+test("blocks oversized inline passive data resources without network URL failures", async () => {
+  const inlineDataUrl = `data:application/octet-stream;base64,${"A".repeat(5000)}`;
+  for (const resourceType of ["Font", "Image", "Media", "Prefetch", "TextTrack"]) {
+    for (const checkpoint of ["fetch_request_paused", "network_request_will_be_sent"]) {
+      const harness = new CdpHarness(
+        checkpoint === "fetch_request_paused"
+          ? {
+              invalidFetchUrlValue: inlineDataUrl,
+              invalidFetchResourceType: resourceType,
+            }
+          : {
+              invalidNetworkUrlValue: inlineDataUrl,
+              invalidNetworkResourceType: resourceType,
+            },
+      );
+      const {capture} = await runCapture(harness);
+      const label = `${checkpoint}:${resourceType}`;
+
+      assert.equal(capture.status, "captured", label);
+      assert.equal(
+        capture.warnings.includes("invalid_network_request_url"),
+        false,
+        label,
+      );
+      const cancellation = harness.commands.find(
+        (command) =>
+          command.method === "Fetch.failRequest" &&
+          command.params.requestId === "fetch-invalid-url",
+      );
+      if (checkpoint === "fetch_request_paused") {
+        assert.equal(cancellation.params.errorReason, "BlockedByClient", label);
+      } else {
+        assert.equal(cancellation, undefined, label);
+      }
+    }
+  }
+});
+
+
+test("keeps oversized inline data font cancellation failure fatal", async () => {
+  const harness = new CdpHarness({
+    invalidFetchUrlValue: `data:font/woff2;base64,${"A".repeat(5000)}`,
+    invalidFetchResourceType: "Font",
+    failRequestProtocolError: true,
+  });
+  const {capture, proxy} = await runCapture(harness);
+
+  assert.equal(capture.status, "unavailable");
+  assert.equal(capture.warnings.includes("invalid_network_request_url"), false);
+  assert.ok(capture.warnings.includes("cdp_fail_request_failed"));
+  assert.equal(proxy.sealed, true);
+  assert.equal(harness.closed, true);
+});
+
+
+test("does not exempt active or non-data oversized URLs from strict accounting", async () => {
+  const cases = [
+    {value: `data:text/javascript,${"x".repeat(5000)}`, resourceType: "Script"},
+    {value: `data:text/html,${"x".repeat(5000)}`, resourceType: "Document"},
+    {value: `blob:https://public.example/${"x".repeat(5000)}`, resourceType: "Font"},
+    {value: `https://public.example/${"x".repeat(5000)}`, resourceType: "Font"},
+  ];
+  for (const {value, resourceType} of cases) {
+    const harness = new CdpHarness({
+      invalidFetchUrlValue: value,
+      invalidFetchResourceType: resourceType,
+    });
+    const {capture} = await runCapture(harness);
+
+    assert.equal(capture.status, "unavailable", resourceType);
+    assert.ok(capture.warnings.includes("invalid_network_request_url"), resourceType);
+    const cancellation = harness.commands.find(
+      (command) =>
+        command.method === "Fetch.failRequest" &&
+        command.params.requestId === "fetch-invalid-url",
+    );
+    assert.equal(cancellation.params.errorReason, "BlockedByClient", resourceType);
+  }
+});
+
+
+test("fails closed when Fetch and Network disagree that oversized data is passive", async () => {
+  const harness = new CdpHarness({
+    invalidFetchUrlValue: `data:font/woff2;base64,${"A".repeat(5000)}`,
+    invalidFetchResourceType: "Font",
+    invalidFetchCompanionNetworkResourceType: "Fetch",
+  });
+  const {capture} = await runCapture(harness);
+
+  assert.equal(capture.status, "unavailable");
+  assert.ok(capture.warnings.includes("invalid_network_request_url"));
+  const cancellation = harness.commands.find(
+    (command) =>
+      command.method === "Fetch.failRequest" &&
+      command.params.requestId === "fetch-invalid-url",
+  );
+  assert.equal(cancellation.params.errorReason, "BlockedByClient");
 });
 
 
