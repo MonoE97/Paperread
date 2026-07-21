@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -498,7 +499,7 @@ def _expected_current_source_refs(loaded: LoadedRun) -> dict[str, ArtifactRef]:
                     "secondary_plan_mismatch",
                     "Zotero source snapshot ref does not use its fixed role/path/media type",
                 )
-            if [item for item in loaded.run.artifacts if item == source_ref] != [
+            if [item for item in loaded.run.artifacts if item.role == role] != [
                 source_ref
             ]:
                 raise SecondaryEvidenceError(
@@ -609,29 +610,41 @@ def open_bound_source_closure_guard(loaded: LoadedRun) -> BoundSourceClosureGuar
     try:
         source_anchor = open_anchored_directory(run_anchor, source_dir)
         for current_name, ref in expected_refs.items():
-            expected_bytes = read_anchored_bytes(
-                source_anchor,
-                source_dir / current_name,
-                expected_size=ref.size_bytes,
-                max_bytes=V2_RESOURCE_POLICY.structured_artifact_max_bytes,
-            )
-            if (
-                len(expected_bytes) != ref.size_bytes
-                or hashlib.sha256(expected_bytes).hexdigest() != ref.sha256
-            ):
-                raise SecondaryEvidenceError(
-                    (
-                        "secondary_plan_tampered"
-                        if current_name == "secondary-plan.json"
-                        else "secondary_plan_mismatch"
-                    ),
-                    "held source closure member differs from its run-bound ref",
-                )
             owned_file = open_anchored_regular_file(
                 source_anchor,
                 source_dir / current_name,
                 expected_size=ref.size_bytes,
             )
+            try:
+                chunks: list[bytes] = []
+                total = 0
+                os.lseek(owned_file.descriptor, 0, os.SEEK_SET)
+                while total <= ref.size_bytes:
+                    chunk = os.read(
+                        owned_file.descriptor,
+                        min(1024 * 1024, ref.size_bytes - total + 1),
+                    )
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    total += len(chunk)
+                expected_bytes = b"".join(chunks)
+                if (
+                    len(expected_bytes) != ref.size_bytes
+                    or hashlib.sha256(expected_bytes).hexdigest() != ref.sha256
+                    or owned_file.content_sha256 != ref.sha256
+                ):
+                    raise SecondaryEvidenceError(
+                        (
+                            "secondary_plan_tampered"
+                            if current_name == "secondary-plan.json"
+                            else "secondary_plan_mismatch"
+                        ),
+                        "held source closure member differs from its run-bound ref",
+                    )
+            except BaseException:
+                owned_file.close()
+                raise
             file_guard = HeldExactFileGuard(
                 anchor=source_anchor,
                 owned_file=owned_file,

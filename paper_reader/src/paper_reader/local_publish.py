@@ -446,6 +446,30 @@ def _validate_candidate_run_snapshot_plan_binding(
             "secondary_plan_mismatch",
             "candidate run snapshot does not retain the current secondary source plan ref",
         )
+    source = loaded.run.source
+    if isinstance(source, LocalSourceIdentity):
+        expected_source_roles = (("source_snapshot", None),)
+    else:
+        expected_source_roles = (
+            ("raw_discovery_bundle", source.raw_discovery_bundle),
+            ("normalized_source", source.normalized_source),
+        )
+    for role, embedded_ref in expected_source_roles:
+        current_refs = tuple(
+            artifact for artifact in loaded.run.artifacts if artifact.role == role
+        )
+        snapshot_refs = tuple(
+            artifact for artifact in snapshot.artifacts if artifact.role == role
+        )
+        if (
+            len(current_refs) != 1
+            or snapshot_refs != current_refs
+            or (embedded_ref is not None and current_refs != (embedded_ref,))
+        ):
+            raise LocalPublicationError(
+                "secondary_plan_mismatch",
+                "candidate run snapshot does not retain an exact singleton source closure",
+            )
 
 
 def _load_candidate(

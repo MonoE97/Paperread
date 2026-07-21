@@ -590,6 +590,85 @@ def test_reader_rejects_noncanonical_zotero_source_ref_shape(
     assert exc_info.value.code == "secondary_plan_mismatch"
 
 
+@pytest.mark.parametrize("role", ["raw_discovery_bundle", "normalized_source"])
+def test_reader_rejects_additional_same_role_zotero_source_ref(
+    role: str,
+    tmp_path: Path,
+) -> None:
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(tmp_path, urls=())
+    run_path = run_dir / "run.json"
+    run = json.loads(run_path.read_bytes())
+    other_role = (
+        "normalized_source" if role == "raw_discovery_bundle" else "raw_discovery_bundle"
+    )
+    other_ref = next(
+        artifact for artifact in run["artifacts"] if artifact["role"] == other_role
+    )
+    run["artifacts"].append({**other_ref, "role": role})
+    run_path.write_bytes(canonical_json_bytes(run))
+
+    with pytest.raises(EvidenceManifestError) as exc_info:
+        load_bound_evidence(load_v2_run(run_dir), evidence_digest)
+
+    assert exc_info.value.code == "secondary_plan_mismatch"
+
+
+def test_reader_rejects_additional_local_source_snapshot_ref(tmp_path: Path) -> None:
+    run_dir, evidence_digest = _prepared_run(tmp_path)
+    run_path = run_dir / "run.json"
+    run = json.loads(run_path.read_bytes())
+    evidence_ref = next(
+        artifact
+        for artifact in run["artifacts"]
+        if artifact["role"] == "evidence_manifest"
+    )
+    run["artifacts"].append({**evidence_ref, "role": "source_snapshot"})
+    run_path.write_bytes(canonical_json_bytes(run))
+
+    with pytest.raises(EvidenceManifestError) as exc_info:
+        load_bound_evidence(load_v2_run(run_dir), evidence_digest)
+
+    assert exc_info.value.code == "secondary_plan_mismatch"
+
+
+def test_review_seal_reads_source_bytes_only_from_first_held_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import paper_reader.secondary_evidence as secondary_evidence
+
+    run_dir, evidence_digest = _prepared_zotero_secondary_run(tmp_path, urls=())
+    _write_summary_and_review(run_dir, evidence_digest)
+    raw_path = run_dir / "source" / "discovery.raw.json"
+    original_inode = raw_path.stat().st_ino
+    raw = raw_path.read_bytes()
+    original_read = secondary_evidence.read_anchored_bytes
+    swapped = False
+
+    def read_then_swap(anchor, path, **kwargs):
+        nonlocal swapped
+        raw_bytes = original_read(anchor, path, **kwargs)
+        path = Path(path)
+        if path == raw_path and not swapped:
+            swapped = True
+            raw_path.rename(tmp_path / "detached-discovery.raw.json")
+            raw_path.write_bytes(raw)
+        return raw_bytes
+
+    monkeypatch.setattr(
+        secondary_evidence,
+        "read_anchored_bytes",
+        read_then_swap,
+    )
+
+    result = _invoke(["review", "seal", str(run_dir)])
+
+    assert result.exit_code == 0, result.stdout
+    assert swapped is False
+    assert raw_path.stat().st_ino == original_inode
+    assert (run_dir / "reviews").exists()
+
+
 def test_review_seal_rechecks_source_guard_after_validation_snapshot_returns(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -542,6 +542,70 @@ def test_authorize_rejects_candidate_snapshot_that_drops_secondary_plan_before_p
     assert not (run_dir / "authorizations").exists()
 
 
+@pytest.mark.parametrize("role", ["raw_discovery_bundle", "normalized_source"])
+def test_authorize_rejects_candidate_snapshot_with_additional_source_role_ref_before_provider(
+    role: str,
+    tmp_path: Path,
+) -> None:
+    candidate_path, _provider = _candidate(tmp_path)
+    candidate_dir = candidate_path.parent
+    run_dir = candidate_dir.parent.parent
+    snapshot_path = candidate_dir / "run.json"
+    snapshot = json.loads(snapshot_path.read_bytes())
+    other_role = (
+        "normalized_source" if role == "raw_discovery_bundle" else "raw_discovery_bundle"
+    )
+    other_ref = next(
+        artifact for artifact in snapshot["artifacts"] if artifact["role"] == other_role
+    )
+    snapshot["artifacts"].append({**other_ref, "role": role})
+    snapshot_bytes = canonical_json_bytes(snapshot)
+    snapshot_path.write_bytes(snapshot_bytes)
+
+    candidate = json.loads(candidate_path.read_bytes())
+    snapshot_ref = next(
+        artifact
+        for artifact in candidate["artifacts"]
+        if artifact["role"] == "run_snapshot"
+    )
+    snapshot_ref["sha256"] = hashlib.sha256(snapshot_bytes).hexdigest()
+    snapshot_ref["size_bytes"] = len(snapshot_bytes)
+    candidate_bytes = canonical_json_bytes(candidate)
+    candidate_path.write_bytes(candidate_bytes)
+
+    run_path = run_dir / "run.json"
+    run = json.loads(run_path.read_bytes())
+    current_candidate_ref = next(
+        artifact
+        for artifact in run["artifacts"]
+        if artifact["role"] == "candidate"
+        and artifact["path"] == candidate_path.relative_to(run_dir).as_posix()
+    )
+    current_candidate_ref["sha256"] = hashlib.sha256(candidate_bytes).hexdigest()
+    current_candidate_ref["size_bytes"] = len(candidate_bytes)
+    run_path.write_bytes(canonical_json_bytes(run))
+
+    class ProviderSpy:
+        calls = 0
+
+        def get_parent(self, _item_key: str):
+            self.calls += 1
+            raise AssertionError("invalid candidate snapshot reached Zotero read")
+
+        def get_children(self, _parent_key: str):
+            self.calls += 1
+            raise AssertionError("invalid candidate snapshot reached Zotero read")
+
+    provider = ProviderSpy()
+
+    with pytest.raises(Exception) as exc_info:
+        _authorize(candidate_path, provider)
+
+    assert getattr(exc_info.value, "code", None) == "secondary_plan_mismatch"
+    assert provider.calls == 0
+    assert not (run_dir / "authorizations").exists()
+
+
 def test_authorize_revalidates_original_evidence_after_live_refresh(
     tmp_path: Path,
 ) -> None:

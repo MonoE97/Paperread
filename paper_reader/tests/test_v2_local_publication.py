@@ -128,6 +128,52 @@ def test_local_publish_rejects_unreferenced_candidate_tree_members(
     assert not (run_dir / "receipts").exists()
 
 
+def test_local_publish_rejects_candidate_snapshot_with_additional_source_ref(
+    tmp_path: Path,
+) -> None:
+    run_dir, candidate_path = _built_candidate(tmp_path)
+    snapshot_path = candidate_path.parent / "run.json"
+    snapshot = json.loads(snapshot_path.read_bytes())
+    evidence_ref = next(
+        artifact
+        for artifact in snapshot["artifacts"]
+        if artifact["role"] == "evidence_manifest"
+    )
+    snapshot["artifacts"].append({**evidence_ref, "role": "source_snapshot"})
+    snapshot_bytes = storage_module.canonical_json_bytes(snapshot)
+    snapshot_path.write_bytes(snapshot_bytes)
+
+    candidate = json.loads(candidate_path.read_bytes())
+    snapshot_ref = next(
+        artifact
+        for artifact in candidate["artifacts"]
+        if artifact["role"] == "run_snapshot"
+    )
+    snapshot_ref["sha256"] = hashlib.sha256(snapshot_bytes).hexdigest()
+    snapshot_ref["size_bytes"] = len(snapshot_bytes)
+    candidate_bytes = storage_module.canonical_json_bytes(candidate)
+    candidate_path.write_bytes(candidate_bytes)
+
+    run_path = run_dir / "run.json"
+    run = json.loads(run_path.read_bytes())
+    bound_candidate = next(
+        artifact
+        for artifact in run["artifacts"]
+        if artifact["role"] == "candidate"
+        and artifact["path"] == candidate_path.relative_to(run_dir).as_posix()
+    )
+    bound_candidate["sha256"] = hashlib.sha256(candidate_bytes).hexdigest()
+    bound_candidate["size_bytes"] = len(candidate_bytes)
+    run_path.write_bytes(storage_module.canonical_json_bytes(run))
+
+    with pytest.raises(Exception) as exc_info:
+        local_publish_module.publish_local_candidate(candidate_path)
+
+    assert getattr(exc_info.value, "code", None) == "secondary_plan_mismatch"
+    assert not (tmp_path / "paper_note.md").exists()
+    assert not (run_dir / "receipts").exists()
+
+
 @pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
 def test_local_publish_rejects_unreferenced_candidate_tree_links(
     link_kind: str,

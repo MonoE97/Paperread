@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 import hashlib
 from html import unescape
 from html.parser import HTMLParser
@@ -31,7 +32,6 @@ from paper_reader_batch.v2_json import (
     _bounded_sorted_names,
     canonical_json_bytes,
     canonical_sha256,
-    held_exact_sibling_files,
     list_directory,
     locked_file,
     normalized_absolute_path,
@@ -120,94 +120,427 @@ class _OpaqueRecord:
         return self._payload
 
 
+@dataclass(slots=True)
+class _HeldCommitDirectory:
+    path: Path
+    manager: object
+    descriptor: int
+    expected_names: frozenset[str] | None = None
+
+
+@dataclass(slots=True)
+class _HeldCommitFile:
+    path: Path
+    parent: _HeldCommitDirectory
+    descriptor: int
+    identity: tuple[int, int, int, int, int, int]
+    raw: bytes
+
+
 class _ArtifactCommitClosure:
-    """Hold every consumed file and closed-world directory in one Reader run."""
+    """Hold every consumed inode from its first validation through commit."""
 
     def __init__(self, run_root: Path) -> None:
         self.run_root = normalized_absolute_path(run_root)
+        anchor = _RUN_ARTIFACT_ANCHOR.get()
+        if anchor is None or anchor[0] != self.run_root:
+            raise _invalid(
+                "source_binding_mismatch",
+                "foreign commit closure requires the held Reader run anchor",
+            )
+        self._run_anchor_descriptor = anchor[1]
+        self._run_anchor_identity = self._directory_identity(
+            os.fstat(self._run_anchor_descriptor)
+        )
         self.files: dict[Path, bytes] = {}
         self.closed_directories: dict[Path, frozenset[str]] = {}
+        self._held_files: dict[Path, _HeldCommitFile] = {}
+        self._held_directories: dict[Path, _HeldCommitDirectory] = {}
+        self._directory_order: list[Path] = []
+        self._tree_files: dict[Path, frozenset[str]] = {}
         self.frozen = False
 
-    def add(self, path: Path, raw: bytes) -> None:
-        normalized = normalized_absolute_path(path)
-        if not normalized.is_relative_to(self.run_root):
-            return
-        existing = self.files.get(normalized)
-        if existing is not None:
-            if existing != raw:
-                raise _invalid(
-                    "source_binding_mismatch",
-                    f"foreign artifact closure changed while read: {normalized}",
-                )
-            return
-        if self.frozen:
-                raise _invalid(
-                    "source_binding_mismatch",
-                    f"foreign artifact closure expanded after validation: {normalized}",
-                )
-        if len(self.files) >= _MAX_HELD_COMMIT_CLOSURE_FILES:
-                raise _invalid(
-                    "resource_limit",
-                    "foreign artifact commit closure has too many consumed files",
-                )
-        self.files[normalized] = raw
-
-    def close_tree(
-        self,
-        root: Path,
-        directory_memberships: dict[str, frozenset[str]],
-    ) -> None:
-        normalized_root = normalized_absolute_path(root)
-        if not normalized_root.is_relative_to(self.run_root):
-            return
-        normalized_memberships: dict[Path, frozenset[str]] = {}
-        for relative_value, names in directory_memberships.items():
-            relative = PurePosixPath(relative_value or ".")
-            if (
-                relative.is_absolute()
-                or relative_value not in {"", relative.as_posix()}
-                or any(part in {"", ".."} for part in relative.parts)
-            ):
-                raise _invalid(
-                    "artifact_closed_world_mismatch",
-                    "foreign artifact walker returned a noncanonical directory",
-                )
-            directory = (
-                normalized_root
-                if relative_value == ""
-                else normalized_root.joinpath(*relative.parts)
-            )
-            normalized_memberships[directory] = names
-        new_directories = set(normalized_memberships).difference(
-            self.closed_directories
+    @staticmethod
+    def _identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+            metadata.st_nlink,
         )
+
+    @staticmethod
+    def _directory_identity(metadata: os.stat_result) -> tuple[int, int]:
+        return metadata.st_dev, metadata.st_ino
+
+    def _verify_run_anchor(self) -> None:
+        try:
+            held = os.fstat(self._run_anchor_descriptor)
+            named = os.stat(self.run_root, follow_symlinks=False)
+        except OSError as exc:
+            raise _invalid(
+                "source_binding_mismatch",
+                "held Reader run root became unavailable",
+                exc,
+            ) from exc
         if (
-            len(self.closed_directories) + len(new_directories)
-            > _MAX_HELD_COMMIT_CLOSURE_DIRECTORIES
+            not stat.S_ISDIR(held.st_mode)
+            or not stat.S_ISDIR(named.st_mode)
+            or self._directory_identity(held) != self._run_anchor_identity
+            or self._directory_identity(named) != self._run_anchor_identity
         ):
+            raise _invalid(
+                "source_binding_mismatch",
+                "held Reader run root changed before journal commit",
+            )
+
+    def _hold_directory(self, path: Path) -> _HeldCommitDirectory:
+        self._verify_run_anchor()
+        normalized = normalized_absolute_path(path)
+        existing = self._held_directories.get(normalized)
+        if existing is not None:
+            self._verify_directory(existing)
+            return existing
+        if self.frozen:
+            raise _invalid(
+                "artifact_closed_world_mismatch",
+                f"foreign artifact directory closure expanded after validation: {normalized}",
+            )
+        if len(self._held_directories) >= _MAX_HELD_COMMIT_CLOSURE_DIRECTORIES:
             raise _invalid(
                 "resource_limit",
                 "foreign artifact commit closure has too many directories",
             )
-        for directory, names in sorted(
-            normalized_memberships.items(),
-            key=lambda item: str(item[0]),
+        manager = open_directory_fd(normalized, create=False)
+        descriptor, bound = manager.__enter__()
+        held = _HeldCommitDirectory(
+            path=bound,
+            manager=manager,
+            descriptor=descriptor,
+        )
+        self._held_directories[normalized] = held
+        self._directory_order.append(normalized)
+        try:
+            self._verify_run_anchor()
+            self._verify_directory(held)
+        except BaseException:
+            self._held_directories.pop(normalized, None)
+            self._directory_order.pop()
+            try:
+                manager.__exit__(None, None, None)
+            except BaseException:
+                pass
+            raise
+        return held
+
+    def _verify_directory(self, held: _HeldCommitDirectory) -> None:
+        self._verify_run_anchor()
+        try:
+            opened = os.fstat(held.descriptor)
+            named = os.stat(held.path, follow_symlinks=False)
+            names = (
+                frozenset(
+                    _bounded_sorted_names(
+                        held.descriptor,
+                        max_entries=_MAX_FOREIGN_BUNDLE_MEMBERS,
+                        label="held foreign artifact directory",
+                    )
+                )
+                if held.expected_names is not None
+                else None
+            )
+        except (OSError, BatchRuntimeError) as exc:
+            raise _invalid(
+                "artifact_closed_world_mismatch",
+                f"held foreign artifact directory became unavailable: {held.path}",
+                exc,
+            ) from exc
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(named.st_mode)
+            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+            or (
+                held.expected_names is not None
+                and names != held.expected_names
+            )
         ):
-            existing = self.closed_directories.get(directory)
-            if existing is not None:
-                if existing != names:
+            raise _invalid(
+                "artifact_closed_world_mismatch",
+                f"held foreign artifact directory changed: {held.path}",
+            )
+        self._verify_run_anchor()
+
+    @staticmethod
+    def _read_descriptor(descriptor: int, *, max_bytes: int, code: str) -> bytes:
+        chunks: list[bytes] = []
+        total = 0
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while total <= max_bytes:
+            chunk = os.read(
+                descriptor,
+                min(1024 * 1024, max_bytes - total + 1),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                raise BatchRuntimeError(
+                    code,
+                    f"foreign artifact exceeded its read limit of {max_bytes} bytes",
+                )
+        return b"".join(chunks)
+
+    def _verify_file(self, held: _HeldCommitFile) -> None:
+        self._verify_directory(held.parent)
+        try:
+            opened_before = os.fstat(held.descriptor)
+            named_before = os.stat(
+                held.path.name,
+                dir_fd=held.parent.descriptor,
+                follow_symlinks=False,
+            )
+            raw = self._read_descriptor(
+                held.descriptor,
+                max_bytes=len(held.raw),
+                code="source_binding_mismatch",
+            )
+            opened_after = os.fstat(held.descriptor)
+            named_after = os.stat(
+                held.path.name,
+                dir_fd=held.parent.descriptor,
+                follow_symlinks=False,
+            )
+        except (OSError, BatchRuntimeError) as exc:
+            raise _invalid(
+                "source_binding_mismatch",
+                f"held foreign artifact became unavailable: {held.path}",
+                exc,
+            ) from exc
+        if (
+            {self._identity(item) for item in (
+                opened_before,
+                named_before,
+                opened_after,
+                named_after,
+            )}
+            != {held.identity}
+            or not all(
+                stat.S_ISREG(item.st_mode)
+                for item in (opened_before, named_before, opened_after, named_after)
+            )
+            or held.identity[5] != 1
+            or raw != held.raw
+        ):
+            raise _invalid(
+                "source_binding_mismatch",
+                f"held foreign artifact changed: {held.path}",
+            )
+        self._verify_directory(held.parent)
+
+    def read_and_hold(self, path: Path, *, code: str, max_bytes: int) -> bytes:
+        normalized = normalized_absolute_path(path)
+        if not normalized.is_relative_to(self.run_root):
+            raise ValueError("foreign commit closure may only hold files below its run root")
+        existing = self._held_files.get(normalized)
+        if existing is not None:
+            if len(existing.raw) > max_bytes:
+                raise BatchRuntimeError(
+                    code,
+                    f"foreign artifact exceeds its read limit of {max_bytes} bytes: {normalized}",
+                )
+            self._verify_file(existing)
+            return existing.raw
+        if self.frozen:
+            raise _invalid(
+                "source_binding_mismatch",
+                f"foreign artifact closure expanded after validation: {normalized}",
+            )
+        if len(self._held_files) >= _MAX_HELD_COMMIT_CLOSURE_FILES:
+            raise _invalid(
+                "resource_limit",
+                "foreign artifact commit closure has too many consumed files",
+            )
+        parent = self._hold_directory(normalized.parent)
+        descriptor = -1
+        try:
+            before = os.stat(
+                normalized.name,
+                dir_fd=parent.descriptor,
+                follow_symlinks=False,
+            )
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise _invalid(
+                    "source_binding_mismatch",
+                    f"foreign artifact is not a regular single-link file: {normalized}",
+                )
+            flags = os.O_RDONLY
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(normalized.name, flags, dir_fd=parent.descriptor)
+            opened_before = os.fstat(descriptor)
+            if self._identity(before) != self._identity(opened_before):
+                raise _invalid(
+                    "source_binding_mismatch",
+                    f"foreign artifact changed before first held read: {normalized}",
+                )
+            raw = self._read_descriptor(descriptor, max_bytes=max_bytes, code=code)
+            opened_after = os.fstat(descriptor)
+            named_after = os.stat(
+                normalized.name,
+                dir_fd=parent.descriptor,
+                follow_symlinks=False,
+            )
+            identity = self._identity(opened_before)
+            if (
+                identity != self._identity(opened_after)
+                or identity != self._identity(named_after)
+                or len(raw) != identity[2]
+            ):
+                raise _invalid(
+                    "source_binding_mismatch",
+                    f"foreign artifact changed during first held read: {normalized}",
+                )
+            held = _HeldCommitFile(
+                path=normalized,
+                parent=parent,
+                descriptor=descriptor,
+                identity=identity,
+                raw=raw,
+            )
+            descriptor = -1
+            self._held_files[normalized] = held
+            self.files[normalized] = raw
+            self._verify_file(held)
+            return raw
+        except FileNotFoundError as exc:
+            raise BatchRuntimeError(code, f"foreign artifact does not exist: {normalized}") from exc
+        except OSError as exc:
+            raise BatchRuntimeError(code, f"foreign artifact cannot be held safely: {normalized}") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    def walk_and_hold(self, root: Path) -> set[str]:
+        normalized_root = normalized_absolute_path(root)
+        if not normalized_root.is_relative_to(self.run_root):
+            raise ValueError("foreign commit closure may only walk below its run root")
+        existing = self._tree_files.get(normalized_root)
+        if existing is not None:
+            self.verify()
+            return set(existing)
+        if self.frozen:
+            raise _invalid(
+                "artifact_closed_world_mismatch",
+                f"foreign artifact tree closure expanded after validation: {normalized_root}",
+            )
+        found: set[str] = set()
+        member_count = 0
+
+        def walk(directory: Path, prefix: PurePosixPath) -> None:
+            nonlocal member_count
+            held = self._hold_directory(directory)
+            before_names = tuple(
+                _bounded_sorted_names(
+                    held.descriptor,
+                    max_entries=_MAX_FOREIGN_BUNDLE_MEMBERS - member_count,
+                    label="foreign artifact bundle",
+                )
+            )
+            for name in before_names:
+                member_count += 1
+                if member_count > _MAX_FOREIGN_BUNDLE_MEMBERS:
+                    raise _invalid(
+                        "resource_limit",
+                        "foreign artifact bundle has too many members",
+                    )
+                metadata = os.stat(name, dir_fd=held.descriptor, follow_symlinks=False)
+                relative = prefix / name
+                child_path = directory / name
+                if stat.S_ISLNK(metadata.st_mode):
                     raise _invalid(
                         "artifact_closed_world_mismatch",
-                        f"foreign artifact directory changed while read: {directory}",
+                        f"foreign bundle contains symlink: {relative}",
                     )
-                continue
-            if self.frozen:
+                if stat.S_ISDIR(metadata.st_mode):
+                    child = self._hold_directory(child_path)
+                    if (metadata.st_dev, metadata.st_ino) != (
+                        os.fstat(child.descriptor).st_dev,
+                        os.fstat(child.descriptor).st_ino,
+                    ):
+                        raise _invalid(
+                            "artifact_closed_world_mismatch",
+                            f"foreign bundle directory changed while held: {relative}",
+                        )
+                    walk(child_path, relative)
+                    current = os.stat(
+                        name,
+                        dir_fd=held.descriptor,
+                        follow_symlinks=False,
+                    )
+                    if (current.st_dev, current.st_ino) != (
+                        metadata.st_dev,
+                        metadata.st_ino,
+                    ):
+                        raise _invalid(
+                            "artifact_closed_world_mismatch",
+                            f"foreign bundle directory changed while walking: {relative}",
+                        )
+                elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                    found.add(relative.as_posix())
+                else:
+                    raise _invalid(
+                        "artifact_closed_world_mismatch",
+                        f"foreign bundle entry is unsafe: {relative}",
+                    )
+            if tuple(
+                _bounded_sorted_names(
+                    held.descriptor,
+                    max_entries=len(before_names),
+                    label="foreign artifact bundle",
+                )
+            ) != before_names:
                 raise _invalid(
                     "artifact_closed_world_mismatch",
-                    f"foreign artifact directory closure expanded after validation: {directory}",
+                    f"foreign bundle membership changed while walking: {directory}",
                 )
+            names = frozenset(before_names)
+            if held.expected_names is not None and held.expected_names != names:
+                raise _invalid(
+                    "artifact_closed_world_mismatch",
+                    f"foreign artifact directory changed while read: {directory}",
+                )
+            if (
+                held.expected_names is None
+                and len(self.closed_directories)
+                >= _MAX_HELD_COMMIT_CLOSURE_DIRECTORIES
+            ):
+                raise _invalid(
+                    "resource_limit",
+                    "foreign artifact commit closure has too many walked directories",
+                )
+            held.expected_names = names
             self.closed_directories[directory] = names
+            self._verify_directory(held)
+
+        walk(normalized_root, PurePosixPath())
+        self._tree_files[normalized_root] = frozenset(found)
+        self.verify()
+        return found
+
+    def verify(self) -> None:
+        self._verify_run_anchor()
+        for held in self._held_directories.values():
+            self._verify_directory(held)
+        self._verify_run_anchor()
+        for held in self._held_files.values():
+            self._verify_file(held)
+        for held in self._held_directories.values():
+            self._verify_directory(held)
 
     def freeze(self) -> None:
         if self.run_root / "run.json" not in self.files:
@@ -220,70 +553,33 @@ class _ArtifactCommitClosure:
                 "artifact_closed_world_mismatch",
                 "foreign artifact commit closure did not bind any closed-world directory",
             )
+        self.verify()
         self.frozen = True
 
     @contextmanager
     def hold(self) -> Iterator[Callable[[], None]]:
         if not self.frozen:
             raise RuntimeError("foreign source commit closure must be frozen before hold")
-        by_parent: dict[Path, dict[str, bytes]] = {}
-        for path, raw in self.files.items():
-            by_parent.setdefault(path.parent, {})[path.name] = raw
-        with ExitStack() as stack:
-            guards = tuple(
-                stack.enter_context(
-                    held_exact_sibling_files(
-                        parent,
-                        expected,
-                        require_private=False,
-                        exact_membership=False,
-                    )
-                )
-                for parent, expected in sorted(
-                    by_parent.items(),
-                    key=lambda item: str(item[0]),
-                )
-            )
-            held_directories = tuple(
-                (
-                    directory,
-                    names,
-                    stack.enter_context(open_directory_fd(directory, create=False))[0],
-                )
-                for directory, names in sorted(
-                    self.closed_directories.items(),
-                    key=lambda item: str(item[0]),
-                )
-            )
+        self.verify()
+        yield self.verify
 
-            def verify() -> None:
-                for guard in guards:
-                    guard()
-                for directory, expected_names, descriptor in held_directories:
-                    held = os.fstat(descriptor)
-                    named = os.stat(directory, follow_symlinks=False)
-                    if (
-                        not stat.S_ISDIR(held.st_mode)
-                        or not stat.S_ISDIR(named.st_mode)
-                        or (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino)
-                        or frozenset(
-                            _bounded_sorted_names(
-                                descriptor,
-                                max_entries=_MAX_FOREIGN_BUNDLE_MEMBERS,
-                                label="held foreign artifact directory",
-                            )
-                        )
-                        != expected_names
-                    ):
-                        raise _invalid(
-                            "artifact_closed_world_mismatch",
-                            f"held foreign artifact directory changed: {directory}",
-                        )
-                for guard in guards:
-                    guard()
-
-            verify()
-            yield verify
+    def close(self) -> None:
+        for held in self._held_files.values():
+            try:
+                os.close(held.descriptor)
+            except OSError:
+                pass
+        self._held_files.clear()
+        for path in reversed(self._directory_order):
+            held = self._held_directories.get(path)
+            if held is None:
+                continue
+            try:
+                held.manager.__exit__(None, None, None)
+            except BaseException:
+                pass
+        self._held_directories.clear()
+        self._directory_order.clear()
 
 
 _ACTIVE_ARTIFACT_COMMIT_CLOSURE = ContextVar(
@@ -636,14 +932,18 @@ def _read_artifact_bytes(path: Path, *, code: str) -> bytes:
     anchor = _RUN_ARTIFACT_ANCHOR.get()
     max_bytes = _ARTIFACT_READ_LIMIT.get()
     normalized = normalized_absolute_path(path)
+    collector = _ACTIVE_ARTIFACT_COMMIT_CLOSURE.get()
+    if collector is not None and normalized.is_relative_to(collector.run_root):
+        return collector.read_and_hold(
+            normalized,
+            code=code,
+            max_bytes=max_bytes,
+        )
     if anchor is not None and normalized.is_relative_to(anchor[0]):
         relative = normalized.relative_to(anchor[0]).as_posix()
         raw = read_relative_bytes(anchor[1], relative, code=code, max_bytes=max_bytes)
     else:
         raw = read_bytes(path, code=code, max_bytes=max_bytes)
-    collector = _ACTIVE_ARTIFACT_COMMIT_CLOSURE.get()
-    if collector is not None:
-        collector.add(normalized, raw)
     return raw
 
 
@@ -858,14 +1158,15 @@ def _validate_local_run_target(
 def _walk_regular_files(root: Path) -> set[str]:
     anchor = _RUN_ARTIFACT_ANCHOR.get()
     normalized_root = normalized_absolute_path(root)
-    directory_memberships: dict[str, frozenset[str]] = {}
+    collector = _ACTIVE_ARTIFACT_COMMIT_CLOSURE.get()
+    if collector is not None and normalized_root.is_relative_to(collector.run_root):
+        return collector.walk_and_hold(normalized_root)
     if anchor is not None and normalized_root.is_relative_to(anchor[0]):
         relative_root = normalized_root.relative_to(anchor[0]).as_posix()
         try:
             found = walk_relative_regular_files(
                 anchor[1],
                 relative_root,
-                directory_memberships=directory_memberships,
             )
         except BatchRuntimeError as exc:
             if exc.code == "resource_limit":
@@ -917,14 +1218,7 @@ def _walk_regular_files(root: Path) -> set[str]:
                         "artifact_closed_world_mismatch",
                         f"foreign bundle membership changed while walking: {directory}",
                     )
-                directory_memberships[
-                    "" if not prefix.parts else prefix.as_posix()
-                ] = frozenset(before_names)
-
         walk(root, PurePosixPath())
-    collector = _ACTIVE_ARTIFACT_COMMIT_CLOSURE.get()
-    if collector is not None:
-        collector.close_tree(normalized_root, directory_memberships)
     return found
 
 
@@ -945,6 +1239,27 @@ def _validate_source_directory(
         == "secondary_source_plan"
     ]
     if source_type == "local_pdf":
+        source_refs = [
+            _require_inner_ref(ref, code="source_binding_mismatch")
+            for ref in run_artifacts
+            if _require_object(
+                ref,
+                code="source_binding_mismatch",
+                label="run artifact",
+            ).get("role")
+            == "source_snapshot"
+        ]
+        if len(source_refs) != 1:
+            raise _invalid(
+                "source_binding_mismatch",
+                "local paper_reader run must bind exactly one source snapshot ref",
+            )
+        _require_ref_shape(
+            source_refs[0],
+            role="source_snapshot",
+            path="source/source.json",
+            media_type="application/json",
+        )
         if plan_refs:
             raise _invalid(
                 "source_binding_mismatch",
@@ -953,6 +1268,46 @@ def _validate_source_directory(
         expected = {"source.json"}
         plan_binding = None
     elif source_type == "zotero":
+        fixed_source_refs = (
+            (
+                "raw_discovery_bundle",
+                "source/discovery.raw.json",
+                _require_inner_ref(
+                    source.get("raw_discovery_bundle"),
+                    code="source_binding_mismatch",
+                ),
+            ),
+            (
+                "normalized_source",
+                "source/source.json",
+                _require_inner_ref(
+                    source.get("normalized_source"),
+                    code="source_binding_mismatch",
+                ),
+            ),
+        )
+        for role, path, embedded_ref in fixed_source_refs:
+            _require_ref_shape(
+                embedded_ref,
+                role=role,
+                path=path,
+                media_type="application/json",
+            )
+            role_refs = [
+                _require_inner_ref(ref, code="source_binding_mismatch")
+                for ref in run_artifacts
+                if _require_object(
+                    ref,
+                    code="source_binding_mismatch",
+                    label="run artifact",
+                ).get("role")
+                == role
+            ]
+            if role_refs != [embedded_ref]:
+                raise _invalid(
+                    "source_binding_mismatch",
+                    "Zotero paper_reader run must retain exact singleton source refs",
+                )
         if len(plan_refs) > 1:
             raise _invalid(
                 "source_binding_mismatch",
@@ -1688,9 +2043,16 @@ def _validate_review_and_candidate(
         ]
         if len(original_source_refs) != 1:
             raise _invalid("source_binding_mismatch", "local run must bind one source snapshot")
-        if [ref for ref in current_run_artifacts if ref == original_source_refs[0]] != [
-            original_source_refs[0]
-        ]:
+        if [
+            _require_inner_ref(ref, code="source_binding_mismatch")
+            for ref in current_run_artifacts
+            if _require_object(
+                ref,
+                code="source_binding_mismatch",
+                label="current local source ref",
+            ).get("role")
+            == "source_snapshot"
+        ] != [original_source_refs[0]]:
             raise _invalid("source_binding_mismatch", "current local run dropped its source snapshot")
         _source_path, original_source_raw, original_source = _read_inner(
             run_dir,
@@ -1811,11 +2173,49 @@ def _validate_review_and_candidate(
         media_type="application/json",
     )
     if (
-        [ref for ref in run_snapshot_artifacts if ref == source_raw_ref] != [source_raw_ref]
-        or [ref for ref in run_snapshot_artifacts if ref == source_normalized_ref]
+        [
+            _require_inner_ref(ref, code="source_binding_mismatch")
+            for ref in run_snapshot_artifacts
+            if _require_object(
+                ref,
+                code="source_binding_mismatch",
+                label="candidate raw source ref",
+            ).get("role")
+            == "raw_discovery_bundle"
+        ]
+        != [source_raw_ref]
+        or [
+            _require_inner_ref(ref, code="source_binding_mismatch")
+            for ref in run_snapshot_artifacts
+            if _require_object(
+                ref,
+                code="source_binding_mismatch",
+                label="candidate normalized source ref",
+            ).get("role")
+            == "normalized_source"
+        ]
         != [source_normalized_ref]
-        or [ref for ref in current_run_artifacts if ref == source_raw_ref] != [source_raw_ref]
-        or [ref for ref in current_run_artifacts if ref == source_normalized_ref]
+        or [
+            _require_inner_ref(ref, code="source_binding_mismatch")
+            for ref in current_run_artifacts
+            if _require_object(
+                ref,
+                code="source_binding_mismatch",
+                label="current raw source ref",
+            ).get("role")
+            == "raw_discovery_bundle"
+        ]
+        != [source_raw_ref]
+        or [
+            _require_inner_ref(ref, code="source_binding_mismatch")
+            for ref in current_run_artifacts
+            if _require_object(
+                ref,
+                code="source_binding_mismatch",
+                label="current normalized source ref",
+            ).get("role")
+            == "normalized_source"
+        ]
         != [source_normalized_ref]
     ):
         raise _invalid("source_binding_mismatch", "Zotero run does not retain source closure")
@@ -2060,6 +2460,7 @@ def worker_result_artifact_commit_guard(
         finally:
             _ACTIVE_ARTIFACT_COMMIT_CLOSURE.reset(closure_token)
             _RUN_ARTIFACT_ANCHOR.reset(token)
+            closure.close()
 
 
 def _validate_worker_result_artifacts_unanchored(
@@ -2402,6 +2803,7 @@ def local_prepare_result_artifact_commit_guard(
                 yield validate_closure
         finally:
             _ACTIVE_ARTIFACT_COMMIT_CLOSURE.reset(closure_token)
+            closure.close()
 
 
 def _validate_local_prepare_result_artifacts_unanchored(

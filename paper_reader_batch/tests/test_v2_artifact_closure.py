@@ -6,6 +6,7 @@ import ast
 from html import escape
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 
@@ -2482,6 +2483,92 @@ def test_committed_zotero_root_must_retain_exact_source_refs(
     assert exc_info.value.code == "source_binding_mismatch"
 
 
+@pytest.mark.parametrize("role", ["raw_discovery_bundle", "normalized_source"])
+def test_committed_zotero_root_rejects_additional_same_role_source_ref(
+    role: str,
+    tmp_path: Path,
+) -> None:
+    built = _zotero_fixture(tmp_path)
+    changed = json.loads(built.run_path.read_text())
+    other_role = (
+        "normalized_source" if role == "raw_discovery_bundle" else "raw_discovery_bundle"
+    )
+    other_ref = next(
+        ref for ref in changed["artifacts"] if ref["role"] == other_role
+    )
+    changed["artifacts"].append({**other_ref, "role": role})
+    built.rewrite_final_run(changed)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == "source_binding_mismatch"
+
+
+@pytest.mark.parametrize("role", ["raw_discovery_bundle", "normalized_source"])
+def test_candidate_run_snapshot_rejects_additional_same_role_source_ref(
+    role: str,
+    tmp_path: Path,
+) -> None:
+    built = _zotero_fixture(tmp_path)
+
+    def add_same_role(snapshot: dict[str, object]) -> None:
+        artifacts = snapshot["artifacts"]
+        assert isinstance(artifacts, list)
+        other_role = (
+            "normalized_source"
+            if role == "raw_discovery_bundle"
+            else "raw_discovery_bundle"
+        )
+        other_ref = next(ref for ref in artifacts if ref["role"] == other_role)
+        artifacts.append({**other_ref, "role": role})
+
+    _rewrite_candidate_run_snapshot(built, add_same_role)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == "source_binding_mismatch"
+
+
+def test_committed_local_root_rejects_additional_source_snapshot_ref(
+    tmp_path: Path,
+) -> None:
+    built = _local_fixture(tmp_path)
+    changed = json.loads(built.run_path.read_text())
+    evidence_ref = next(
+        ref for ref in changed["artifacts"] if ref["role"] == "evidence_manifest"
+    )
+    changed["artifacts"].append({**evidence_ref, "role": "source_snapshot"})
+    built.rewrite_final_run(changed)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == "source_binding_mismatch"
+
+
+def test_local_candidate_run_snapshot_rejects_additional_source_snapshot_ref(
+    tmp_path: Path,
+) -> None:
+    built = _local_fixture(tmp_path)
+
+    def add_source_snapshot(snapshot: dict[str, object]) -> None:
+        artifacts = snapshot["artifacts"]
+        assert isinstance(artifacts, list)
+        evidence_ref = next(
+            ref for ref in artifacts if ref["role"] == "evidence_manifest"
+        )
+        artifacts.append({**evidence_ref, "role": "source_snapshot"})
+
+    _rewrite_candidate_run_snapshot(built, add_source_snapshot)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        validate_worker_result_artifacts(built.manifest, built.result)
+
+    assert exc_info.value.code == "source_binding_mismatch"
+
+
 @pytest.mark.parametrize(
     "missing_role",
     [
@@ -2726,6 +2813,178 @@ def test_worker_finish_commit_guard_rejects_reader_closure_change_before_event(
     assert len(after.events) == len(before.events)
     assert after.state.items[0].worker_status == "claimed"
     assert not list((batch_run / "results" / "worker").glob("*.json"))
+
+
+@pytest.mark.parametrize("changed_member", ["context_file", "empty_directory"])
+def test_worker_finish_holds_first_validated_inode_before_freeze_returns(
+    changed_member: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built = _zotero_fixture(tmp_path / "reader", secondary_state="captured")
+    nested_empty = built.evidence_path.parent / "junk" / "deep"
+    nested_empty.mkdir(parents=True)
+    manifest_path = tmp_path / "manifest.json"
+    _json(manifest_path, built.manifest.model_dump(mode="json"))
+    skill_root = tmp_path / "batch-skill-root"
+    skill_root.mkdir()
+    batch_run = tmp_path / "batch-run"
+    initialize_run(
+        manifest_path,
+        request_id="30303030-3030-4303-8303-303030303030",
+        skill_root=skill_root,
+        output=batch_run,
+        initialized_at=NOW,
+    )
+    assignment = claim_worker(
+        batch_run,
+        worker_id="reader",
+        request_id="31313131-3131-4313-8313-313131313131",
+        now="2026-07-10T00:00:01Z",
+    ).result["assignments"][0]
+    result = built.result.model_copy(
+        update={
+            "manifest_sha256": load_run_view(batch_run).manifest_sha256,
+            "worker_id": assignment["worker_id"],
+            "claim_id": assignment["claim_id"],
+            "attempt_id": assignment["attempt_id"],
+            "attempt_number": assignment["attempt_number"],
+            "lease_token_sha256": sha256_bytes(
+                str(assignment["lease_token"]).encode()
+            ),
+        }
+    )
+    result_path = tmp_path / "worker-result.json"
+    result_path.write_bytes(canonical_json_bytes(result))
+    original_freeze = artifact_module._ArtifactCommitClosure.freeze
+    changed_path = (
+        built.evidence_path.parent / "context.md"
+        if changed_member == "context_file"
+        else nested_empty
+    )
+    original_inode = changed_path.stat().st_ino
+    changed_raw = changed_path.read_bytes() if changed_path.is_file() else None
+    replaced = False
+
+    def freeze_then_replace(closure) -> None:
+        nonlocal replaced
+        original_freeze(closure)
+        if not replaced:
+            replacement = tmp_path / f"detached-{changed_member}"
+            changed_path.rename(replacement)
+            if changed_raw is None:
+                changed_path.mkdir()
+            else:
+                changed_path.write_bytes(changed_raw)
+            replaced = True
+
+    monkeypatch.setattr(
+        artifact_module._ArtifactCommitClosure,
+        "freeze",
+        freeze_then_replace,
+    )
+    before = load_run_view(batch_run)
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        finish_worker(
+            batch_run,
+            str(assignment["item_id"]),
+            worker_id=str(assignment["worker_id"]),
+            claim_id=str(assignment["claim_id"]),
+            lease_token=str(assignment["lease_token"]),
+            attempt_id=str(assignment["attempt_id"]),
+            result_path=result_path,
+            request_id="32323232-3232-4323-8323-323232323232",
+            now="2026-07-10T00:00:02Z",
+        )
+
+    after = load_run_view(batch_run)
+    assert replaced is True
+    assert changed_path.stat().st_ino != original_inode
+    assert exc_info.value.code in {
+        "artifact_closed_world_mismatch",
+        "source_binding_mismatch",
+        "storage_path_changed",
+    }
+    assert len(after.events) == len(before.events)
+    assert after.state.items[0].worker_status == "claimed"
+    assert not list((batch_run / "results" / "worker").glob("*.json"))
+
+
+def test_commit_closure_directory_cap_closes_every_first_walk_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "reader-run"
+    tree = run_dir / "tree"
+    deepest = tree
+    for index in range(5):
+        deepest = deepest / f"d{index}"
+        deepest.mkdir(parents=True)
+    monkeypatch.setattr(
+        artifact_module,
+        "_MAX_HELD_COMMIT_CLOSURE_DIRECTORIES",
+        4,
+    )
+
+    with artifact_module.open_directory_fd(run_dir, create=False) as (
+        run_descriptor,
+        bound_run,
+    ):
+        token = artifact_module._RUN_ARTIFACT_ANCHOR.set(
+            (bound_run, run_descriptor)
+        )
+        closure = artifact_module._ArtifactCommitClosure(run_dir)
+        try:
+            with pytest.raises(BatchRuntimeError) as exc_info:
+                closure.walk_and_hold(tree)
+            held_descriptors = [
+                held.descriptor for held in closure._held_directories.values()
+            ]
+        finally:
+            closure.close()
+            artifact_module._RUN_ARTIFACT_ANCHOR.reset(token)
+
+    assert exc_info.value.code == "resource_limit"
+    assert len(held_descriptors) == 4
+    for descriptor in held_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+def test_commit_closure_cached_read_reapplies_each_call_read_limit(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "reader-run"
+    run_dir.mkdir()
+    artifact = run_dir / "artifact.json"
+    artifact.write_bytes(b"0123456789")
+
+    with artifact_module.open_directory_fd(run_dir, create=False) as (
+        run_descriptor,
+        bound_run,
+    ):
+        token = artifact_module._RUN_ARTIFACT_ANCHOR.set(
+            (bound_run, run_descriptor)
+        )
+        closure = artifact_module._ArtifactCommitClosure(run_dir)
+        try:
+            assert closure.read_and_hold(
+                artifact,
+                code="artifact_invalid",
+                max_bytes=10,
+            ) == b"0123456789"
+            with pytest.raises(BatchRuntimeError) as exc_info:
+                closure.read_and_hold(
+                    artifact,
+                    code="artifact_invalid",
+                    max_bytes=9,
+                )
+        finally:
+            closure.close()
+            artifact_module._RUN_ARTIFACT_ANCHOR.reset(token)
+
+    assert exc_info.value.code == "artifact_invalid"
 
 
 def test_local_prepare_finish_commit_guard_rejects_evidence_change_before_event(
