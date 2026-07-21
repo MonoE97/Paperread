@@ -77,7 +77,19 @@ Each finding has `relation`, `target`, `text`, and zero to three `caveats`. It m
 - `questions` -> `main_risk_short_annotation`, `inferred_limits_item`, or `applicability_limits_item`
 - `conflicts` -> `main_risk_short_annotation` or `inferred_limits_item`
 
-At most two annotations may be appended to either existing table cell. Detailed findings go to existing list fields. A failed capture adds one deterministic link notice to `applicability_limits`. The resolver never changes `tldr`, `one_sentence_summary`, background/gap/contribution fields, method fields, figure fields, author-stated limitations, `evidence_summary`, or canonical locators. Secondary material is not PDF evidence and cannot be presented as a paper claim.
+At most two annotations may be appended to either existing table cell. Detailed findings go to existing list fields. The resolver obtains source metadata only from immutable evidence, Markdown-escapes it, and renders a used finding as:
+
+```markdown
+外部交叉核对（补充）：……（[来源标题](URL)）
+```
+
+An `unavailable` or `not_attempted` source adds this deterministic notice to `applicability_limits`:
+
+```markdown
+外部交叉核对未完整完成：以下链接无法读取，未纳入上述判断（[来源](URL)）。
+```
+
+The resolver does not modify the original Summary or `templates/zotero_note.md.j2`; it only builds the resolved render context consumed by existing fields. It never changes `tldr`, `one_sentence_summary`, background/gap/contribution fields, method fields, figure fields, author-stated limitations, `evidence_summary`, or canonical locators. Secondary material is not PDF evidence and cannot be presented as a paper claim.
 
 ## `review.json`
 

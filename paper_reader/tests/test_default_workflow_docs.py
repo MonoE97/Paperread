@@ -644,11 +644,12 @@ def test_strict_capture_docs_publish_raw_cdp_security_contract() -> None:
         for phrase in [
             "Node.js 22+",
             "direct raw CDP",
-            "isolated empty BrowserContext",
-            "`Browser.setDownloadBehavior(deny)`",
             "Chrome 144+",
             "approval dialog",
-            "strict mode does not use the legacy 3456 relay",
+            "ZOTERO_PAPER_READER_CDP_WS_ENDPOINT",
+            "ZOTERO_PAPER_READER_CDP_HTTP_BASE_URL",
+            "not_attempted",
+            "no-replace",
         ]:
             assert phrase in text
 
@@ -666,7 +667,7 @@ def test_strict_capture_docs_publish_raw_cdp_security_contract() -> None:
     ]:
         assert phrase in agents
 
-    for text in [skill, zotero, english, chinese, agents]:
+    for text in [skill, zotero, agents]:
         for phrase in [
             "`run_id`",
             "`item_key`",
@@ -680,6 +681,89 @@ def test_strict_capture_docs_publish_raw_cdp_security_contract() -> None:
 
     for text in [skill, zotero, english, chinese]:
         assert "`<URL>`" in text
+
+
+def test_secondary_capture_docs_publish_operational_plan_and_failure_rules() -> None:
+    agents_path = REPO_ROOT / "AGENTS.md"
+    if not agents_path.exists():
+        pytest.skip("root documentation is validated only in the source repository")
+
+    skill = read(SKILL)
+    zotero = read(ZOTERO_REFERENCE)
+    english = read(REPO_ROOT / "README.md")
+    chinese = read(REPO_ROOT / "README.zh-CN.md")
+    agents = read(agents_path)
+
+    for phrase in [
+        "eligible_source_count",
+        "source_limit",
+        "at most eight",
+        "no-replace",
+        "not_attempted",
+        "ZOTERO_PAPER_READER_CDP_WS_ENDPOINT",
+        "ZOTERO_PAPER_READER_CDP_HTTP_BASE_URL",
+        "60-second",
+        "200–100,000",
+        "1 MiB",
+        "500,000",
+    ]:
+        assert phrase in zotero
+
+    for phrase in [
+        "eligible_source_count",
+        "at most eight",
+        "no-replace",
+        "not_attempted",
+    ]:
+        assert phrase in skill
+
+    for phrase in [
+        "eligible_source_count",
+        "source_limit",
+        "最多 8",
+        "no-replace",
+        "not_attempted",
+        "ZOTERO_PAPER_READER_CDP_WS_ENDPOINT",
+        "ZOTERO_PAPER_READER_CDP_HTTP_BASE_URL",
+        "60 秒",
+        "200–100,000",
+        "1 MiB",
+        "500,000",
+    ]:
+        assert phrase in agents
+
+    for phrase in [
+        "eligible ids are not necessarily contiguous",
+        "at most eight eligible",
+        "fresh output path",
+        "does not start a browser",
+        "do not invent a replacement JSON",
+        "Non-HTTP(S) text is not planned",
+    ]:
+        assert phrase in english
+
+    for phrase in [
+        "eligible id 不一定连续",
+        "最多接纳 8 个 eligible",
+        "未占用的输出路径",
+        "脚本不会自行启动浏览器",
+        "不得伪造替代 JSON",
+        "非 HTTP(S) 文本不会进入 plan",
+    ]:
+        assert phrase in chinese
+
+
+def test_summary_reference_publishes_secondary_projection_without_template_change() -> None:
+    text = read(SUMMARY_REFERENCE)
+
+    for phrase in [
+        "外部交叉核对（补充）：……（[来源标题](URL)）",
+        "外部交叉核对未完整完成：以下链接无法读取，未纳入上述判断（[来源](URL)）。",
+        "does not modify the original Summary",
+        "`templates/zotero_note.md.j2`",
+        "existing fields",
+    ]:
+        assert phrase in text
 
 
 def test_root_readmes_state_the_actual_posix_runtime_support_boundary() -> None:
