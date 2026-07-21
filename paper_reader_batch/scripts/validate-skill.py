@@ -39,13 +39,39 @@ ACTIVE_SCHEMA_PATHS = {
     "references/schemas/paper_reader_batch.command-result.v2.schema.json",
 }
 RUNTIME_STATE_PARTS = {
+    ".git",
     ".mypy_cache",
     ".paper_reader_batch",
     ".pytest_cache",
     ".ruff_cache",
     ".venv",
     "__pycache__",
+    "build",
+    "dist",
+    "htmlcov",
     "runs",
+}
+RUNTIME_STATE_FILES = {".DS_Store", ".coverage"}
+SENSITIVE_RELEASE_FILE_NAMES = {"id_ed25519", "id_rsa"}
+SENSITIVE_RELEASE_FILE_SUFFIXES = {
+    ".db",
+    ".db-journal",
+    ".db-shm",
+    ".db-wal",
+    ".key",
+    ".log",
+    ".p12",
+    ".pem",
+    ".pfx",
+    ".pdf",
+    ".sqlite",
+    ".sqlite-journal",
+    ".sqlite-shm",
+    ".sqlite-wal",
+    ".sqlite3",
+    ".sqlite3-journal",
+    ".sqlite3-shm",
+    ".sqlite3-wal",
 }
 REQUIRED_PATHS = [
     "SKILL.md",
@@ -60,6 +86,7 @@ REQUIRED_PATHS = [
     "src/paper_reader_batch/v2_journal.py",
     "src/paper_reader_batch/v2_json.py",
     "src/paper_reader_batch/v2_manifest.py",
+    "src/paper_reader_batch/v2_next_actions.py",
     "src/paper_reader_batch/v2_receipts.py",
     "src/paper_reader_batch/v2_reducer.py",
     "src/paper_reader_batch/v2_run.py",
@@ -79,6 +106,7 @@ REQUIRED_PATHS = [
     "references/batch-workflow.md",
     "references/parallel-dispatch.md",
     "references/worker-result-contract.md",
+    "scripts/export-v2-schemas.py",
     "scripts/validate-skill.py",
 ]
 
@@ -108,6 +136,22 @@ def parse_frontmatter(skill_md: Path) -> dict[str, str]:
     return metadata
 
 
+def _is_runtime_state_entry_name(name: str) -> bool:
+    return name in RUNTIME_STATE_PARTS or name.endswith(".egg-info")
+
+
+def _is_sensitive_or_user_data_release_file(name: str) -> bool:
+    if name == ".env.example":
+        return False
+    lowered = name.lower()
+    return (
+        lowered == ".env"
+        or lowered.startswith(".env.")
+        or lowered in SENSITIVE_RELEASE_FILE_NAMES
+        or any(lowered.endswith(suffix) for suffix in SENSITIVE_RELEASE_FILE_SUFFIXES)
+    )
+
+
 def _read_toml(path: Path, label: str, errors: list[str]) -> dict | None:
     try:
         return tomllib.loads(path.read_text(encoding="utf-8"))
@@ -131,8 +175,8 @@ def _validate_release_metadata(
         else:
             if project.get("name") != "paper_reader_batch":
                 errors.append("pyproject project.name must be paper_reader_batch")
-            if project.get("version") != "2.1.0":
-                errors.append("pyproject project.version must be 2.1.0")
+            if project.get("version") != "2.2.0":
+                errors.append("pyproject project.version must be 2.2.0")
             scripts = project.get("scripts")
             if not isinstance(scripts, dict) or scripts.get("paper_reader_batch") != "paper_reader_batch.v2_cli:app":
                 errors.append(
@@ -153,8 +197,8 @@ def _validate_release_metadata(
             errors.append("uv.lock must contain exactly one paper-reader-batch package")
         else:
             package = matches[0]
-            if package.get("version") != "2.1.0":
-                errors.append("uv.lock paper-reader-batch package version must be 2.1.0")
+            if package.get("version") != "2.2.0":
+                errors.append("uv.lock paper-reader-batch package version must be 2.2.0")
             if package.get("source") != {"editable": "."}:
                 errors.append("uv.lock paper-reader-batch package must be the editable skill root")
 
@@ -235,7 +279,8 @@ def _validate_release_bundle_state(root: Path, errors: list[str]) -> None:
         followlinks=False,
     ):
         current_path = Path(current_root)
-        for dirname in sorted(tuple(dirnames)):
+        dirnames.sort()
+        for dirname in tuple(dirnames):
             path = current_path / dirname
             relative = path.relative_to(root).as_posix()
             try:
@@ -250,7 +295,7 @@ def _validate_release_bundle_state(root: Path, errors: list[str]) -> None:
             elif not stat.S_ISDIR(metadata.st_mode):
                 errors.append(f"special file is forbidden in a release bundle: {relative}")
                 dirnames.remove(dirname)
-            elif dirname in RUNTIME_STATE_PARTS:
+            elif _is_runtime_state_entry_name(dirname):
                 errors.append(f"runtime state is forbidden in a release bundle: {relative}")
                 dirnames.remove(dirname)
         for filename in sorted(filenames):
@@ -267,9 +312,15 @@ def _validate_release_bundle_state(root: Path, errors: list[str]) -> None:
             if not stat.S_ISREG(metadata.st_mode):
                 errors.append(f"special file is forbidden in a release bundle: {relative}")
                 continue
+            if _is_sensitive_or_user_data_release_file(filename):
+                errors.append(
+                    "sensitive or user-data file is forbidden in a release bundle: "
+                    f"{relative}"
+                )
+                continue
             if (
-                filename not in RUNTIME_STATE_PARTS
-                and filename != ".DS_Store"
+                not _is_runtime_state_entry_name(filename)
+                and filename not in RUNTIME_STATE_FILES
                 and not filename.endswith(".pyc")
             ):
                 continue
@@ -311,16 +362,16 @@ def validate_skill(skill_root: Path, *, release_bundle: bool = False) -> list[st
     init_py = root / "src/paper_reader_batch/__init__.py"
     if (
         "src/paper_reader_batch/__init__.py" in regular_required_paths
-        and '__version__ = "2.1.0"' not in init_py.read_text(encoding="utf-8")
+        and '__version__ = "2.2.0"' not in init_py.read_text(encoding="utf-8")
     ):
-        errors.append("paper_reader_batch package version must be 2.1.0")
+        errors.append("paper_reader_batch package version must be 2.2.0")
 
     _validate_release_metadata(root, errors, regular_required_paths)
     _validate_no_v1_runtime_modules(root, errors)
     _validate_active_schema_namespace(root, errors)
     for current_root, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
         dirnames[:] = sorted(
-            dirname for dirname in dirnames if dirname not in RUNTIME_STATE_PARTS
+            dirname for dirname in dirnames if not _is_runtime_state_entry_name(dirname)
         )
         current_path = Path(current_root)
         for filename in sorted(filenames):

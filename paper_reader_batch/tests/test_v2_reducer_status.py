@@ -297,6 +297,48 @@ def test_reducer_rejects_new_local_attempt_after_coordination_uncertain(tmp_path
     assert exc_info.value.code == "journal_corrupt"
 
 
+def test_reducer_rejects_worker_claim_over_coordination_uncertain_local_attempt(
+    tmp_path,
+) -> None:
+    run_dir = _run(tmp_path, concurrency=1, pdf_count=1)
+    view = load_run_view(run_dir)
+    initial = view.state.items[0]
+    uncertain = StateItem.model_validate(
+        initial.model_copy(
+            update={
+                "local_prepare_status": "blocked",
+                "local_prepare_attempt_count": 1,
+                "local_prepare_result_sha256": "1" * 64,
+                "local_prepare_last_actor_id": "preparer",
+                "local_prepare_last_claim_id": "88888888-8888-4888-8888-888888888888",
+                "local_prepare_last_attempt_id": "99999999-9999-4999-8999-999999999999",
+                "local_prepare_last_lease_token_sha256": "a" * 64,
+                "local_prepare_last_expires_at": "2026-07-10T00:15:00Z",
+                "local_prepare_failure_code": "coordination_uncertain",
+                "local_prepare_failure_message": "the original attempt may have executed",
+            }
+        ).model_dump(mode="json")
+    )
+    state = type(view.state).model_validate(
+        view.state.model_copy(update={"items": [uncertain]}).model_dump(mode="json")
+    )
+    event = _claim_event(
+        view,
+        _assignment(
+            view,
+            0,
+            issued_at="2026-07-10T00:00:01Z",
+            expires_at="2026-07-10T00:15:01Z",
+        ),
+        occurred_at="2026-07-10T00:00:01Z",
+    )
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        apply_event(state, view.manifest, event)
+
+    assert exc_info.value.code == "journal_corrupt"
+
+
 def test_reducer_rejects_blocked_uncertain_resume_with_stale_previous_expiry(tmp_path) -> None:
     run_dir = _run(tmp_path, concurrency=1, pdf_count=1)
     assignment = claim_local_prepare(

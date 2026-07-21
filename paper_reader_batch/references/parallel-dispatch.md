@@ -1,4 +1,4 @@
-# Parallel Dispatch — Paper Reader Batch 2.1 Runtime Contract
+# Parallel Dispatch — Paper Reader Batch 2.2 Runtime Contract
 
 paper_reader_batch uses two execution modes under the journal-and-lease contract. Every mutation requires `--request-id UUID`, holds `.run.lock`, validates the append-only hash-chain and manifest binding, and commits an event before replacing the reconstructable `state.json` snapshot.
 
@@ -19,7 +19,7 @@ For `input_type=pdf_path`, the worker must use `$paper_reader` local PDF workflo
 
 ## Zotero Worker Rule
 
-For `input_type=zotero_item` or `input_type=zotero_title`, the worker follows `$paper_reader`'s Zotero-only secondary-link workflow: inspect the immutable plan derived from Zotero `Extra`, perform only plan-bound read-only captures, pass the closed-world directory to `run prepare --secondary-capture-dir`, and assess every eligible source in `secondary_cross_checks`. The batch runtime does not fetch, parse, summarize, validate, or render web content. The worker may return an immutable `paper_reader.candidate.v2`; it must stop on duplicate normalized titles, bind a sealed review package whose resolved rendered note passed the Chinese-first gate, bind exact source/parent/title/content/tags/hashes, and must not create write authority by itself or call Zotero MCP `write_note`.
+For `input_type=zotero_item` or `input_type=zotero_title`, the worker delegates the current secondary-plan policy and finding-anchor assessment to `$paper_reader`'s Zotero-only secondary-link workflow: inspect the immutable plan derived from Zotero `Extra`, perform only plan-bound read-only captures, pass the closed-world directory to `run prepare --secondary-capture-dir`, and assess every eligible source in `secondary_cross_checks`. The batch runtime does not fetch, parse, summarize, validate, or render web content, and it does not repeat the single-paper anchor schema or validation algorithm. The worker may return an immutable `paper_reader.candidate.v2`; it must stop on duplicate normalized titles, bind a sealed review package whose resolved rendered note passed the Chinese-first gate, bind exact source/parent/title/content/tags/hashes, and must not create write authority by itself or call Zotero MCP `write_note`.
 
 ## Recoverable Serial Write Rule
 

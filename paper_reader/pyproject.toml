@@ -1,6 +1,6 @@
 [project]
 name = "paper_reader"
-version = "2.1.0"
+version = "2.2.0"
 description = "Paper reading workflow for Zotero titles and local PDF paths."
 requires-python = ">=3.13"
 dependencies = [

@@ -637,6 +637,39 @@ def test_http_client_rejects_write_tool_before_network() -> None:
     assert exc_info.value.code == "forbidden_mcp_tool"
 
 
+def test_http_client_initialize_sends_released_client_version(monkeypatch) -> None:
+    from paper_reader.zotero_discovery import McpHttpClient
+
+    payloads: list[dict[str, object]] = []
+    client = McpHttpClient("http://127.0.0.1:23120/mcp")
+
+    def capture_post(payload: dict[str, object]):
+        payloads.append(payload)
+        if payload.get("method") == "initialize":
+            return {}, {"Mcp-Session-Id": "session-1"}
+        return {}, {}
+
+    monkeypatch.setattr(client, "_post", capture_post)
+    client.initialize()
+
+    assert payloads == [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "paper-reader-discovery",
+                    "version": "2.2",
+                },
+            },
+        },
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+    ]
+
+
 def test_decode_mcp_response_parses_multiline_sse_and_selects_matching_id() -> None:
     from paper_reader.zotero_discovery import _decode_mcp_response
 

@@ -11,8 +11,10 @@ from pydantic import (
     JsonValue,
     StringConstraints,
     ValidationError,
+    field_validator,
     model_validator,
 )
+from pydantic.json_schema import SkipJsonSchema
 
 from paper_reader.storage import safe_relative_artifact_path
 
@@ -211,6 +213,22 @@ class InferredLimitation(StrictContractModel):
     locator: str
 
 
+class SecondaryTextAnchor(StrictContractModel):
+    capture_sha256: Sha256
+    start_codepoint: NonNegativeInt
+    end_codepoint: PositiveInt
+    excerpt_sha256: Sha256
+
+    @model_validator(mode="after")
+    def validate_span(self) -> Self:
+        span_length = self.end_codepoint - self.start_codepoint
+        if not 20 <= span_length <= 2_000:
+            raise ValueError(
+                "secondary text anchor span must contain 20 to 2,000 code points"
+            )
+        return self
+
+
 class SecondaryCrossCheckFinding(StrictContractModel):
     relation: Literal["supports", "extends", "questions", "conflicts"]
     target: Literal[
@@ -222,6 +240,17 @@ class SecondaryCrossCheckFinding(StrictContractModel):
     ]
     text: SecondaryCrossCheckText
     caveats: tuple[SecondaryCrossCheckText, ...] = ()
+    anchor: SecondaryTextAnchor | SkipJsonSchema[None] = Field(
+        default_factory=lambda: None,
+        exclude_if=lambda value: value is None,
+    )
+
+    @field_validator("anchor", mode="before")
+    @classmethod
+    def reject_explicit_null_anchor(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("secondary cross-check anchor must be omitted instead of null")
+        return value
 
     @model_validator(mode="after")
     def validate_caveats(self) -> Self:
@@ -502,6 +531,7 @@ V2_SUPPORT_MODELS = (
     EvidenceClaim,
     AuthorStatedLimitation,
     InferredLimitation,
+    SecondaryTextAnchor,
     SecondaryCrossCheckFinding,
     SecondaryCrossCheck,
     ReviewIssue,
@@ -532,6 +562,7 @@ __all__ = [
     "PaperReaderSummary",
     "SecondaryCrossCheck",
     "SecondaryCrossCheckFinding",
+    "SecondaryTextAnchor",
     "PaperReaderVerification",
     "PaperReaderWriteAuthorization",
     "PortableIdentifier",

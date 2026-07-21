@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from paper_reader.candidate_integrity import LocalPublicationError, verify_artifact_ref
 from paper_reader.contracts import (
@@ -85,6 +85,10 @@ class SecondaryPlan(StrictSecondaryModel):
     item_key: Identifier
     source_snapshot_sha256: Sha256
     usage_boundary: Literal["cross-check only; must not be cited in evidence_summary"]
+    finding_anchor_policy: Literal["codepoint_sha256_v1"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     eligible_source_count: int
     sources: tuple[SecondaryPlanSource, ...]
     warnings: tuple[str, ...]
@@ -406,6 +410,7 @@ def load_bound_secondary_plan(loaded: LoadedRun) -> BoundSecondaryPlan | None:
         expected_plan = build_secondary_source_plan(
             source_payload["selected_item"],
             source_snapshot_sha256=source.normalized_source.sha256,
+            finding_anchor_policy=plan.finding_anchor_policy,
         )
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         raise SecondaryEvidenceError(

@@ -80,6 +80,7 @@ def test_skill_bundle_contains_required_runtime_assets() -> None:
         RAW_CDP_SCRIPT,
         STRICT_EGRESS_PROXY_SCRIPT,
         DISCOVERY_SCRIPT,
+        SKILL_ROOT / "scripts" / "export-v2-schemas.py",
         SUMMARY_LINT_SCRIPT,
         VALIDATE_SCRIPT,
         SKILL_ROOT / "tests" / "fixtures" / "minimal.pdf",
@@ -118,7 +119,7 @@ def test_skill_body_routes_from_skill_root_and_preserves_boundaries() -> None:
     _metadata, body = parse_frontmatter(SKILL)
 
     for phrase in [
-        "Paper Reader 2.1 runtime contract",
+        "Paper Reader 2.2 runtime contract",
         "grouped CLI",
         "paper_reader.run.v2",
         "paper_reader.summary.v2",
@@ -184,7 +185,7 @@ def test_openai_agent_metadata_matches_skill() -> None:
         "short_description:",
         "default_prompt:",
         "allow_implicit_invocation: true",
-        "Paper Reader 2.1",
+        "Paper Reader 2.2",
         "grouped CLI",
         "released",
         "historical-only",
@@ -202,7 +203,7 @@ def test_project_metadata_is_skill_root_relative() -> None:
     project = pyproject["project"]
 
     assert project["name"] == "paper_reader"
-    assert project["version"] == "2.1.0"
+    assert project["version"] == "2.2.0"
     assert "readme" not in project
     assert project["scripts"] == {"paper_reader": "paper_reader.public_cli:app"}
     assert pyproject["tool"]["pytest"]["ini_options"]["testpaths"] == ["tests"]
@@ -225,7 +226,7 @@ def test_references_use_skill_root_paths_and_workflow_terms() -> None:
 
     for text in [zotero, pdf, summary]:
         for phrase in [
-            "Paper Reader 2.1 Runtime Contract",
+            "Paper Reader 2.2 Runtime Contract",
             "historical-only",
             "unsupported_run_schema",
         ]:
@@ -471,9 +472,9 @@ def test_root_agents_defines_breaking_v2_public_contract() -> None:
     assert "2.0 安装文档" not in text
 
     for phrase in [
-        "Paper Reader 2.1",
+        "Paper Reader 2.2",
         "released runtime contract",
-        "2.1.0",
+        "2.2.0",
         "grouped CLI",
         "paper_reader.run.v2",
         "paper_reader.summary.v2",
@@ -544,8 +545,8 @@ def test_root_readmes_publish_v2_clean_install_contract() -> None:
     for path in [REPO_ROOT / "README.md", REPO_ROOT / "README.zh-CN.md"]:
         text = read(path)
         for phrase in [
-            "Paper Reader 2.1",
-            "2.1.0",
+            "Paper Reader 2.2",
+            "2.2.0",
             "clean install",
             "uv sync --locked",
             "uv run paper_reader --version",
@@ -766,6 +767,35 @@ def test_summary_reference_publishes_secondary_projection_without_template_chang
         assert phrase in text
 
 
+def test_secondary_finding_anchor_policy_is_agent_executable() -> None:
+    skill = read(SKILL)
+    zotero = read(ZOTERO_REFERENCE)
+    summary = read(SUMMARY_REFERENCE)
+
+    for text in [skill, zotero, summary]:
+        for phrase in [
+            "`codepoint_sha256_v1`",
+            "exactly one `anchor`",
+            "`start_codepoint`",
+            "`end_codepoint`",
+            "`capture_sha256`",
+            "`excerpt_sha256`",
+        ]:
+            assert phrase in text
+
+    for text in [zotero, summary]:
+        for phrase in [
+            "20–2,000 Python code points",
+            "`[start_codepoint, end_codepoint)`",
+            "immutable evidence raw capture member",
+            "exact UTF-8 bytes",
+            "must not normalize Unicode, newlines, or whitespace",
+            "split it into multiple findings",
+            "anchor metadata is validation-only and is never rendered",
+        ]:
+            assert phrase in text
+
+
 def test_root_readmes_state_the_actual_posix_runtime_support_boundary() -> None:
     if not (REPO_ROOT / "README.md").exists():
         pytest.skip("root documentation is validated only in the source repository")
@@ -799,8 +829,8 @@ def test_single_validator_tracks_v2_runtime_and_schemas() -> None:
         "references/schemas/paper_reader.run.v2.schema.json",
         "references/schemas/paper_reader.command-result.v2.schema.json",
         "paper_reader.public_cli:app",
-        "pyproject project.version must be 2.1.0",
-        "uv.lock paper-reader package version must be 2.1.0",
+        "pyproject project.version must be 2.2.0",
+        "uv.lock paper-reader package version must be 2.2.0",
     ]:
         assert phrase in validator
 

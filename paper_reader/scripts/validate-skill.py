@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import os
 import stat
 import sys
@@ -53,12 +54,52 @@ ACTIVE_SCHEMA_PATHS = {
     "references/schemas/paper_reader.command-result.v2.schema.json",
 }
 RUNTIME_STATE_PARTS = {
+    ".coverage",
+    ".git",
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
     ".venv",
+    ".zotero-authorization-reservation-index",
+    ".zotero-authorization-reservations",
+    ".zotero-parent-locks",
     "__pycache__",
+    "build",
+    "dist",
+    "htmlcov",
     "runs",
+}
+RUNTIME_STATE_SUFFIXES = (".egg-info",)
+PRIVATE_OR_GENERATED_FILE_SUFFIXES = (
+    ".extract.json",
+    ".key",
+    ".log",
+    ".p12",
+    ".pdf.txt",
+    ".pem",
+    ".pfx",
+    ".summary.json",
+)
+PRIVATE_DATABASE_FILE_SUFFIXES = (
+    ".db",
+    ".db-journal",
+    ".db-shm",
+    ".db-wal",
+    ".sqlite",
+    ".sqlite-journal",
+    ".sqlite-shm",
+    ".sqlite-wal",
+    ".sqlite3",
+    ".sqlite3-journal",
+    ".sqlite3-shm",
+    ".sqlite3-wal",
+)
+PRIVATE_KEY_FILENAMES = {"id_ed25519", "id_rsa"}
+APPROVED_RELEASE_PDF_FIXTURES = {
+    "tests/fixtures/minimal.pdf": (
+        896,
+        "cb53f8318a6e6500d3789594b4214871aa20b320128ee696cf2ebcd933d71be1",
+    ),
 }
 REQUIRED_PYDANTIC_DEPENDENCY = "pydantic>=2.12,<3"
 REQUIRED_PYDANTIC_SPECIFIER = ">=2.12,<3"
@@ -131,6 +172,7 @@ REQUIRED_PATHS = [
     "references/schemas/paper_reader.command-result.v2.schema.json",
     "scripts/capture-secondary-url.mjs",
     "scripts/discover-zotero-item.py",
+    "scripts/export-v2-schemas.py",
     "scripts/lib/raw-cdp-capture.mjs",
     "scripts/lib/secondary-network-policy.mjs",
     "scripts/lib/strict-egress-proxy.mjs",
@@ -165,6 +207,42 @@ def parse_frontmatter(skill_md: Path) -> dict[str, str]:
     return metadata
 
 
+def _is_runtime_state_part(name: str) -> bool:
+    return name in RUNTIME_STATE_PARTS or name.endswith(RUNTIME_STATE_SUFFIXES)
+
+
+def _is_versioned_output_name(name: str, *, marker: str, suffix: str) -> bool:
+    lowered = name.casefold()
+    if lowered.endswith(f"{marker}{suffix}"):
+        return len(lowered) > len(marker) + len(suffix)
+    prefix, separator, version = lowered.rpartition(f"{marker}_v")
+    if not separator or not prefix or not version.endswith(suffix):
+        return False
+    digits = version[: -len(suffix)] if suffix else version
+    return bool(digits) and digits.isascii() and digits.isdigit()
+
+
+def _is_private_or_generated_directory(name: str) -> bool:
+    return _is_versioned_output_name(name, marker="_analysis", suffix="")
+
+
+def _is_private_or_generated_file(relative: Path) -> bool:
+    name = relative.name.casefold()
+    if name == ".env" or name.startswith(".env."):
+        return True
+    if name in PRIVATE_KEY_FILENAMES:
+        return True
+    if name.endswith(PRIVATE_OR_GENERATED_FILE_SUFFIXES):
+        return True
+    if name.endswith(PRIVATE_DATABASE_FILE_SUFFIXES):
+        return True
+    if _is_versioned_output_name(name, marker="_note", suffix=".md"):
+        return True
+    if name.endswith(".pdf"):
+        return relative.as_posix() not in APPROVED_RELEASE_PDF_FIXTURES
+    return False
+
+
 def _read_toml(path: Path, label: str, errors: list[str]) -> dict | None:
     try:
         return tomllib.loads(path.read_text(encoding="utf-8"))
@@ -188,8 +266,8 @@ def _validate_release_metadata(
         else:
             if project.get("name") != "paper_reader":
                 errors.append("pyproject project.name must be paper_reader")
-            if project.get("version") != "2.1.0":
-                errors.append("pyproject project.version must be 2.1.0")
+            if project.get("version") != "2.2.0":
+                errors.append("pyproject project.version must be 2.2.0")
             dependencies = project.get("dependencies")
             pydantic_dependencies = (
                 [
@@ -223,8 +301,8 @@ def _validate_release_metadata(
             errors.append("uv.lock must contain exactly one paper-reader package")
         else:
             package = matches[0]
-            if package.get("version") != "2.1.0":
-                errors.append("uv.lock paper-reader package version must be 2.1.0")
+            if package.get("version") != "2.2.0":
+                errors.append("uv.lock paper-reader package version must be 2.2.0")
             if package.get("source") != {"editable": "."}:
                 errors.append("uv.lock paper-reader package must be the editable skill root")
             metadata = package.get("metadata")
@@ -363,8 +441,14 @@ def _validate_release_bundle_state(root: Path, errors: list[str]) -> None:
             elif not stat.S_ISDIR(metadata.st_mode):
                 errors.append(f"special file is forbidden in a release bundle: {relative}")
                 dirnames.remove(dirname)
-            elif dirname in RUNTIME_STATE_PARTS:
+            elif _is_runtime_state_part(dirname):
                 errors.append(f"runtime state is forbidden in a release bundle: {relative}")
+                dirnames.remove(dirname)
+            elif _is_private_or_generated_directory(dirname):
+                errors.append(
+                    "private or generated artifact is forbidden in a release bundle: "
+                    f"{relative}"
+                )
                 dirnames.remove(dirname)
         for filename in sorted(filenames):
             path = current_path / filename
@@ -380,8 +464,38 @@ def _validate_release_bundle_state(root: Path, errors: list[str]) -> None:
             if not stat.S_ISREG(metadata.st_mode):
                 errors.append(f"special file is forbidden in a release bundle: {relative}")
                 continue
+            if _is_private_or_generated_file(Path(relative)):
+                errors.append(
+                    "private or generated artifact is forbidden in a release bundle: "
+                    f"{relative}"
+                )
+                continue
+            if approved_fixture := APPROVED_RELEASE_PDF_FIXTURES.get(relative):
+                expected_size, expected_sha256 = approved_fixture
+                if metadata.st_size != expected_size:
+                    errors.append(
+                        "release fixture content does not match approved artifact: "
+                        f"{relative}"
+                    )
+                    continue
+                try:
+                    content = path.read_bytes()
+                except OSError as exc:
+                    errors.append(
+                        f"cannot inspect release bundle entry: {relative}: {exc}"
+                    )
+                    continue
+                if (
+                    len(content) != expected_size
+                    or hashlib.sha256(content).hexdigest() != expected_sha256
+                ):
+                    errors.append(
+                        "release fixture content does not match approved artifact: "
+                        f"{relative}"
+                    )
+                    continue
             if (
-                filename not in RUNTIME_STATE_PARTS
+                not _is_runtime_state_part(filename)
                 and filename != ".DS_Store"
                 and not filename.endswith(".pyc")
             ):
@@ -424,9 +538,9 @@ def validate_skill(skill_root: Path, *, release_bundle: bool = False) -> list[st
     init_py = root / "src/paper_reader/__init__.py"
     if (
         "src/paper_reader/__init__.py" in regular_required_paths
-        and '__version__ = "2.1.0"' not in init_py.read_text(encoding="utf-8")
+        and '__version__ = "2.2.0"' not in init_py.read_text(encoding="utf-8")
     ):
-        errors.append("paper_reader package version must be 2.1.0")
+        errors.append("paper_reader package version must be 2.2.0")
 
     _validate_release_metadata(root, errors, regular_required_paths)
     _validate_no_v1_runtime_modules(root, errors)
@@ -434,7 +548,7 @@ def validate_skill(skill_root: Path, *, release_bundle: bool = False) -> list[st
     _validate_no_v1_runtime_callables(root, errors, regular_required_paths)
     for current_root, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
         dirnames[:] = sorted(
-            dirname for dirname in dirnames if dirname not in RUNTIME_STATE_PARTS
+            dirname for dirname in dirnames if not _is_runtime_state_part(dirname)
         )
         current_path = Path(current_root)
         for filename in sorted(filenames):

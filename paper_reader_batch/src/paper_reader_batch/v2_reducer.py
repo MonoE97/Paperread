@@ -176,7 +176,15 @@ def _apply_claim(state: BatchState, manifest: BatchManifest, event: BatchEvent, 
             expires_at=assignment.expires_at,
         )
         if assignment.lane == "worker":
-            if data.kind != "worker.claimed" or item.worker_status != "queued":
+            unsafe_cross_lane_attempt = (
+                item.local_prepare_status == "blocked"
+                and item.local_prepare_failure_code == "coordination_uncertain"
+            )
+            if (
+                data.kind != "worker.claimed"
+                or item.worker_status != "queued"
+                or unsafe_cross_lane_attempt
+            ):
                 raise _corrupt(f"illegal worker claim transition: {assignment.item_id}")
             if assignment.attempt_number != item.worker_attempt_count + 1:
                 raise _corrupt(f"worker attempt number is not monotonic: {assignment.item_id}")

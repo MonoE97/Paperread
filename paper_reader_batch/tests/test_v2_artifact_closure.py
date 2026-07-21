@@ -809,7 +809,7 @@ def _fake_paper_reader_root(tmp_path: Path) -> Path:
     (root / "references" / "schemas").mkdir(parents=True)
     (root / "SKILL.md").write_text("# paper_reader V2\n", encoding="utf-8")
     (root / "pyproject.toml").write_text(
-        '[project]\nname="paper_reader"\nversion="2.1.0"\n[project.scripts]\n'
+        '[project]\nname="paper_reader"\nversion="2.2.0"\n[project.scripts]\n'
         'paper_reader="paper_reader.public_cli:app"\n',
         encoding="utf-8",
     )

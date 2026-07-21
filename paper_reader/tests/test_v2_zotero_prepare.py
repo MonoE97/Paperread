@@ -231,6 +231,59 @@ def test_prepare_zotero_reuses_evidence_pipeline_with_normalized_metadata(
     assert any(item["role"] == "evidence_manifest" for item in run["artifacts"])
 
 
+def test_prepare_preserves_explicit_new_and_legacy_anchor_policy_bytes(
+    tmp_path: Path,
+) -> None:
+    current_root = tmp_path / "current"
+    current_root.mkdir()
+    current_run, _ = _zotero_run(current_root)
+    current_plan_path = current_run / "source" / "secondary-plan.json"
+    current_before = current_plan_path.read_bytes()
+    current_plan = json.loads(current_before)
+    assert current_plan["finding_anchor_policy"] == "codepoint_sha256_v1"
+
+    current_result = _invoke(
+        ["run", "prepare", str(current_run), "--figure-limit", "0"]
+    )
+
+    assert current_result.exit_code == 0, current_result.stderr
+    assert current_plan_path.read_bytes() == current_before
+
+    legacy_root = tmp_path / "legacy"
+    legacy_root.mkdir()
+    legacy_run, _ = _zotero_run(legacy_root)
+    legacy_plan_path = legacy_run / "source" / "secondary-plan.json"
+    legacy_plan = json.loads(legacy_plan_path.read_bytes())
+    legacy_plan.pop("finding_anchor_policy")
+    _rewrite_secondary_plan(legacy_run, legacy_plan)
+    legacy_before = legacy_plan_path.read_bytes()
+
+    legacy_result = _invoke(
+        ["run", "prepare", str(legacy_run), "--figure-limit", "0"]
+    )
+
+    assert legacy_result.exit_code == 0, legacy_result.stderr
+    assert legacy_plan_path.read_bytes() == legacy_before
+
+
+def test_prepare_rejects_unknown_anchor_policy_before_evidence_allocation(
+    tmp_path: Path,
+) -> None:
+    run_dir, _ = _zotero_run(tmp_path)
+    plan_path = run_dir / "source" / "secondary-plan.json"
+    plan = json.loads(plan_path.read_bytes())
+    plan["finding_anchor_policy"] = "unknown"
+    _rewrite_secondary_plan(run_dir, plan)
+    run_before = (run_dir / "run.json").read_bytes()
+
+    result = _invoke(["run", "prepare", str(run_dir), "--figure-limit", "0"])
+
+    assert result.exit_code == 1
+    assert _result_payload(result)["code"] == "secondary_plan_invalid"
+    assert (run_dir / "run.json").read_bytes() == run_before
+    assert not (run_dir / "evidence").exists()
+
+
 def test_prepare_zotero_ingests_plan_bound_capture_into_immutable_evidence(
     tmp_path: Path,
 ) -> None:

@@ -249,7 +249,7 @@ class McpHttpClient:
                 "params": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "paper-reader-discovery", "version": "2.1"},
+                    "clientInfo": {"name": "paper-reader-discovery", "version": "2.2"},
                 },
             }
         )

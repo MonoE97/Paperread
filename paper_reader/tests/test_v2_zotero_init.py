@@ -162,8 +162,10 @@ def test_init_zotero_preserves_raw_bytes_and_binds_normalized_source_and_pdf(
     assert initialized.run_dir.name == "a-useful-paper-result"
     raw_snapshot = initialized.run_dir / "source" / "discovery.raw.json"
     normalized_snapshot = initialized.run_dir / "source" / "source.json"
+    secondary_plan = initialized.run_dir / "source" / "secondary-plan.json"
     assert raw_snapshot.read_bytes() == raw_bytes
     normalized = json.loads(normalized_snapshot.read_text(encoding="utf-8"))
+    plan = json.loads(secondary_plan.read_text(encoding="utf-8"))
     run = json.loads((initialized.run_dir / "run.json").read_text(encoding="utf-8"))
     source = run["source"]
     assert source["item_key"] == "PARENT1"
@@ -183,6 +185,8 @@ def test_init_zotero_preserves_raw_bytes_and_binds_normalized_source_and_pdf(
     assert normalized["selected_item"]["key"] == "PARENT1"
     assert normalized["selected_item"]["title"] == "A Useful Paper & Result"
     assert normalized["selected_attachment"]["key"] == "ATTACH1"
+    assert plan["finding_anchor_policy"] == "codepoint_sha256_v1"
+    assert plan["eligible_source_count"] == 0
     assert run["artifacts"] == [
         source["raw_discovery_bundle"],
         source["normalized_source"],
@@ -291,6 +295,7 @@ def test_init_zotero_builds_bound_secondary_plan_from_authoritative_parent_extra
         "raw_parent_snapshots"
     ]["PARENT1"]["data"]["extra"]
     assert plan["format"] == "paper_reader.secondary-plan.v2-internal"
+    assert plan["finding_anchor_policy"] == "codepoint_sha256_v1"
     assert plan["item_key"] == "PARENT1"
     assert plan["source_snapshot_sha256"] == run["source"]["normalized_source"]["sha256"]
     assert plan["eligible_source_count"] == 2
@@ -906,6 +911,43 @@ def test_init_zotero_run_size_gate_and_atomic_fault_leave_no_partial_run(
     assert fault_error.value.code == "initialization_failed"
     assert not any(path.is_file() for path in fault_root.rglob("*"))
     assert not any(path.name.endswith(".staging") for path in fault_root.rglob("*"))
+
+
+def test_init_zotero_rejects_secondary_plan_over_consumer_limit_before_allocation(
+    tmp_path: Path,
+) -> None:
+    from paper_reader.secondary_sources import SECONDARY_PLAN_MAX_BYTES
+
+    pdf_path = tmp_path / "paper.pdf"
+    shutil.copyfile(FIXTURE_PDF, pdf_path)
+    bundle = _bundle(pdf_path)
+    selected = bundle["selected_item"]
+    assert isinstance(selected, dict)
+    selected["extra"] = "https://example.org/context"
+    paper_reader_metadata = selected["_paper_reader"]
+    assert isinstance(paper_reader_metadata, dict)
+    paper_reader_metadata["warnings"] = ["x" * SECONDARY_PLAN_MAX_BYTES]
+    discovery = paper_reader_metadata["discovery"]
+    assert isinstance(discovery, dict)
+    snapshots = discovery["raw_parent_snapshots"]
+    assert isinstance(snapshots, dict)
+    parent = snapshots["PARENT1"]
+    assert isinstance(parent, dict)
+    parent_data = parent["data"]
+    assert isinstance(parent_data, dict)
+    parent_data["extra"] = selected["extra"]
+
+    bundle_path = tmp_path / "discovery.json"
+    bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+    skill_root = tmp_path / "installed-skill"
+    skill_root.mkdir()
+
+    with pytest.raises(ZoteroLifecycleError) as error:
+        _initialize(bundle_path, "PARENT1", skill_root)
+
+    assert error.value.code == "invalid_discovery_bundle"
+    assert "secondary source warning exceeds" in str(error.value)
+    assert not (skill_root / "runs").exists()
 
 
 @pytest.mark.parametrize("alias_kind", ["symlink", "hardlink"])

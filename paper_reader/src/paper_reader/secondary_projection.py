@@ -88,6 +88,7 @@ class SecondarySourceView:
     planned: SecondaryPlanSource
     capture_status: str
     capture: SecondaryCapture | None
+    capture_sha256: Sha256 | None
 
 
 class SecondaryProjectionError(ValueError):
@@ -110,7 +111,11 @@ def _one_artifact(evidence: BoundEvidence, role: str) -> VerifiedEvidenceArtifac
 
 def _load_secondary_views(
     evidence: BoundEvidence,
-) -> tuple[tuple[SecondarySourceView, ...] | None, bool]:
+) -> tuple[
+    tuple[SecondarySourceView, ...] | None,
+    bool,
+    Literal["codepoint_sha256_v1"] | None,
+]:
     inventory_artifact = _one_artifact(evidence, "secondary_sources")
     if inventory_artifact is None:  # pragma: no cover - evidence loader requires it
         raise SecondaryProjectionError(
@@ -130,7 +135,7 @@ def _load_secondary_views(
             "secondary source inventory must be an object",
         )
     if raw_inventory.get("format") != INVENTORY_FORMAT:
-        return None, False
+        return None, False, None
 
     plan_artifact = _one_artifact(evidence, "secondary_plan")
     if plan_artifact is None:
@@ -298,6 +303,7 @@ def _load_secondary_views(
                 planned=planned,
                 capture_status=item.capture_status,
                 capture=capture,
+                capture_sha256=item.capture_sha256,
             )
         )
     if (
@@ -308,7 +314,7 @@ def _load_secondary_views(
             "secondary_evidence_invalid",
             "secondary capture inventory is not closed-world consistent",
         )
-    return tuple(views), True
+    return tuple(views), True, plan.finding_anchor_policy
 
 
 def _require_chinese(value: str, *, field: str) -> None:
@@ -349,6 +355,7 @@ def _validate_assessments(
     views: tuple[SecondarySourceView, ...] | None,
     *,
     rich_inventory: bool,
+    finding_anchor_policy: Literal["codepoint_sha256_v1"] | None,
 ) -> tuple[SecondarySourceView, ...]:
     assessments = summary.secondary_cross_checks
     if not rich_inventory or views is None:
@@ -396,6 +403,42 @@ def _validate_assessments(
                 f"unavailable assessment conflicts with captured evidence: {assessment.source_id}",
             )
         for finding in assessment.findings:
+            if finding_anchor_policy is None:
+                if finding.anchor is not None:
+                    raise SecondaryProjectionError(
+                        "secondary_finding_anchor_not_allowed",
+                        "legacy secondary source plans do not accept finding anchors",
+                    )
+            elif finding.anchor is None:
+                raise SecondaryProjectionError(
+                    "secondary_finding_anchor_missing",
+                    "codepoint_sha256_v1 requires every used finding to bind an anchor",
+                )
+            else:
+                anchor = finding.anchor
+                capture = view.capture
+                if (
+                    capture is None
+                    or view.capture_status != "captured"
+                    or view.capture_sha256 is None
+                    or anchor.capture_sha256 != view.capture_sha256
+                    or anchor.end_codepoint > len(capture.text)
+                ):
+                    raise SecondaryProjectionError(
+                        "secondary_finding_anchor_invalid",
+                        f"finding anchor is not bound to captured evidence: {assessment.source_id}",
+                    )
+                excerpt = capture.text[
+                    anchor.start_codepoint : anchor.end_codepoint
+                ]
+                if (
+                    hashlib.sha256(excerpt.encode("utf-8")).hexdigest()
+                    != anchor.excerpt_sha256
+                ):
+                    raise SecondaryProjectionError(
+                        "secondary_finding_anchor_invalid",
+                        f"finding anchor excerpt hash is invalid: {assessment.source_id}",
+                    )
             if finding.target not in RELATION_TARGETS[finding.relation]:
                 raise SecondaryProjectionError(
                     "secondary_cross_check_target_invalid",
@@ -486,11 +529,12 @@ def resolve_secondary_render_summary(
     summary: PaperReaderSummary,
     evidence: BoundEvidence,
 ) -> dict[str, object]:
-    views, rich_inventory = _load_secondary_views(evidence)
+    views, rich_inventory, finding_anchor_policy = _load_secondary_views(evidence)
     eligible = _validate_assessments(
         summary,
         views,
         rich_inventory=rich_inventory,
+        finding_anchor_policy=finding_anchor_policy,
     )
     if rich_inventory and views is not None:
         _reject_unstructured_plan_urls(

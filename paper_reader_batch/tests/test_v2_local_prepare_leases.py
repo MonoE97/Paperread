@@ -17,6 +17,7 @@ from paper_reader_batch.v2_local_prepare import (
     run_local_prepare,
 )
 from paper_reader_batch.v2_manifest import create_pdf_paths_manifest
+from paper_reader_batch.v2_next_actions import derive_next_actions
 from paper_reader_batch.v2_run import initialize_run, recover_run
 from paper_reader_batch.v2_worker import claim_worker, release_worker
 
@@ -56,7 +57,7 @@ def _fake_paper_reader_root(tmp_path: Path) -> Path:
     (root / "references" / "schemas").mkdir(parents=True)
     (root / "SKILL.md").write_text("# paper_reader V2\n", encoding="utf-8")
     (root / "pyproject.toml").write_text(
-        '[project]\nname="paper_reader"\nversion="2.1.0"\n[project.scripts]\n'
+        '[project]\nname="paper_reader"\nversion="2.2.0"\n[project.scripts]\n'
         'paper_reader="paper_reader.public_cli:app"\n',
         encoding="utf-8",
     )
@@ -397,6 +398,91 @@ def test_coordination_uncertain_local_prepare_cannot_be_reclaimed_as_attempt_two
     item = load_run_view(run_dir).state.items[0]
     assert item.local_prepare_last_attempt_id == assignment["attempt_id"]
     assert item.local_prepare_attempt_count == 1
+
+
+def test_coordination_uncertain_local_prepare_cannot_be_bypassed_by_worker_claim(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path)
+    root = _fake_paper_reader_root(tmp_path)
+    assignment = claim_local_prepare(
+        run_dir,
+        worker_id="preparer",
+        request_id="33333333-3333-4333-8333-333333333333",
+        now="2026-07-10T00:00:01Z",
+    ).result["assignments"][0]
+    uncertain = run_local_prepare(
+        run_dir,
+        assignment["item_id"],
+        worker_id=assignment["worker_id"],
+        claim_id=assignment["claim_id"],
+        lease_token=assignment["lease_token"],
+        attempt_id=assignment["attempt_id"],
+        paper_reader_root=root,
+        request_id="44444444-4444-4444-8444-444444444444",
+        now="2026-07-10T00:00:02Z",
+        runner=_durably_uncertain_runner,
+    )
+    assert uncertain.result["status"] == "blocked"
+    before = (run_dir / "state.json").read_bytes()
+
+    with pytest.raises(BatchRuntimeError) as exc_info:
+        claim_worker(
+            run_dir,
+            worker_id="reader-attempt-2",
+            request_id="55555555-5555-4555-8555-555555555555",
+            now="2026-07-10T00:00:03Z",
+        )
+
+    assert exc_info.value.code == "no_available_work"
+    assert (run_dir / "state.json").read_bytes() == before
+    item = load_run_view(run_dir).state.items[0]
+    assert item.worker_status == "queued"
+    assert item.worker_attempt_count == 0
+    assert item.local_prepare_last_attempt_id == assignment["attempt_id"]
+    assert item.local_prepare_attempt_count == 1
+
+
+def test_worker_next_action_skips_uncertain_pdf_and_matches_next_safe_claim(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path, pdf_count=2)
+    root = _fake_paper_reader_root(tmp_path)
+    assignment = claim_local_prepare(
+        run_dir,
+        worker_id="preparer",
+        request_id="33333333-3333-4333-8333-333333333333",
+        now="2026-07-10T00:00:01Z",
+    ).result["assignments"][0]
+    uncertain = run_local_prepare(
+        run_dir,
+        assignment["item_id"],
+        worker_id=assignment["worker_id"],
+        claim_id=assignment["claim_id"],
+        lease_token=assignment["lease_token"],
+        attempt_id=assignment["attempt_id"],
+        paper_reader_root=root,
+        request_id="44444444-4444-4444-8444-444444444444",
+        now="2026-07-10T00:00:02Z",
+        runner=_durably_uncertain_runner,
+    )
+    assert uncertain.result["status"] == "blocked"
+
+    advertised = [
+        action["item_id"]
+        for action in derive_next_actions(load_run_view(run_dir))
+        if action["action"] == "worker.claim"
+    ]
+
+    assert advertised == ["002"]
+    claimed = claim_worker(
+        run_dir,
+        worker_id="reader",
+        request_id="55555555-5555-4555-8555-555555555555",
+        limit=1,
+        now="2026-07-10T00:00:03Z",
+    )
+    assert [item["item_id"] for item in claimed.result["assignments"]] == advertised
 
 
 def test_run_recover_resumes_same_coordination_uncertain_attempt_after_last_expiry(

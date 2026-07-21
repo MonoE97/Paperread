@@ -293,18 +293,6 @@ def _write_result(
     _RESULT_EMITTED.set(True)
 
 
-def _not_implemented(command: str, **data: str | int | None) -> None:
-    message = f"{command} is reserved by the V2 public contract but is not implemented yet"
-    _finish(
-        command,
-        ok=False,
-        code="not_implemented",
-        data={key: value for key, value in data.items() if value is not None},
-        message=message,
-        diagnostic=message,
-    )
-
-
 @app.command("route")
 def route_command(input_value: str = typer.Argument(..., metavar="INPUT")) -> None:
     """Route an existing local path before considering a Zotero title query."""

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import shutil
@@ -106,6 +107,7 @@ def _write_summary_and_review(
     method: str = "方法先抽取正文，再对证据与结论执行结构化复核。",
     review_status: str = "passed",
     summary_updates: dict[str, object] | None = None,
+    auto_secondary_anchors: bool = False,
 ) -> tuple[PaperReaderSummary, PaperReaderReview]:
     run_id = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))["run_id"]
     summary_payload = {
@@ -143,7 +145,14 @@ def _write_summary_and_review(
             }
         ],
     }
-    summary_payload.update(summary_updates or {})
+    resolved_updates = copy.deepcopy(summary_updates or {})
+    if auto_secondary_anchors:
+        _inject_current_secondary_anchors(
+            run_dir,
+            evidence_digest,
+            resolved_updates,
+        )
+    summary_payload.update(resolved_updates)
     summary_bytes = json.dumps(summary_payload, ensure_ascii=False, separators=(",", ":")).encode()
     summary = PaperReaderSummary.model_validate_json(summary_bytes)
     (run_dir / "summary.json").write_bytes(summary_bytes)
@@ -162,6 +171,66 @@ def _write_summary_and_review(
     )
     (run_dir / "review.json").write_bytes(canonical_json_bytes(review))
     return summary, review
+
+
+def _inject_current_secondary_anchors(
+    run_dir: Path,
+    evidence_digest: str,
+    summary_updates: dict[str, object],
+) -> None:
+    assessments = summary_updates.get("secondary_cross_checks")
+    if not isinstance(assessments, list):
+        return
+    run = json.loads((run_dir / "run.json").read_bytes())
+    evidence_ref = next(
+        (
+            item
+            for item in run["artifacts"]
+            if item["role"] == "evidence_manifest"
+            and item["sha256"] == evidence_digest
+        ),
+        None,
+    )
+    if evidence_ref is None:
+        return
+    evidence = json.loads((run_dir / evidence_ref["path"]).read_bytes())
+    plan_ref = next(
+        (item for item in evidence["files"] if item["role"] == "secondary_plan"),
+        None,
+    )
+    if plan_ref is None:
+        return
+    plan = json.loads((run_dir / plan_ref["path"]).read_bytes())
+    if plan.get("finding_anchor_policy") != "codepoint_sha256_v1":
+        return
+    captures: dict[str, tuple[str, str]] = {}
+    for capture_ref in evidence["files"]:
+        if capture_ref["role"] != "secondary_capture":
+            continue
+        raw = (run_dir / capture_ref["path"]).read_bytes()
+        capture = json.loads(raw)
+        captures[capture["source_id"]] = (
+            hashlib.sha256(raw).hexdigest(),
+            capture["text"],
+        )
+    for assessment in assessments:
+        if not isinstance(assessment, dict) or assessment.get("status") != "used":
+            continue
+        captured = captures.get(assessment.get("source_id"))
+        if captured is None:
+            continue
+        capture_sha256, text = captured
+        excerpt = text[:20]
+        for finding in assessment.get("findings", []):
+            if isinstance(finding, dict) and "anchor" not in finding:
+                finding["anchor"] = {
+                    "capture_sha256": capture_sha256,
+                    "start_codepoint": 0,
+                    "end_codepoint": 20,
+                    "excerpt_sha256": hashlib.sha256(
+                        excerpt.encode("utf-8")
+                    ).hexdigest(),
+                }
 
 
 def _rewrite_current_secondary_plan(run_dir: Path, *, extra: str) -> bytes:
@@ -201,6 +270,9 @@ def _rewrite_current_secondary_plan(run_dir: Path, *, extra: str) -> bytes:
     plan = build_secondary_source_plan(
         source["selected_item"],
         source_snapshot_sha256=source_digest,
+        finding_anchor_policy=json.loads(
+            (run_dir / "source" / "secondary-plan.json").read_bytes()
+        ).get("finding_anchor_policy"),
     )
     plan_bytes = canonical_json_bytes(plan)
     plan_ref = next(
@@ -777,6 +849,7 @@ def test_review_seal_projects_secondary_findings_into_allowed_existing_fields_on
                 }
             ]
         },
+        auto_secondary_anchors=True,
     )
 
     result = _invoke(["review", "seal", str(run_dir)])
@@ -843,6 +916,7 @@ def test_review_seal_keeps_projected_inferred_finding_after_legacy_display_cap(
                 }
             ],
         },
+        auto_secondary_anchors=True,
     )
 
     result = _invoke(["review", "seal", str(run_dir)])
@@ -883,6 +957,7 @@ def test_review_seal_flattens_and_escapes_secondary_source_title(
                 }
             ]
         },
+        auto_secondary_anchors=True,
     )
 
     result = _invoke(["review", "seal", str(run_dir)])
@@ -924,6 +999,7 @@ def test_review_seal_allows_english_secondary_source_title_as_metadata(
                 }
             ]
         },
+        auto_secondary_anchors=True,
     )
 
     result = _invoke(["review", "seal", str(run_dir)])
@@ -963,6 +1039,7 @@ def test_review_seal_allows_pipe_in_english_secondary_title_inside_table(
                 }
             ]
         },
+        auto_secondary_anchors=True,
     )
 
     result = _invoke(["review", "seal", str(run_dir)])
@@ -1019,6 +1096,7 @@ def test_review_validate_blocks_plan_url_outside_structured_secondary_assessment
                 }
             ],
         },
+        auto_secondary_anchors=True,
     )
 
     result = _invoke(["review", "validate", str(run_dir)])
@@ -1234,6 +1312,7 @@ def test_review_validate_blocks_incomplete_or_misbound_secondary_assessments(
         run_dir,
         evidence_digest,
         summary_updates=summary_updates,
+        auto_secondary_anchors=True,
     )
 
     result = _invoke(["review", "validate", str(run_dir)])

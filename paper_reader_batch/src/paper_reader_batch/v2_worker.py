@@ -137,6 +137,14 @@ def _claimable_worker_items(view: RunView, *, max_items: int) -> list[StateItem]
     for item in view.state.items:
         if item.worker_status != "queued" or item.local_prepare_status == "claimed":
             continue
+        if (
+            item.local_prepare_status == "blocked"
+            and item.local_prepare_failure_code == "coordination_uncertain"
+        ):
+            # The local child may already have executed.  A worker claim would
+            # allocate a second deep-reading attempt for the same PDF instead
+            # of recovering the exact uncertain local attempt.
+            continue
         manifest_item = manifest_by_id[item.item_id]
         if isinstance(manifest_item, PdfManifestItem):
             if selected_pdf:
@@ -443,9 +451,10 @@ def worker_prompt(
     else:
         instruction += (
             " For this Zotero-backed item, have $paper_reader inspect eligible public HTTP(S) "
-            "links from Zotero Extra, perform only plan-bound read-only captures, ingest them "
-            "with paper_reader run prepare --secondary-capture-dir, and assess every eligible "
-            "source in secondary_cross_checks before review. Unavailable pages are non-blocking; "
+            "links from Zotero Extra, apply its current secondary-plan policy, perform only "
+            "plan-bound read-only captures, ingest them with paper_reader run prepare "
+            "--secondary-capture-dir, and complete its finding-anchor assessment for every "
+            "eligible source in secondary_cross_checks before review. Unavailable pages are non-blocking; "
             "secondary material must never be cited in evidence_summary."
         )
     if prepared is not None:

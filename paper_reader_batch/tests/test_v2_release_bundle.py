@@ -27,9 +27,9 @@ def _build_bundle(
     validator: ModuleType,
     *,
     omit: set[str] | None = None,
-    project_version: str = "2.1.0",
+    project_version: str = "2.2.0",
     entrypoint: str = "paper_reader_batch.v2_cli:app",
-    lock_version: str = "2.1.0",
+    lock_version: str = "2.2.0",
 ) -> None:
     omitted = omit or set()
     for relative in validator.REQUIRED_PATHS:
@@ -44,7 +44,7 @@ def _build_bundle(
         encoding="utf-8",
     )
     (root / "src/paper_reader_batch/__init__.py").write_text(
-        '__version__ = "2.1.0"\n',
+        '__version__ = "2.2.0"\n',
         encoding="utf-8",
     )
     (root / "pyproject.toml").write_text(
@@ -82,6 +82,7 @@ def test_validator_requires_full_v2_runtime_closure(tmp_path: Path) -> None:
     validator = _load_validator()
     required = set(validator.REQUIRED_PATHS)
     expected = {
+        "scripts/export-v2-schemas.py",
         "src/paper_reader_batch/v2_errors.py",
         "src/paper_reader_batch/v2_manifest.py",
         "src/paper_reader_batch/v2_receipts.py",
@@ -92,6 +93,17 @@ def test_validator_requires_full_v2_runtime_closure(tmp_path: Path) -> None:
     missing = "src/paper_reader_batch/v2_errors.py"
     _build_bundle(tmp_path, validator, omit={missing})
     assert f"missing required path: {missing}" in validator.validate_skill(tmp_path)
+
+
+def test_release_validator_requires_schema_export_helper(tmp_path: Path) -> None:
+    validator = _load_validator()
+    missing = "scripts/export-v2-schemas.py"
+    _build_bundle(tmp_path, validator, omit={missing})
+
+    assert (
+        f"missing required path: {missing}"
+        in validator.validate_skill(tmp_path, release_bundle=True)
+    )
 
 
 def test_validator_rejects_stale_project_entrypoint_and_lock(tmp_path: Path) -> None:
@@ -105,9 +117,9 @@ def test_validator_rejects_stale_project_entrypoint_and_lock(tmp_path: Path) -> 
     )
 
     errors = validator.validate_skill(tmp_path)
-    assert "pyproject project.version must be 2.1.0" in errors
+    assert "pyproject project.version must be 2.2.0" in errors
     assert "pyproject paper_reader_batch entrypoint must be paper_reader_batch.v2_cli:app" in errors
-    assert "uv.lock paper-reader-batch package version must be 2.1.0" in errors
+    assert "uv.lock paper-reader-batch package version must be 2.2.0" in errors
 
 
 def test_validator_accepts_minimal_closed_v2_bundle(tmp_path: Path) -> None:
@@ -278,10 +290,17 @@ def test_release_validator_fails_closed_on_unreadable_directory(tmp_path: Path) 
 @pytest.mark.parametrize(
     ("relative_path", "reported_path"),
     [
+        (".git", ".git"),
+        (".git/objects/ab/cdef", ".git"),
         (".venv/lib/deep/package.py", ".venv"),
         (".pytest_cache/v/cache/nodeids", ".pytest_cache"),
         (".mypy_cache/3.13/cache.json", ".mypy_cache"),
         (".ruff_cache/0.14/cache", ".ruff_cache"),
+        ("build/lib/paper_reader_batch/__init__.py", "build"),
+        ("dist/paper_reader_batch-2.2.0.whl", "dist"),
+        ("htmlcov/index.html", "htmlcov"),
+        ("paper_reader_batch.egg-info", "paper_reader_batch.egg-info"),
+        ("paper_reader_batch.egg-info/PKG-INFO", "paper_reader_batch.egg-info"),
         (
             ".paper_reader_batch/request-receipts/request.json",
             ".paper_reader_batch",
@@ -291,6 +310,7 @@ def test_release_validator_fails_closed_on_unreadable_directory(tmp_path: Path) 
             "src/paper_reader_batch/__pycache__",
         ),
         ("runs/2026-07-13/example/manifest.json", "runs"),
+        (".coverage", ".coverage"),
         (".DS_Store", ".DS_Store"),
         ("src/paper_reader_batch/stray.pyc", "src/paper_reader_batch/stray.pyc"),
     ],
@@ -313,6 +333,128 @@ def test_release_validator_rejects_runtime_state_but_normal_validation_allows_it
         f"runtime state is forbidden in a release bundle: {reported_path}"
     ) == 1
     assert len([error for error in errors if "runtime state is forbidden" in error]) == 1
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "src/paper_reader_batch/build_helpers.py",
+        "src/paper_reader_batch/distillation.py",
+        "references/htmlcoverage.md",
+        "tests/fixtures/paper_reader_batch.egg-info.txt",
+        ".coveragerc",
+    ],
+)
+def test_release_validator_allows_non_state_names_that_only_resemble_denylist_entries(
+    relative_path: str,
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator()
+    _build_bundle(tmp_path, validator)
+    source_path = tmp_path / relative_path
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("legitimate source\n", encoding="utf-8")
+
+    assert validator.validate_skill(tmp_path, release_bundle=True) == []
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        ".env",
+        ".env.local",
+        "config/.env.production",
+        "logs/worker.log",
+        "logs/WORKER.LOG",
+        "secrets/client.pem",
+        "secrets/client.key",
+        "secrets/client.p12",
+        "secrets/client.pfx",
+        "secrets/id_rsa",
+        "secrets/id_ed25519",
+        "fixtures/paper.pdf",
+        "fixtures/PAPER.PDF",
+        "zotero.sqlite",
+        "snapshots/library.SQLITE3",
+        "state/batch.db",
+        "state/batch.sqlite-wal",
+        "state/batch.sqlite-shm",
+        "state/batch.sqlite-journal",
+        "state/batch.sqlite3-wal",
+        "state/batch.sqlite3-shm",
+        "state/batch.sqlite3-journal",
+        "state/batch.db-wal",
+        "state/batch.db-shm",
+        "state/batch.DB-JOURNAL",
+    ],
+)
+def test_release_validator_rejects_sensitive_or_user_data_files_only_in_release_mode(
+    relative_path: str,
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator()
+    _build_bundle(tmp_path, validator)
+    forbidden_path = tmp_path / relative_path
+    forbidden_path.parent.mkdir(parents=True, exist_ok=True)
+    forbidden_path.write_text("private or user data\n", encoding="utf-8")
+
+    assert validator.validate_skill(tmp_path) == []
+    assert validator.validate_skill(tmp_path, release_bundle=True) == [
+        f"sensitive or user-data file is forbidden in a release bundle: {relative_path}"
+    ]
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        ".env.example",
+        "config/environment.env",
+        "logs/worker.log.md",
+        "secrets/client.pem.txt",
+        "secrets/key.json",
+        "secrets/id_rsa.pub",
+        "secrets/my_id_rsa",
+        "fixtures/paper.pdf.txt",
+        "references/database.sqlite.md",
+        "references/schema.db.json",
+        "src/paper_reader_batch/sqlite3.py",
+        "references/library.sqlite-wal.md",
+        "references/library.sqlite-journal.md",
+    ],
+)
+def test_release_validator_does_not_use_substring_matching_for_sensitive_file_names(
+    relative_path: str,
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator()
+    _build_bundle(tmp_path, validator)
+    source_path = tmp_path / relative_path
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("legitimate source\n", encoding="utf-8")
+
+    assert validator.validate_skill(tmp_path, release_bundle=True) == []
+
+
+def test_release_validator_reports_sensitive_files_in_stable_path_order(
+    tmp_path: Path,
+) -> None:
+    validator = _load_validator()
+    _build_bundle(tmp_path, validator)
+    relative_paths = [
+        "z-private/id_rsa",
+        "a-input/paper.pdf",
+        "m-logs/worker.log",
+    ]
+    for relative_path in relative_paths:
+        forbidden_path = tmp_path / relative_path
+        forbidden_path.parent.mkdir(parents=True, exist_ok=True)
+        forbidden_path.write_text("private or user data\n", encoding="utf-8")
+
+    assert validator.validate_skill(tmp_path, release_bundle=True) == [
+        "sensitive or user-data file is forbidden in a release bundle: a-input/paper.pdf",
+        "sensitive or user-data file is forbidden in a release bundle: m-logs/worker.log",
+        "sensitive or user-data file is forbidden in a release bundle: z-private/id_rsa",
+    ]
 
 
 def test_release_bundle_cli_flag_rejects_runtime_state(tmp_path: Path) -> None:

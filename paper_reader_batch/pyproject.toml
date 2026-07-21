@@ -1,6 +1,6 @@
 [project]
 name = "paper_reader_batch"
-version = "2.1.0"
+version = "2.2.0"
 description = "Batch orchestration skill for paper_reader."
 requires-python = ">=3.13"
 dependencies = [

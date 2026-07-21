@@ -1,12 +1,12 @@
-# Batch Workflow — Paper Reader Batch 2.1 Runtime Contract
+# Batch Workflow — Paper Reader Batch 2.2 Runtime Contract
 
-Use this workflow when the user asks to analyze multiple papers. It is the released grouped-CLI runtime contract for Paper Reader Batch 2.1.
+Use this workflow when the user asks to analyze multiple papers. It is the released grouped-CLI runtime contract for Paper Reader Batch 2.2.
 
 paper_reader_batch is a scheduler and reporter. It must dispatch each paper to
 `$paper_reader` for single-paper analysis. It must not copy single-paper prompts,
 summary schema, note templates, evidence locator rules, or Zotero write gates.
 
-For Zotero-backed assignments, the deterministic worker prompt delegates Zotero `Extra` link planning, read-only capture, immutable ingestion, and `secondary_cross_checks` assessment to `$paper_reader`. Batch never fetches or interprets a page and never copies the single-paper cross-check schema. PDF assignments do not enable this capability.
+For Zotero-backed assignments, the deterministic worker prompt delegates the current secondary-plan policy, Zotero `Extra` link planning, read-only capture, immutable ingestion, `secondary_cross_checks`, and finding-anchor assessment to `$paper_reader`. Batch never fetches or interprets a page and never copies or validates the single-paper finding-anchor schema. PDF assignments do not enable this capability.
 
 Every active artifact is strict V2 with `extra=forbid`. V1/unversioned/unknown artifacts are historical-only and must fail read-only before lock or mutation with `unsupported_run_schema`; aliases, migration, schema guessing and hidden fallback are forbidden.
 
@@ -109,6 +109,27 @@ uv run paper_reader_batch run status <batch_run_dir>
 uv run paper_reader_batch run validate <batch_run_dir>
 uv run paper_reader_batch run recover <batch_run_dir> --request-id UUID --paper-reader-root <paper_reader_root>
 ```
+
+The `run status` result keeps the complete journal-derived `state` and adds
+`next_actions`, a deterministic read-only candidate set. Run-level
+recovery/attention comes first; remaining candidates follow manifest item order,
+then worker, local_prepare, write, user lane order and a fixed action priority.
+The list contains action names, reason codes, user-intent flags, and required
+input names only. It does not generate UUIDs, lease tokens, authorizations, or MCP envelopes, read the clock, or mutate journal, snapshot, or result files.
+In this candidate set, worker.claim and local-prepare.claim are alternatives for the same queued PDF,
+not concurrent instructions; an active claim suppresses the other lane. A
+complete pending proposal blocks unrelated mutation advice and must be resumed by
+the exact originating request. Pending replay requirements include optional fingerprint-bound inputs; callers must preserve their original values or original
+default omission. A derived reconciliation proposal left by an interrupted
+root-bound `run recover` is instead reported as manual storage attention, because
+neither replaying the outer request nor reconstructing the private readback input
+is proven safe. Global worker/local claim candidates identify only the first
+actual assignment selected by the public command. Claimed writes show preview,
+renew/release, and a separate explicit real-write-intent gate; write.begin is never suggested from ordinary claimed state because read-only status cannot prove the preview or intent. The sole exception is exact replay of a pending originating write.begin request. Therefore, started writes never suggest another send. In the same way, uncertain writes only offer read-only reconciliation through `write reconcile` or root-bound `run recover`, and
+`retry_confirmation_required` exposes only an explicit acknowledged retry. The
+listed input names are requirements, not recovered identity values; callers must
+retain the exact current claim/token/attempt values returned by their original
+commands. The external Zotero lookup is read-only; write.reconcile and run.recover still record state transitions in the append-only journal. Since status never reads the wall clock, a conditional run.recover candidate only becomes executable after authoritative lease expiry; before expiry, the live claim's identity-bound actions remain the applicable candidates. A non-authoritative storage residue that has no dedicated safe recovery command is reported as generic run-level manual attention rather than a false `run recover` action.
 
 Recovery reconstructs state only from the validated manifest and event journal. It never imports orphan results by directory scan, stem or mtime and never treats a V1/unversioned file as recoverable state.
 

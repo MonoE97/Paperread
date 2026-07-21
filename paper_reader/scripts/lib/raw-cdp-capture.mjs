@@ -148,15 +148,136 @@ function requireCdpIdentity(value, errorCode) {
 }
 
 
-function requestAccountingKey(sessionId, requestId, value) {
+const CDP_RESOURCE_CLASSES = new Map([
+  ["document", "document"],
+  ["stylesheet", "stylesheet"],
+  ["image", "image"],
+  ["media", "media"],
+  ["font", "font"],
+  ["script", "script"],
+  ["texttrack", "texttrack"],
+  ["xhr", "xhr"],
+  ["fetch", "fetch"],
+  ["prefetch", "prefetch"],
+  ["eventsource", "eventsource"],
+  ["websocket", "websocket"],
+  ["manifest", "manifest"],
+  ["signedexchange", "signedexchange"],
+  ["ping", "ping"],
+  ["cspviolationreport", "cspviolationreport"],
+  ["preflight", "preflight"],
+]);
+const INVALID_URL_CHECKPOINTS = new Set([
+  "fetch_request_paused",
+  "network_request_will_be_sent",
+]);
+
+
+class InvalidNetworkRequestUrlError extends Error {
+  constructor(diagnostic) {
+    super("invalid_network_request_url");
+    this.name = "InvalidNetworkRequestUrlError";
+    this.diagnostic = diagnostic;
+  }
+}
+
+
+function classifyCdpResource(value) {
+  if (typeof value !== "string" || value.length === 0) {
+    return "none";
+  }
+  if (value.length > 64) {
+    return "other";
+  }
+  return CDP_RESOURCE_CLASSES.get(value.toLowerCase()) || "other";
+}
+
+
+function classifyInvalidUrlValue(value) {
+  let valueType;
+  if (value === null) {
+    valueType = "null";
+  } else if (Array.isArray(value)) {
+    valueType = "array";
+  } else {
+    valueType = typeof value;
+  }
+  if (
+    ![
+      "string",
+      "number",
+      "boolean",
+      "object",
+      "null",
+      "array",
+      "undefined",
+    ].includes(valueType)
+  ) {
+    valueType = "other";
+  }
+  if (valueType === "undefined") {
+    valueType = "missing";
+  }
+
+  let lengthBucket = "not_applicable";
+  let parseability = "not_attempted";
+  let schemeClass = "none";
+  if (typeof value === "string") {
+    if (value.length === 0) {
+      lengthBucket = "empty";
+    } else if (value.length > 4096) {
+      lengthBucket = "over_limit";
+    } else {
+      lengthBucket = "bounded";
+      try {
+        new URL(value);
+        parseability = "valid";
+      } catch {
+        parseability = "invalid";
+      }
+    }
+    const schemeMatch = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(value.slice(0, 64));
+    if (schemeMatch) {
+      const scheme = schemeMatch[1].toLowerCase();
+      schemeClass = scheme === "http" || scheme === "https" ? scheme : "other";
+    }
+  }
+  return {valueType, lengthBucket, parseability, schemeClass};
+}
+
+
+function invalidNetworkRequestUrlError(value, {checkpoint, resourceType}) {
+  const {valueType, lengthBucket, parseability, schemeClass} =
+    classifyInvalidUrlValue(value);
+  const resourceClass = classifyCdpResource(resourceType);
+  const checkpointClass = INVALID_URL_CHECKPOINTS.has(checkpoint)
+    ? checkpoint
+    : "invalid";
+  return new InvalidNetworkRequestUrlError(
+    "invalid_network_request_url:" +
+      `checkpoint=${checkpointClass};resource=${resourceClass};value=${valueType};` +
+      `length=${lengthBucket};parse=${parseability};scheme=${schemeClass}`,
+  );
+}
+
+
+function recordRequestAccountingError(warnings, error) {
+  warnings.add(String(error?.message || "invalid_network_request_identity"));
+  if (error instanceof InvalidNetworkRequestUrlError) {
+    warnings.add(error.diagnostic);
+  }
+}
+
+
+function requestAccountingKey(sessionId, requestId, value, context) {
   if (typeof value !== "string" || value.length === 0 || value.length > 4096) {
-    throw new Error("invalid_network_request_url");
+    throw invalidNetworkRequestUrlError(value, context);
   }
   let parsed;
   try {
     parsed = new URL(value);
   } catch {
-    throw new Error("invalid_network_request_url");
+    throw invalidNetworkRequestUrlError(value, context);
   }
   if (!["http:", "https:"].includes(parsed.protocol)) {
     return null;
@@ -889,12 +1010,16 @@ export async function capturePageWithRawCdp({
             sessionId,
             event.params?.networkId,
             event.params?.request?.url,
+            {
+              checkpoint: "fetch_request_paused",
+              resourceType: event.params?.resourceType,
+            },
           );
           if (key) {
             incrementCount(fetchRequestCounts, key);
           }
         } catch (error) {
-          warnings.add(String(error?.message || "invalid_network_request_identity"));
+          recordRequestAccountingError(warnings, error);
           await failPausedRequest(event.params.requestId, sessionId);
           return;
         }
@@ -963,6 +1088,10 @@ export async function capturePageWithRawCdp({
           sessionId,
           event.params?.requestId,
           event.params?.request?.url,
+          {
+            checkpoint: "network_request_will_be_sent",
+            resourceType: event.params?.type,
+          },
         );
         if (key) {
           incrementCount(networkRequestCounts, key);
@@ -972,7 +1101,7 @@ export async function capturePageWithRawCdp({
           observedNetworkAuthorities.add(authority);
         }
       } catch (error) {
-        warnings.add(String(error?.message || "invalid_network_request_identity"));
+        recordRequestAccountingError(warnings, error);
       }
       return;
     }

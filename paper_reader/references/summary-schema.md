@@ -1,6 +1,6 @@
-# Summary And Review Shape — Paper Reader 2.1 Runtime Contract
+# Summary And Review Shape — Paper Reader 2.2 Runtime Contract
 
-This reference defines the released Paper Reader 2.1 runtime schemas `paper_reader.summary.v2`, `paper_reader.review.v2`, and immutable `paper_reader.review-package.v2`. All use strict Pydantic v2 models with `extra=forbid`; unknown fields, implicit coercion, V1/unversioned artifacts and schema guessing are rejected. V1 artifacts are historical-only and fail with `unsupported_run_schema` before locks or mutation.
+This reference defines the released Paper Reader 2.2 runtime schemas `paper_reader.summary.v2`, `paper_reader.review.v2`, and immutable `paper_reader.review-package.v2`. All use strict Pydantic v2 models with `extra=forbid`; unknown fields, implicit coercion, V1/unversioned artifacts and schema guessing are rejected. V1 artifacts are historical-only and fail with `unsupported_run_schema` before locks or mutation.
 
 The summary separates fields that block review sealing from fields that improve the rendered note. The agent should fill both layers for high-quality notes, but only `gate-required` fields are mandatory for sealing. Review validation resolves every render fallback before Chinese-first prose lint, locator validation and sealing, so omitted optional fields cannot bypass checks.
 
@@ -70,7 +70,27 @@ These fields are rendered prominently by the note template or make the review mo
 - `status=unavailable`: applies only to `unavailable` or `not_attempted` capture state, explains why no content judgment is possible, and has no findings.
 - `reason`: trimmed, single-line Chinese-first prose.
 
-Each finding has `relation`, `target`, `text`, and zero to three `caveats`. It must not contain a URL, source title, or publisher; review resolves those only from immutable evidence and escapes them when it creates the source link. Allowed relation/target pairs are:
+Every new 2.2 Zotero plan declares `finding_anchor_policy=codepoint_sha256_v1`. Under `codepoint_sha256_v1`, every finding in a `used` assessment must contain exactly one `anchor` with this shape:
+
+```json
+{
+  "capture_sha256": "<sha256>",
+  "start_codepoint": 0,
+  "end_codepoint": 20,
+  "excerpt_sha256": "<sha256>"
+}
+```
+
+Construct the anchor from the captured source, not from rendered `secondary_context.md`:
+
+1. Read the plan-bound `secondary/<source_id>.json` through immutable evidence membership and require `status=captured`.
+2. Set `capture_sha256` to the immutable evidence raw capture member digest. It is the SHA-256 of the exact capture JSON member bytes recorded by `evidence.json`, not a reserialized model, temporary capture file, `secondary_context.md`, or captured text hash.
+3. Choose one contiguous `[start_codepoint, end_codepoint)` slice of the capture's exact `.text`. Offsets are zero-based Python string indices over Unicode code points, `start_codepoint` is inclusive, `end_codepoint` is exclusive, and the span must contain 20–2,000 Python code points. Do not count UTF-8 bytes, UTF-16 code units, grapheme clusters, words, or rendered Markdown positions.
+4. Compute `excerpt_sha256` as SHA-256 over the exact UTF-8 bytes of `capture.text[start_codepoint:end_codepoint]`. The producer must not normalize Unicode, newlines, or whitespace before slicing or hashing.
+
+One finding can bind only one excerpt. If a claim requires multiple excerpts, split it into multiple findings so every finding has exactly one `anchor`. The anchor proves only that the cited excerpt exists in the immutable capture; it does not turn secondary material into canonical PDF evidence. The anchor metadata is validation-only and is never rendered in Markdown or HTML. A historical immutable V2 plan without `finding_anchor_policy` keeps the legacy unanchored finding shape and rejects anchors; never edit that plan to opt it into the new policy.
+
+Each finding also has `relation`, `target`, `text`, and zero to three `caveats`. It must not contain a URL, source title, or publisher; review resolves those only from immutable evidence and escapes them when it creates the source link. Allowed relation/target pairs are:
 
 - `supports` -> `core_result_short_annotation` or `technical_details_item`
 - `extends` -> `technical_details_item` or `applicability_limits_item`

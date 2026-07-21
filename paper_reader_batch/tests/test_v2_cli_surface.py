@@ -100,7 +100,7 @@ def test_project_entrypoint_uses_only_v2_grouped_cli() -> None:
 def test_version_is_the_only_non_json_operational_exception_besides_help() -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0, result.output
-    assert result.stdout.startswith("paper_reader_batch ")
+    assert result.stdout == "paper_reader_batch 2.2.0\n"
     assert len(result.stdout.splitlines()) == 1
 
 

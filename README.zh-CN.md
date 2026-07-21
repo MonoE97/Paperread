@@ -1,8 +1,8 @@
-# Paper Reader 2.1
+# Paper Reader 2.2
 
 [English](README.md) | **简体中文**
 
-Paper Reader `2.1.0` 是面向 Codex 或 Claude 的自包含 skill repo。它把 Zotero 论文标题、本地 PDF path 或多篇论文批量输入，转成有证据链的中文结构化阅读笔记；实现方式是确定性的 grouped CLI 加 agent 写出的结构化总结。仅对 Zotero 条目，`Extra` 中符合条件的公开链接现在可以只读抓取，用于交叉核对 PDF 分析，但不能替代论文证据。
+Paper Reader `2.2.0` 是面向 Codex 或 Claude 的自包含 skill repo。它把 Zotero 论文标题、本地 PDF path 或多篇论文批量输入，转成有证据链的中文结构化阅读笔记；实现方式是确定性的 grouped CLI 加 agent 写出的结构化总结。仅对 Zotero 条目，`Extra` 中符合条件的公开链接可以只读抓取，用于交叉核对 PDF 分析，但不能替代论文证据。每条被采用的外部 finding 现在必须先与不可变网页正文中的精确片段完成加密哈希绑定，之后才允许投影进现有笔记结构。
 
 仓库根目录只是维护壳，不是运行时 Python project。安装和运行时使用一个或两个 skill source：
 
@@ -17,7 +17,7 @@ CLI 负责准备不可变 artifacts、校验 gate、渲染笔记和记录 batch 
 
 ## 安装
 
-Paper Reader 2.1 运行时目前支持 macOS 和 Linux；Windows 请使用 WSL。下面的 tracked-file 安装 helper 需要 POSIX shell。
+Paper Reader 2.2 运行时目前支持 macOS 和 Linux；Windows 请使用 WSL。下面的 tracked-file 安装 helper 需要 POSIX shell。
 
 staging skill 前先安装 `uv`。可使用官方 installer 或包管理器；常见方式：
 
@@ -70,6 +70,8 @@ install_tracked_skill() {
 
 source 必须是 Git checkout，并且 `HEAD:<source_name>` 必须存在。该流程只安装 committed `HEAD` tree 中的文件，不包含 working tree 或 index 中尚未 commit 的改动；安装前必须先形成目标 release commit。
 
+Maintainer 可以运行 `scripts/validate-committed-release-bundles.sh [git-revision] [staging-parent]`，对两个 Skill source 执行同样的发布边界检查。脚本先把参数解析为一个精确 commit，在 dependency sync 前分别校验两个 clean archive，再在两个独立的全新安装根中测试并 build；mode-0700 staging 目录和日志会保留供复核。它不读取 working-tree 运行数据、不访问 Zotero、也不执行任何 write lane。该结果只代表本地 committed-tree gate，不表示远程 CI 已经运行。
+
 Codex personal skills：
 
 ```bash
@@ -88,7 +90,7 @@ install_tracked_skill paper_reader_batch \
   "$HOME/.claude/skills/paper_reader_batch" paper_reader_batch
 ```
 
-如果目标 `paper_reader/` 或 `paper_reader_batch/` 目录已经存在，先停止，不要继续安装。Paper Reader 2.1 要求 clean install 到新目录。旧安装可以在其他位置只读保留。staging validation 失败时，隐藏 staging 目录会保留供检查，但绝不会提升为目标安装目录。
+如果目标 `paper_reader/` 或 `paper_reader_batch/` 目录已经存在，先停止，不要继续安装。Paper Reader 2.2 要求 clean install 到新目录。旧安装可以在其他位置只读保留。staging validation 失败时，隐藏 staging 目录会保留供检查，但绝不会提升为目标安装目录。
 
 第一次运行 `uv sync --locked` 会根据对应 skill root 的 `uv.lock` 初始化安装后的本地环境。安装新导出的 revision 后，也应重新运行一次。
 
@@ -129,7 +131,7 @@ uv run paper_reader zotero verify <authorization.json> --note-key <note_key>
 uv run paper_reader zotero reconcile <authorization.json>
 ```
 
-当 Zotero run 的不可变 `source/secondary-plan.json` 含有 eligible 链接时，应读取 `eligibility=eligible` 的实际条目并使用其中的精确 `source_id`；rejected 条目仍占据原顺序，因此 eligible id 不一定连续。Plan 保留 URL 出现顺序和 query，按 exact URL 去重，排除论文 DOI/publisher URL，并最多接纳 8 个 eligible HTTP(S) source。字面量 unsafe target 在 planning 阶段拒绝，hostname DNS 则在浏览器导航前校验。每个 source 都使用全新的 flat capture 目录和未占用的输出路径：
+当 Zotero run 的不可变 `source/secondary-plan.json` 含有 eligible 链接时，应读取 `eligibility=eligible` 的实际条目并使用其中的精确 `source_id`；rejected 条目仍占据原顺序，因此 eligible id 不一定连续。Plan 保留 URL 出现顺序和 query，按 exact URL 去重，排除论文 DOI/publisher URL，并最多接纳 8 个 eligible HTTP(S) source。新建 current-policy plan 的 producer 与 strict consumer 共享 2 MiB canonical-byte 上限；超限或非严格的内部 warning metadata 会在 run 分配前被拒绝，而缺少 policy 的 historical V2 plan 保持 legacy rebuild 语义。字面量 unsafe target 在 planning 阶段拒绝，hostname DNS 则在浏览器导航前校验。每个 source 都使用全新的 flat capture 目录和未占用的输出路径：
 
 ```bash
 node scripts/capture-secondary-url.mjs --plan <run_dir>/source/secondary-plan.json --source-id secondary-001 --output <temporary_capture_dir>/secondary-001.json
@@ -193,7 +195,7 @@ paper_reader 支持两类输入：
 
 本地 PDF path 和目录 path 输入会跳过 Zotero 搜索和去重检查。已存在的本地路径不是 Zotero 标题片段；目录路径交给 `paper_reader_batch manifest from-pdf-folder`，默认不递归，只有显式传 `--recursive` 才递归。
 
-两个工作流默认都会抽取完整 PDF。最终 `evidence_summary` locator 必须使用以下 canonical 格式之一：`context.md page <N>`、`context.md page <N> section <Section Name>`、`context.md page <N> section <Section Name> table_candidate <N>` 或 `figure_context.md <figure_id>`。裸 `context.md` / `figure_context.md`、`page 3 method section` 这类散文式 locator、`section_context.md` 和 secondary context 路径都无效。`section_context.md` 只作为导航辅助。对 Zotero run，严格模式 `capture-secondary-url.mjs --plan ... --source-id ... --output ...` 的结果只能通过 `run prepare --secondary-capture-dir` 进入同一个不可变 evidence bundle；review 随后要求每个 eligible source 恰好一个 `secondary_cross_checks` assessment，并把验证后的 finding 投影到现有笔记字段。外部材料始终只能用于交叉核对，不能支撑 `30 秒结论` 或 `evidence_summary`；链接不可读时，只在现有“适用机会与边界”列表追加确定性说明。没有 eligible `Extra` 链接时，不抓网页也不生成交叉核对文字。本地 PDF run 会在 evidence 分配前拒绝该路径。
+两个工作流默认都会抽取完整 PDF。最终 `evidence_summary` locator 必须使用以下 canonical 格式之一：`context.md page <N>`、`context.md page <N> section <Section Name>`、`context.md page <N> section <Section Name> table_candidate <N>` 或 `figure_context.md <figure_id>`。裸 `context.md` / `figure_context.md`、`page 3 method section` 这类散文式 locator、`section_context.md` 和 secondary context 路径都无效。`section_context.md` 只作为导航辅助。对 Zotero run，严格模式 `capture-secondary-url.mjs --plan ... --source-id ... --output ...` 的结果只能通过 `run prepare --secondary-capture-dir` 进入同一个不可变 evidence bundle；review 随后要求每个 eligible source 恰好一个 `secondary_cross_checks` assessment，并把验证后的 finding 投影到现有笔记字段。对新的 2.2 run，每条 `used` finding 必须恰好绑定不可变 capture 中 20–2,000 个 Unicode code point 的正文片段及其精确 UTF-8 hash；全部绑定必须在任何投影前验证，offset 和 hash 不会渲染到笔记。外部材料始终只能用于交叉核对，不能支撑 `30 秒结论` 或 `evidence_summary`；链接不可读时，只在现有“适用机会与边界”列表追加确定性说明。没有 eligible `Extra` 链接时，不抓网页也不生成交叉核对文字。本地 PDF run 会在 evidence 分配前拒绝该路径。
 
 paper_reader_batch 支持四类批量输入：Zotero collection inventory、多个 Zotero 标题、本地 PDF 文件夹、多个 PDF path。它归一化为严格 manifest，并以 append-only hash-chain journal 为事实源；`state.json` 只是可重建 snapshot。Worker/local-prepare lease 默认 900 秒，串行 write claim 默认 120 秒。Zotero-backed items 默认 `zotero_write`，PDF items 永远不进入 write queue。`write.started` 持久化后发生 crash 时状态只能 uncertain，不能重发；`run recover --paper-reader-root ...` 会委托单篇只读 reconciliation，再记录 `written`、`retry_confirmation_required` 或 `blocked`。Dry-run 显式传 `--write-policy prepare_only`。纯本地 PDF report 使用 `effective_write_policy=local_only`；每篇结果从单篇 note 的 `30 秒结论` 提取，缺失时依次 fallback 到 `tldr`、`one_sentence_summary`，batch 不重新总结。
 

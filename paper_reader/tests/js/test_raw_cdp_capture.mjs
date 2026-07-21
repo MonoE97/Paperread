@@ -88,6 +88,10 @@ class CdpHarness {
     frameNavigationEvent = "Page.frameRequestedNavigation",
     pageSnapshots = null,
     disconnectAfterStop = false,
+    invalidFetchUrlValue = undefined,
+    invalidNetworkUrlValue = undefined,
+    invalidFetchResourceType = "Document",
+    invalidNetworkResourceType = "Fetch",
   } = {}) {
     this.unsafeUrl = unsafeUrl;
     this.download = download;
@@ -120,6 +124,10 @@ class CdpHarness {
     this.frameNavigationEvent = frameNavigationEvent;
     this.pageSnapshots = pageSnapshots;
     this.disconnectAfterStop = disconnectAfterStop;
+    this.invalidFetchUrlValue = invalidFetchUrlValue;
+    this.invalidNetworkUrlValue = invalidNetworkUrlValue;
+    this.invalidFetchResourceType = invalidFetchResourceType;
+    this.invalidNetworkResourceType = invalidNetworkResourceType;
     this.captureEvaluateCount = 0;
     this.commands = [];
     this.closed = false;
@@ -392,6 +400,42 @@ class CdpHarness {
               );
               return;
             }
+            if (this.invalidFetchUrlValue !== undefined) {
+              queueMicrotask(() => socket.emitMessage({
+                method: "Fetch.requestPaused",
+                sessionId: "session-1",
+                params: {
+                  requestId: "fetch-invalid-url",
+                  request: {
+                    url: this.invalidFetchUrlValue,
+                    method: "GET",
+                    headers: {},
+                  },
+                  frameId: "frame-1",
+                  resourceType: this.invalidFetchResourceType,
+                  networkId: "network-invalid-url",
+                },
+              }));
+              return;
+            }
+            if (this.invalidNetworkUrlValue !== undefined) {
+              queueMicrotask(() => socket.emitMessage({
+                method: "Network.requestWillBeSent",
+                sessionId: "session-1",
+                params: {
+                  requestId: "network-invalid-url",
+                  request: {
+                    url: this.invalidNetworkUrlValue,
+                    method: "GET",
+                    headers: {},
+                  },
+                  type: this.invalidNetworkResourceType,
+                  frameId: "frame-1",
+                },
+              }));
+              this.finishNavigation(socket);
+              return;
+            }
             if (this.duplicateUninterceptedInitialUrl) {
               queueMicrotask(() => socket.emitMessage({
                 method: "Network.requestWillBeSent",
@@ -458,7 +502,9 @@ class CdpHarness {
       case "Fetch.failRequest":
         if (
           this.failRequestProtocolError &&
-          ["fetch-unsafe-method", "fetch-request-body"].includes(message.params.requestId)
+          ["fetch-unsafe-method", "fetch-request-body", "fetch-invalid-url"].includes(
+            message.params.requestId,
+          )
         ) {
           this.respondError(socket, message, "failRequest failed");
         } else {
@@ -567,6 +613,59 @@ async function runCapture(harness, captureOptions = {}) {
     ...captureOptions,
   });
   return {capture, policy, proxy};
+}
+
+
+const INVALID_URL_SECRET = "paper-reader-invalid-url-secret.example/private?token=do-not-log";
+const INVALID_NETWORK_URL_CASES = [
+  {
+    name: "non-string",
+    value: {secret: INVALID_URL_SECRET},
+    valueType: "object",
+    lengthBucket: "not_applicable",
+    parseability: "not_attempted",
+    schemeClass: "none",
+  },
+  {
+    name: "empty",
+    value: "",
+    valueType: "string",
+    lengthBucket: "empty",
+    parseability: "not_attempted",
+    schemeClass: "none",
+  },
+  {
+    name: "over-limit",
+    value: `https://${INVALID_URL_SECRET}/${"x".repeat(4097)}`,
+    valueType: "string",
+    lengthBucket: "over_limit",
+    parseability: "not_attempted",
+    schemeClass: "https",
+  },
+  {
+    name: "unparsable",
+    value: `http://[${INVALID_URL_SECRET}`,
+    valueType: "string",
+    lengthBucket: "bounded",
+    parseability: "invalid",
+    schemeClass: "http",
+  },
+];
+
+
+function invalidUrlDiagnostic({
+  checkpoint,
+  resourceClass,
+  valueType,
+  lengthBucket,
+  parseability,
+  schemeClass,
+}) {
+  return (
+    "invalid_network_request_url:" +
+    `checkpoint=${checkpoint};resource=${resourceClass};value=${valueType};` +
+    `length=${lengthBucket};parse=${parseability};scheme=${schemeClass}`
+  );
 }
 
 
@@ -1019,6 +1118,89 @@ test("fails closed when Page.navigate omits its root frame identity", async () =
 
   await assert.rejects(runCapture(harness), /invalid_navigation_frame/);
   assert.equal(harness.closed, true);
+});
+
+
+test("classifies invalid Fetch and Network URL values without disclosing them", async () => {
+  for (const checkpoint of ["fetch_request_paused", "network_request_will_be_sent"]) {
+    for (const invalidCase of INVALID_NETWORK_URL_CASES) {
+      const harness = new CdpHarness(
+        checkpoint === "fetch_request_paused"
+          ? {invalidFetchUrlValue: invalidCase.value}
+          : {invalidNetworkUrlValue: invalidCase.value},
+      );
+      const {capture} = await runCapture(harness);
+      const expectedDiagnostic = invalidUrlDiagnostic({
+        checkpoint,
+        resourceClass: checkpoint === "fetch_request_paused" ? "document" : "fetch",
+        valueType: invalidCase.valueType,
+        lengthBucket: invalidCase.lengthBucket,
+        parseability: invalidCase.parseability,
+        schemeClass: invalidCase.schemeClass,
+      });
+
+      assert.equal(capture.status, "unavailable", `${checkpoint}:${invalidCase.name}`);
+      assert.equal(capture.data.text, "", `${checkpoint}:${invalidCase.name}`);
+      assert.ok(
+        capture.warnings.includes("invalid_network_request_url"),
+        `${checkpoint}:${invalidCase.name}`,
+      );
+      assert.ok(
+        capture.warnings.includes(expectedDiagnostic),
+        `${checkpoint}:${invalidCase.name}:${JSON.stringify(capture.warnings)}`,
+      );
+      assert.equal(
+        JSON.stringify(capture).includes(INVALID_URL_SECRET),
+        false,
+        `${checkpoint}:${invalidCase.name}`,
+      );
+      const invalidCancellation = harness.commands.find(
+        (command) =>
+          command.method === "Fetch.failRequest" &&
+          command.params.requestId === "fetch-invalid-url",
+      );
+      if (checkpoint === "fetch_request_paused") {
+        assert.equal(invalidCancellation.params.errorReason, "BlockedByClient");
+      } else {
+        assert.equal(invalidCancellation, undefined);
+      }
+    }
+  }
+});
+
+
+test("keeps invalid Fetch URL cancellation failure fatal without disclosing the value", async () => {
+  const harness = new CdpHarness({
+    invalidFetchUrlValue: `http://[${INVALID_URL_SECRET}`,
+    failRequestProtocolError: true,
+  });
+  const {capture, proxy} = await runCapture(harness);
+
+  assert.equal(capture.status, "unavailable");
+  assert.ok(capture.warnings.includes("invalid_network_request_url"));
+  assert.ok(capture.warnings.includes("cdp_fail_request_failed"));
+  assert.equal(JSON.stringify(capture).includes(INVALID_URL_SECRET), false);
+  assert.equal(proxy.sealed, true);
+  assert.equal(harness.closed, true);
+});
+
+
+test("bounds invalid URL resource classification to a fixed other bucket", async () => {
+  const harness = new CdpHarness({
+    invalidFetchUrlValue: "",
+    invalidFetchResourceType: "Document".repeat(1024),
+  });
+  const {capture} = await runCapture(harness);
+
+  assert.ok(capture.warnings.includes(invalidUrlDiagnostic({
+    checkpoint: "fetch_request_paused",
+    resourceClass: "other",
+    valueType: "string",
+    lengthBucket: "empty",
+    parseability: "not_attempted",
+    schemeClass: "none",
+  })));
+  assert.equal(capture.warnings.some((warning) => warning.length > 256), false);
 });
 
 

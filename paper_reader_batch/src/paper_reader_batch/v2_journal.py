@@ -2633,6 +2633,8 @@ def _persist_snapshot(view: RunView, state: BatchState, *, fault: FaultHook | No
 
 
 def status_result(view: RunView) -> dict[str, JsonValue]:
+    from paper_reader_batch.v2_next_actions import derive_next_actions
+
     return {
         "run_dir": str(view.run_dir),
         "manifest_sha256": view.manifest_sha256,
@@ -2642,4 +2644,5 @@ def status_result(view: RunView) -> dict[str, JsonValue]:
         "state_pending_write": view.state_pending_write,
         "incomplete_state_writes": list(view.incomplete_state_writes),
         "state": view.state.model_dump(mode="json"),
+        "next_actions": derive_next_actions(view),
     }

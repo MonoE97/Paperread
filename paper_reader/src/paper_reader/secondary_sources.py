@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import unquote, urlsplit, urlunsplit
+
+from paper_reader.storage import canonical_json_bytes
 
 
 HTTP_URL_RE = re.compile(
@@ -17,9 +19,13 @@ AMBIGUOUS_NUMERIC_HOST_RE = re.compile(
 USAGE_BOUNDARY = "cross-check only; must not be cited in evidence_summary"
 NON_ACTIONABLE_WARNING_CODES = {"sqlite_immutable_snapshot_used", "sqlite_ro_retry_after_locked"}
 SECONDARY_PLAN_FORMAT = "paper_reader.secondary-plan.v2-internal"
+SECONDARY_FINDING_ANCHOR_POLICY = "codepoint_sha256_v1"
+SECONDARY_PLAN_MAX_BYTES = 2 * 1024 * 1024
 MAX_SECONDARY_URLS = 8
 MAX_SECONDARY_PLAN_SOURCES = 256
 MAX_SECONDARY_URL_LENGTH = 4096
+MAX_SECONDARY_WARNINGS = 256
+MAX_SECONDARY_WARNING_BYTES = 4096
 
 NON_PUBLIC_IPV4_NETWORKS = tuple(
     ipaddress.ip_network(value)
@@ -192,10 +198,15 @@ def build_secondary_source_plan(
     details: dict[str, Any],
     *,
     source_snapshot_sha256: str,
+    finding_anchor_policy: Literal["codepoint_sha256_v1"] | None,
 ) -> dict[str, Any]:
     """Build the immutable, source-snapshot-bound Zotero secondary URL plan."""
     if not re.fullmatch(r"[0-9a-f]{64}", source_snapshot_sha256):
         raise ValueError("source_snapshot_sha256 must be a lowercase SHA-256 digest")
+    if finding_anchor_policy not in {None, SECONDARY_FINDING_ANCHOR_POLICY}:
+        raise ValueError(
+            "finding_anchor_policy must be None or codepoint_sha256_v1"
+        )
     extra = _extra_text(details)
     urls = extract_http_urls(extra)
     if len(urls) > MAX_SECONDARY_PLAN_SOURCES:
@@ -228,27 +239,62 @@ def build_secondary_source_plan(
             }
         )
 
-    return {
+    plan: dict[str, Any] = {
         "format": SECONDARY_PLAN_FORMAT,
         "item_key": details.get("key", ""),
         "source_snapshot_sha256": source_snapshot_sha256,
         "usage_boundary": USAGE_BOUNDARY,
         "eligible_source_count": eligible_count,
         "sources": sources,
-        "warnings": _paper_reader_warnings(details),
+        "warnings": _paper_reader_warnings(
+            details,
+            strict=finding_anchor_policy is not None,
+        ),
     }
+    if finding_anchor_policy is not None:
+        plan["finding_anchor_policy"] = finding_anchor_policy
+    if (
+        finding_anchor_policy is not None
+        and len(canonical_json_bytes(plan)) > SECONDARY_PLAN_MAX_BYTES
+    ):
+        raise ValueError(
+            "secondary source plan exceeds the 2 MiB strict capture limit"
+        )
+    return plan
 
 
-def _paper_reader_warnings(details: dict[str, Any]) -> list[str]:
+def _paper_reader_warnings(
+    details: dict[str, Any],
+    *,
+    strict: bool = False,
+) -> list[str]:
     paper_reader = details.get("_paper_reader")
     if not isinstance(paper_reader, dict):
         return []
+    if "warnings" not in paper_reader:
+        return []
     warnings = paper_reader.get("warnings")
     if not isinstance(warnings, list):
-        return []
+        if not strict:
+            return []
+        raise ValueError("secondary source warnings must be an array of strings")
+    if strict and len(warnings) > MAX_SECONDARY_WARNINGS:
+        raise ValueError(
+            f"secondary source warnings accept at most {MAX_SECONDARY_WARNINGS} entries"
+        )
     cleaned: list[str] = []
     for item in warnings:
-        warning = str(item).strip()
+        if strict and not isinstance(item, str):
+            raise ValueError("secondary source warnings must contain only strings")
+        warning_source = item if isinstance(item, str) else str(item)
+        if (
+            strict
+            and len(warning_source.encode("utf-8")) > MAX_SECONDARY_WARNING_BYTES
+        ):
+            raise ValueError(
+                "secondary source warning exceeds 4096 UTF-8 bytes"
+            )
+        warning = warning_source.strip()
         if not warning or warning in NON_ACTIONABLE_WARNING_CODES:
             continue
         cleaned.append(warning)

@@ -15,11 +15,21 @@ from typing import Any
 
 import pytest
 
+from paper_reader.secondary_sources import SECONDARY_PLAN_MAX_BYTES
+
 
 SCRIPT = Path("scripts/capture-secondary-url.mjs")
 NETWORK_POLICY_NODE_TEST = Path("tests/js/test_secondary_network_policy.mjs")
 EGRESS_PROXY_NODE_TEST = Path("tests/js/test_strict_egress_proxy.mjs")
 RAW_CDP_NODE_TEST = Path("tests/js/test_raw_cdp_capture.mjs")
+
+
+def test_python_producer_and_strict_capture_share_secondary_plan_byte_limit() -> None:
+    assert SECONDARY_PLAN_MAX_BYTES == 2 * 1024 * 1024
+    assert (
+        "const SECONDARY_PLAN_MAX_BYTES = 2 * 1024 * 1024;"
+        in SCRIPT.read_text(encoding="utf-8")
+    )
 
 
 class MockCdpServer(ThreadingHTTPServer):
@@ -95,7 +105,7 @@ class MockCdpHandler(BaseHTTPRequestHandler):
             if self.server.mode == "oversized":
                 text = "文" * 100_001
             if self.server.mode == "emoji":
-                text = "正文😀" * 100
+                text = "中😀e\u0301" * 60
             data = {
                 "title": "Delayed WeChat Article",
                 "description": "Delayed description",
@@ -308,6 +318,29 @@ class MockRawCdpServer:
                     if pending_navigate is not None:
                         if not continued_initial_request:
                             continued_initial_request = True
+                            if self.mode == "invalid_fetch_url":
+                                self._send_json(
+                                    connection,
+                                    {
+                                        "method": "Fetch.requestPaused",
+                                        "sessionId": "session-1",
+                                        "params": {
+                                            "requestId": "fetch-invalid-url",
+                                            "request": {
+                                                "url": (
+                                                    "http://[paper-reader-secret.example/"
+                                                    "private?token=do-not-log"
+                                                ),
+                                                "method": "GET",
+                                                "headers": {},
+                                            },
+                                            "frameId": "frame-1",
+                                            "resourceType": "Document",
+                                            "networkId": "network-invalid-url",
+                                        },
+                                    },
+                                )
+                                continue
                             redirect_url = (
                                 "http://127.0.0.1/private"
                                 if self.mode == "private_redirect"
@@ -380,7 +413,7 @@ class MockRawCdpServer:
                     elif self.mode == "oversized":
                         text = "文" * 100_001
                     elif self.mode == "emoji":
-                        text = "正文😀" * 100
+                        text = "中😀e\u0301" * 60
                     elif self.mode == "unicode_controls":
                         text = "\udc00正文\x00\u202e" + "用于交叉核对的正文。" * 30
                     data = {
@@ -559,6 +592,10 @@ def _write_plan(
 
 def _rewrite_plan_binding(plan_path: Path, plan: dict[str, object]) -> None:
     plan_bytes = json.dumps(plan, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    _rewrite_plan_raw_binding(plan_path, plan_bytes)
+
+
+def _rewrite_plan_raw_binding(plan_path: Path, plan_bytes: bytes) -> None:
     plan_path.write_bytes(plan_bytes)
     run_path = plan_path.parent.parent / "run.json"
     run = json.loads(run_path.read_text(encoding="utf-8"))
@@ -959,6 +996,158 @@ def test_plan_bound_capture_accepts_largest_producer_bounded_plan(
     assert json.loads(result.stdout)["status"] == "captured"
 
 
+def test_plan_bound_capture_accepts_finding_anchor_policy(tmp_path: Path) -> None:
+    plan_path = _write_plan(tmp_path)
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan["finding_anchor_policy"] = "codepoint_sha256_v1"
+    _rewrite_plan_binding(plan_path, plan)
+
+    result, _ = run_raw_strict_capture(tmp_path, plan_path=plan_path)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "captured"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "misspelled_policy",
+        "wrong_policy_type",
+        "unknown_key",
+        "missing_legacy_key",
+    ],
+)
+def test_plan_bound_capture_rejects_invalid_policy_shape_before_browser(
+    case: str,
+    tmp_path: Path,
+) -> None:
+    plan_path = _write_plan(tmp_path)
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan["finding_anchor_policy"] = "codepoint_sha256_v1"
+    if case == "misspelled_policy":
+        plan["finding_anchor_policy"] = "codepoints_sha256_v1"
+    elif case == "wrong_policy_type":
+        plan["finding_anchor_policy"] = True
+    elif case == "unknown_key":
+        plan["unexpected"] = "value"
+    else:
+        del plan["usage_boundary"]
+    _rewrite_plan_binding(plan_path, plan)
+
+    result = run_strict_capture(
+        tmp_path,
+        "http://127.0.0.1:1",
+        plan_path=plan_path,
+        env_extra={
+            "ZOTERO_PAPER_READER_CDP_WS_ENDPOINT": (
+                "ws://127.0.0.1:1/devtools/browser/unreachable"
+            )
+        },
+    )
+
+    assert result.returncode == 2
+    assert_strict_machine_error(result)
+    assert not (tmp_path / "secondary-001.json").exists()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "duplicate_sources",
+        "duplicate_policy",
+        "invalid_utf8",
+        "noncanonical_json",
+        "lone_surrogate",
+        "prototype_key",
+        "constructor_key",
+    ],
+)
+def test_plan_bound_capture_rejects_noncanonical_or_ambiguous_plan_bytes(
+    case: str,
+    tmp_path: Path,
+) -> None:
+    plan_path = _write_plan(tmp_path)
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    if case == "duplicate_policy":
+        plan["finding_anchor_policy"] = "codepoint_sha256_v1"
+    elif case == "prototype_key":
+        plan["__proto__"] = {"polluted": True}
+    elif case == "constructor_key":
+        plan["constructor"] = {"polluted": True}
+    canonical = json.dumps(
+        plan,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if case == "duplicate_sources":
+        raw = canonical.replace(b'"sources":[', b'"sources":[],"sources":[', 1)
+    elif case == "duplicate_policy":
+        raw = canonical.replace(
+            b'"finding_anchor_policy":"codepoint_sha256_v1"',
+            (
+                b'"finding_anchor_policy":"codepoint_sha256_v1",'
+                b'"finding_anchor_policy":"codepoint_sha256_v1"'
+            ),
+            1,
+        )
+    elif case == "invalid_utf8":
+        raw = canonical.replace(b'"warnings":[]', b'"warnings":["\xff"]', 1)
+    elif case == "noncanonical_json":
+        raw = json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
+    elif case == "lone_surrogate":
+        plan["warnings"] = ["\ud800"]
+        raw = json.dumps(
+            plan,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    else:
+        raw = canonical
+    _rewrite_plan_raw_binding(plan_path, raw)
+
+    result = run_strict_capture(
+        tmp_path,
+        "http://127.0.0.1:1",
+        plan_path=plan_path,
+        env_extra={
+            "ZOTERO_PAPER_READER_CDP_WS_ENDPOINT": (
+                "ws://127.0.0.1:1/devtools/browser/unreachable"
+            )
+        },
+    )
+
+    assert result.returncode == 2
+    assert_strict_machine_error(result)
+    assert not (tmp_path / "secondary-001.json").exists()
+
+
+def test_plan_bound_capture_does_not_disclose_malformed_plan_text(
+    tmp_path: Path,
+) -> None:
+    secret = "paper-reader-malformed-plan-secret"
+    plan_path = _write_plan(tmp_path)
+    _rewrite_plan_raw_binding(plan_path, secret.encode("utf-8"))
+
+    result = run_strict_capture(
+        tmp_path,
+        "http://127.0.0.1:1",
+        plan_path=plan_path,
+        env_extra={
+            "ZOTERO_PAPER_READER_CDP_WS_ENDPOINT": (
+                "ws://127.0.0.1:1/devtools/browser/unreachable"
+            )
+        },
+    )
+
+    assert result.returncode == 2
+    assert_strict_machine_error(result)
+    assert secret not in result.stdout
+    assert secret not in result.stderr
+    assert not (tmp_path / "secondary-001.json").exists()
+
+
 @pytest.mark.parametrize("tamper", ["unsafe_nonselected", "duplicate_url"])
 def test_plan_bound_capture_rejects_semantically_invalid_plan_before_browser_navigation(
     tamper: str,
@@ -1228,7 +1417,40 @@ def test_plan_bound_capture_counts_unicode_code_points(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     capture = json.loads((tmp_path / "secondary-001.json").read_text(encoding="utf-8"))
     assert capture["status"] == "captured"
-    assert capture["text_length"] == len("正文😀" * 100)
+    assert capture["text"] == "中😀e\u0301" * 60
+    assert capture["text_length"] == len("中😀e\u0301" * 60)
+
+
+def test_plan_bound_capture_redacts_invalid_fetch_url_from_all_outputs(
+    tmp_path: Path,
+) -> None:
+    secret = "paper-reader-secret.example/private?token=do-not-log"
+
+    result, raw_cdp = run_raw_strict_capture(tmp_path, mode="invalid_fetch_url")
+
+    assert result.returncode == 0, result.stderr
+    artifact_bytes = (tmp_path / "secondary-001.json").read_bytes()
+    capture = json.loads(artifact_bytes)
+    assert capture["status"] == "unavailable"
+    assert capture["text"] == ""
+    assert "invalid_network_request_url" in capture["warnings"]
+    assert any(
+        warning.startswith(
+            "invalid_network_request_url:checkpoint=fetch_request_paused;"
+        )
+        for warning in capture["warnings"]
+    )
+    assert secret.encode("utf-8") not in artifact_bytes
+    assert secret not in result.stdout
+    assert secret not in result.stderr
+    failed = [
+        command
+        for command in raw_cdp.commands
+        if command["method"] == "Fetch.failRequest"
+    ]
+    assert [command["params"]["requestId"] for command in failed] == [
+        "fetch-invalid-url"
+    ]
 
 
 def test_plan_bound_capture_normalizes_untrusted_unicode_and_control_characters(

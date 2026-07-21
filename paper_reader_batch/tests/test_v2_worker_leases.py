@@ -890,9 +890,13 @@ def test_worker_prompt_delegates_secondary_cross_checks_only_for_zotero_items(
     )
 
     assert "secondary-capture-dir" not in pdf_prompt["instruction"]
+    assert "current secondary-plan policy" not in pdf_prompt["instruction"]
+    assert "finding-anchor assessment" not in pdf_prompt["instruction"]
     assert "Zotero Extra" in zotero_prompt["instruction"]
     assert "--secondary-capture-dir" in zotero_prompt["instruction"]
     assert "secondary_cross_checks" in zotero_prompt["instruction"]
+    assert "current secondary-plan policy" in zotero_prompt["instruction"]
+    assert "finding-anchor assessment" in zotero_prompt["instruction"]
     assert "evidence_summary" in zotero_prompt["instruction"]
 
 

@@ -138,7 +138,7 @@ def test_version_is_a_human_option_not_a_flat_command() -> None:
     result = _invoke(["--version"])
 
     assert result.exit_code == 0
-    assert result.stdout.strip() == "2.1.0"
+    assert result.stdout.strip() == "2.2.0"
     flat = _invoke(["version"])
     assert flat.exit_code != 0
 

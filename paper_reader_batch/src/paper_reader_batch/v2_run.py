@@ -68,6 +68,12 @@ _MAX_RECONCILIATION_TIMEOUT_SECONDS = 600
 _RECONCILIATION_REQUEST_NAME = "paper_reader_batch.run-recover.reconcile.v2"
 
 
+def derived_reconciliation_request_id(recover_request_id: str) -> str:
+    """Return the deterministic internal reconciliation id for one recovery."""
+
+    return str(uuid5(UUID(recover_request_id), _RECONCILIATION_REQUEST_NAME))
+
+
 class _ChildStrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
@@ -1038,9 +1044,7 @@ def recover_run(
             "run recovery result does not identify exactly one expired started write",
         )
 
-    reconciliation_request_id = str(
-        uuid5(UUID(canonical_request_id), _RECONCILIATION_REQUEST_NAME)
-    )
+    reconciliation_request_id = derived_reconciliation_request_id(canonical_request_id)
 
     def reconciliation_summary(data: WriteReconciledData) -> dict[str, Any]:
         return {

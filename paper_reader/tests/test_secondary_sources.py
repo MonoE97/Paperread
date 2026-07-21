@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from paper_reader import secondary_sources
 from paper_reader.secondary_sources import build_secondary_sources, extract_http_urls
+from paper_reader.storage import canonical_json_bytes
 
 
 def test_extract_http_urls_accepts_only_http_and_https_and_dedupes() -> None:
@@ -134,6 +137,7 @@ def test_build_secondary_source_plan_rejects_ambiguous_extra_types(extra: object
                 "extra": extra,
             },
             source_snapshot_sha256="a" * 64,
+            finding_anchor_policy=None,
         )
 
 
@@ -152,6 +156,7 @@ def test_build_secondary_source_plan_preserves_query_and_applies_capture_boundar
             ),
         },
         source_snapshot_sha256="a" * 64,
+        finding_anchor_policy=None,
     )
 
     assert plan["eligible_source_count"] == 1
@@ -185,6 +190,7 @@ def test_build_secondary_source_plan_rejects_more_members_than_strict_capture_ac
                 "extra": extra,
             },
             source_snapshot_sha256="a" * 64,
+            finding_anchor_policy=None,
         )
 
 
@@ -207,6 +213,7 @@ def test_build_secondary_source_plan_rejects_non_unicast_and_ambiguous_numeric_h
             "extra": url,
         },
         source_snapshot_sha256="a" * 64,
+        finding_anchor_policy=None,
     )
 
     assert plan["eligible_source_count"] == 0
@@ -232,7 +239,131 @@ def test_build_secondary_source_plan_matches_strict_browser_ip_policy(
             "extra": url,
         },
         source_snapshot_sha256="a" * 64,
+        finding_anchor_policy=None,
     )
 
     assert plan["eligible_source_count"] == 0
     assert plan["sources"][0]["rejection_reason"] == "unsafe_url"
+
+
+def test_build_secondary_source_plan_requires_explicit_anchor_policy() -> None:
+    details = {"key": "ABC123", "title": "Example", "extra": ""}
+
+    legacy = secondary_sources.build_secondary_source_plan(
+        details,
+        source_snapshot_sha256="a" * 64,
+        finding_anchor_policy=None,
+    )
+    current = secondary_sources.build_secondary_source_plan(
+        details,
+        source_snapshot_sha256="a" * 64,
+        finding_anchor_policy="codepoint_sha256_v1",
+    )
+
+    assert "finding_anchor_policy" not in legacy
+    assert hashlib.sha256(canonical_json_bytes(legacy)).hexdigest() == (
+        "e6b9a3695d31996634abdb218c6aeb4d06645f4c419bac5b4d3d04b7d8b039ed"
+    )
+    assert current["finding_anchor_policy"] == "codepoint_sha256_v1"
+    with pytest.raises(TypeError):
+        secondary_sources.build_secondary_source_plan(
+            details,
+            source_snapshot_sha256="a" * 64,
+        )
+
+
+@pytest.mark.parametrize("warning_character", ["x", " "])
+def test_build_secondary_source_plan_rejects_warnings_that_exceed_consumer_plan_limit(
+    warning_character: str,
+) -> None:
+    details = {
+        "key": "ABC123",
+        "title": "Example",
+        "extra": "https://example.org/context",
+        "_paper_reader": {
+            "warnings": [
+                warning_character * secondary_sources.SECONDARY_PLAN_MAX_BYTES
+            ],
+        },
+    }
+
+    with pytest.raises(ValueError, match="secondary source warning exceeds"):
+        secondary_sources.build_secondary_source_plan(
+            details,
+            source_snapshot_sha256="a" * 64,
+            finding_anchor_policy=secondary_sources.SECONDARY_FINDING_ANCHOR_POLICY,
+        )
+
+
+def test_build_secondary_source_plan_enforces_final_canonical_consumer_limit() -> None:
+    urls: list[str] = []
+    for index in range(256):
+        prefix = f"https://example.org/{index:03d}/"
+        urls.append(prefix + ("a" * (4000 - len(prefix))))
+
+    with pytest.raises(ValueError, match="secondary source plan exceeds"):
+        secondary_sources.build_secondary_source_plan(
+            {
+                "key": "ABC123",
+                "title": "Example",
+                "extra": " ".join(urls),
+                "_paper_reader": {
+                    "warnings": ["w" * 4096] * 256,
+                },
+            },
+            source_snapshot_sha256="a" * 64,
+            finding_anchor_policy=secondary_sources.SECONDARY_FINDING_ANCHOR_POLICY,
+        )
+
+
+@pytest.mark.parametrize(
+    "warnings",
+    [
+        [123],
+        ["warning"] * 257,
+    ],
+)
+def test_build_secondary_source_plan_rejects_ambiguous_or_unbounded_warning_lists(
+    warnings: list[object],
+) -> None:
+    with pytest.raises(ValueError, match="secondary source warnings"):
+        secondary_sources.build_secondary_source_plan(
+            {
+                "key": "ABC123",
+                "title": "Example",
+                "extra": "https://example.org/context",
+                "_paper_reader": {"warnings": warnings},
+            },
+            source_snapshot_sha256="a" * 64,
+            finding_anchor_policy=secondary_sources.SECONDARY_FINDING_ANCHOR_POLICY,
+        )
+
+
+def test_legacy_secondary_plan_preserves_historical_warning_projection() -> None:
+    warnings: list[object] = [123, *(f"warning-{index}" for index in range(256))]
+
+    plan = secondary_sources.build_secondary_source_plan(
+        {
+            "key": "ABC123",
+            "title": "Example",
+            "extra": "https://example.org/context",
+            "_paper_reader": {"warnings": warnings},
+        },
+        source_snapshot_sha256="a" * 64,
+        finding_anchor_policy=None,
+    )
+
+    assert len(plan["warnings"]) == 257
+    assert plan["warnings"][0] == "123"
+
+
+@pytest.mark.parametrize("invalid", ["unknown", "CODEPOINT_SHA256_V1", 1, False])
+def test_build_secondary_source_plan_rejects_unknown_anchor_policy(
+    invalid: object,
+) -> None:
+    with pytest.raises(ValueError, match="finding_anchor_policy"):
+        secondary_sources.build_secondary_source_plan(
+            {"key": "ABC123", "title": "Example", "extra": ""},
+            source_snapshot_sha256="a" * 64,
+            finding_anchor_policy=invalid,
+        )

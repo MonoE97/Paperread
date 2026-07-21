@@ -338,6 +338,10 @@
     "SecondaryCrossCheckFinding": {
       "additionalProperties": false,
       "properties": {
+        "anchor": {
+          "$ref": "#/$defs/SecondaryTextAnchor",
+          "title": "Anchor"
+        },
         "caveats": {
           "default": [],
           "items": {
@@ -382,6 +386,39 @@
         "text"
       ],
       "title": "SecondaryCrossCheckFinding",
+      "type": "object"
+    },
+    "SecondaryTextAnchor": {
+      "additionalProperties": false,
+      "properties": {
+        "capture_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Capture Sha256",
+          "type": "string"
+        },
+        "end_codepoint": {
+          "exclusiveMinimum": 0,
+          "title": "End Codepoint",
+          "type": "integer"
+        },
+        "excerpt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Excerpt Sha256",
+          "type": "string"
+        },
+        "start_codepoint": {
+          "minimum": 0,
+          "title": "Start Codepoint",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "capture_sha256",
+        "start_codepoint",
+        "end_codepoint",
+        "excerpt_sha256"
+      ],
+      "title": "SecondaryTextAnchor",
       "type": "object"
     }
   },

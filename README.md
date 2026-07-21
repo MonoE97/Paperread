@@ -1,8 +1,8 @@
-# Paper Reader 2.1
+# Paper Reader 2.2
 
 **English** | [简体中文](README.zh-CN.md)
 
-Paper Reader `2.1.0` is a self-contained skill repository for Codex or Claude. It turns a Zotero paper title, a local PDF path, or a batch of papers into evidence-grounded Chinese reading notes through deterministic grouped CLI tooling plus agent-written summaries. For Zotero items only, eligible public links in `Extra` can now be captured read-only and used to cross-check—not replace—the PDF-backed analysis.
+Paper Reader `2.2.0` is a self-contained skill repository for Codex or Claude. It turns a Zotero paper title, a local PDF path, or a batch of papers into evidence-grounded Chinese reading notes through deterministic grouped CLI tooling plus agent-written summaries. For Zotero items only, eligible public links in `Extra` can be captured read-only and used to cross-check—not replace—the PDF-backed analysis. Each used external finding is now cryptographically bound to an exact slice of the immutable captured text before it can be projected into the existing note structure.
 
 The repository root is only a maintenance shell; it is not the runtime Python project. Install and run one or both skill sources:
 
@@ -17,7 +17,7 @@ Do not put a `README.md` inside `paper_reader/` or `paper_reader_batch/`; skills
 
 ## Install
 
-The Paper Reader 2.1 runtime currently supports macOS and Linux; on Windows, use WSL. The tracked-file installation helper below requires a POSIX shell.
+The Paper Reader 2.2 runtime currently supports macOS and Linux; on Windows, use WSL. The tracked-file installation helper below requires a POSIX shell.
 
 Install `uv` before staging the skill. Use the official installer or a package manager; common options are:
 
@@ -70,6 +70,8 @@ install_tracked_skill() {
 
 The source must be a Git checkout and `HEAD:<source_name>` must exist. This intentionally installs files from the committed `HEAD` tree only; uncommitted working-tree and index changes are not included. Create the intended release commit before installing it.
 
+Maintainers can run `scripts/validate-committed-release-bundles.sh [git-revision] [staging-parent]` to apply the same boundary to both Skill sources. The script resolves one exact commit, validates each clean archive before dependency sync, then tests and builds two separate fresh install roots. It retains the mode-0700 staging directory and logs for inspection; it does not inspect working-tree runtime data, access Zotero, or exercise any write lane. This is a local committed-tree gate, not a claim that remote CI has run.
+
 Codex personal skills:
 
 ```bash
@@ -88,7 +90,7 @@ install_tracked_skill paper_reader_batch \
   "$HOME/.claude/skills/paper_reader_batch" paper_reader_batch
 ```
 
-If the target `paper_reader/` or `paper_reader_batch/` directory already exists, stop before installing. Paper Reader 2.1 requires a clean install into a new directory. An old installation may remain elsewhere as read-only history. A failed staging validation leaves the hidden staging directory in place for inspection; it is never promoted to the target.
+If the target `paper_reader/` or `paper_reader_batch/` directory already exists, stop before installing. Paper Reader 2.2 requires a clean install into a new directory. An old installation may remain elsewhere as read-only history. A failed staging validation leaves the hidden staging directory in place for inspection; it is never promoted to the target.
 
 The first `uv sync --locked` initializes each installed skill's local environment from its own lockfile. Re-run it after installing a newly exported revision.
 
@@ -129,7 +131,7 @@ uv run paper_reader zotero verify <authorization.json> --note-key <note_key>
 uv run paper_reader zotero reconcile <authorization.json>
 ```
 
-When a Zotero run's immutable `source/secondary-plan.json` contains eligible links, read the actual entries whose `eligibility` is `eligible` and use each entry's exact `source_id`; rejected entries keep their place, so eligible ids are not necessarily contiguous. The plan preserves URL order and query strings, de-duplicates exact URLs, excludes the paper's DOI/publisher URL, and admits at most eight eligible HTTP(S) sources. Literal unsafe targets are rejected during planning; hostname DNS is validated before browser navigation. Use a fresh flat capture directory and a fresh output path for every source:
+When a Zotero run's immutable `source/secondary-plan.json` contains eligible links, read the actual entries whose `eligibility` is `eligible` and use each entry's exact `source_id`; rejected entries keep their place, so eligible ids are not necessarily contiguous. The plan preserves URL order and query strings, de-duplicates exact URLs, excludes the paper's DOI/publisher URL, and admits at most eight eligible HTTP(S) sources. New current-policy plan producers and the strict consumer share a 2 MiB canonical-byte ceiling; oversized or non-strict internal warning metadata is rejected before run allocation, while historical missing-policy V2 plans retain legacy rebuild semantics. Literal unsafe targets are rejected during planning; hostname DNS is validated before browser navigation. Use a fresh flat capture directory and a fresh output path for every source:
 
 ```bash
 node scripts/capture-secondary-url.mjs --plan <run_dir>/source/secondary-plan.json --source-id secondary-001 --output <temporary_capture_dir>/secondary-001.json
@@ -193,7 +195,7 @@ paper_reader supports two inputs:
 
 Local PDF path and directory path inputs skip Zotero lookup and duplicate checks. Existing local paths are not Zotero title fragments; directory paths belong to `paper_reader_batch manifest from-pdf-folder`, which is non-recursive unless `--recursive` is explicit.
 
-Both workflows use full-PDF extraction by default. Final `evidence_summary` locators must use one of these canonical forms: `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, and secondary context paths are invalid. `section_context.md` is only a navigation aid. For Zotero runs, strict `capture-secondary-url.mjs --plan ... --source-id ... --output ...` results can enter the same immutable evidence bundle only through `run prepare --secondary-capture-dir`; review then requires one `secondary_cross_checks` assessment per eligible source and projects validated findings into existing note fields. Secondary material remains cross-check-only, can never support `30 秒结论` or `evidence_summary`, and an unavailable link only adds a deterministic notice under the existing applicability-boundary list. Without eligible `Extra` links, no web capture or cross-check text is produced. Local PDF runs reject this path before evidence allocation.
+Both workflows use full-PDF extraction by default. Final `evidence_summary` locators must use one of these canonical forms: `context.md page <N>`, `context.md page <N> section <Section Name>`, `context.md page <N> section <Section Name> table_candidate <N>`, or `figure_context.md <figure_id>`. Bare `context.md` / `figure_context.md`, prose locators such as `page 3 method section`, `section_context.md`, and secondary context paths are invalid. `section_context.md` is only a navigation aid. For Zotero runs, strict `capture-secondary-url.mjs --plan ... --source-id ... --output ...` results can enter the same immutable evidence bundle only through `run prepare --secondary-capture-dir`; review then requires one `secondary_cross_checks` assessment per eligible source and projects validated findings into existing note fields. In a new 2.2 run, every used finding must bind exactly one 20–2,000-code-point slice of the immutable capture and its exact UTF-8 digest; all bindings are validated before any finding is projected, and their offsets and hashes are never rendered. Secondary material remains cross-check-only, can never support `30 秒结论` or `evidence_summary`, and an unavailable link only adds a deterministic notice under the existing applicability-boundary list. Without eligible `Extra` links, no web capture or cross-check text is produced. Local PDF runs reject this path before evidence allocation.
 
 paper_reader_batch supports four batch inputs: Zotero collection inventories, multiple Zotero titles, local PDF folders, and multiple PDF paths. It normalizes them into a strict manifest and uses an append-only hash-chain journal as authority; `state.json` is only a reconstructable snapshot. Worker and local-prepare leases default to 900 seconds, and the serial write claim defaults to 120 seconds. Zotero-backed items use `zotero_write` by default, while PDF items never enter the write queue. After durable `write.started`, a crash is uncertain and is never resent: `run recover --paper-reader-root ...` delegates read-only single-paper reconciliation, then records `written`, `retry_confirmation_required`, or `blocked`. Pass `--write-policy prepare_only` for dry-run. A pure local-PDF report uses `effective_write_policy=local_only`; each per-paper result is extracted from the single-paper note's `30 秒结论` row, falling back to `tldr` then `one_sentence_summary` without resummarizing.
 

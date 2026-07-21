@@ -26,7 +26,10 @@ from paper_reader.contracts import (
 from paper_reader.local_lifecycle import LocalLifecycleError, _local_source_identity
 from paper_reader.resource_policy import V2_RESOURCE_POLICY
 from paper_reader.runs import slugify_title
-from paper_reader.secondary_sources import build_secondary_source_plan
+from paper_reader.secondary_sources import (
+    SECONDARY_FINDING_ANCHOR_POLICY,
+    build_secondary_source_plan,
+)
 from paper_reader.storage import (
     DirectoryAnchorLike,
     PublishConflictError,
@@ -622,6 +625,7 @@ def _build_validated_run(
     plan = build_secondary_source_plan(
         normalized_snapshot["selected_item"],
         source_snapshot_sha256=hashlib.sha256(normalized_bytes).hexdigest(),
+        finding_anchor_policy=SECONDARY_FINDING_ANCHOR_POLICY,
     )
     plan_bytes = canonical_json_bytes(plan)
     raw_ref = _artifact_ref(raw_path, "raw_discovery_bundle", raw_bytes)

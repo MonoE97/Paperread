@@ -2,6 +2,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { TextDecoder } from "node:util";
 
 import {
   PublicNetworkPolicy,
@@ -467,6 +468,82 @@ function readStableJson(requestedPath, { label, maxBytes }) {
   };
 }
 
+function assertWellFormedJsonStrings(value) {
+  const assertWellFormedString = (text) => {
+    for (let index = 0; index < text.length; index += 1) {
+      const codeUnit = text.charCodeAt(index);
+      if (codeUnit >= 0xD800 && codeUnit <= 0xDBFF) {
+        const next = text.charCodeAt(index + 1);
+        if (!(next >= 0xDC00 && next <= 0xDFFF)) {
+          throw new Error("secondary plan contains an unpaired surrogate");
+        }
+        index += 1;
+      } else if (codeUnit >= 0xDC00 && codeUnit <= 0xDFFF) {
+        throw new Error("secondary plan contains an unpaired surrogate");
+      }
+    }
+  };
+
+  if (typeof value === "string") {
+    assertWellFormedString(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      assertWellFormedJsonStrings(item);
+    }
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const [key, item] of Object.entries(value)) {
+      assertWellFormedString(key);
+      assertWellFormedJsonStrings(item);
+    }
+  }
+}
+
+function canonicalJsonValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => canonicalJsonValue(item));
+  }
+  if (value && typeof value === "object") {
+    const canonical = Object.create(null);
+    for (const key of Object.keys(value).sort()) {
+      canonical[key] = canonicalJsonValue(value[key]);
+    }
+    return canonical;
+  }
+  return value;
+}
+
+function readStableCanonicalPlan(requestedPath) {
+  const rawBytes = readStableRegularFile(requestedPath, {
+    label: "secondary plan",
+    maxBytes: SECONDARY_PLAN_MAX_BYTES,
+  });
+  let decoded;
+  try {
+    decoded = new TextDecoder("utf-8", {fatal: true}).decode(rawBytes);
+  } catch {
+    throw new Error("secondary plan must be valid UTF-8");
+  }
+  let payload;
+  try {
+    payload = JSON.parse(decoded);
+  } catch {
+    throw new Error("secondary plan must be valid JSON");
+  }
+  assertWellFormedJsonStrings(payload);
+  const canonicalBytes = Buffer.from(
+    JSON.stringify(canonicalJsonValue(payload)),
+    "utf8",
+  );
+  if (!rawBytes.equals(canonicalBytes)) {
+    throw new Error("secondary plan must use canonical JSON bytes");
+  }
+  return {payload, rawBytes};
+}
+
 function validateRunPlanBinding(requestedPlanPath, plan, planBytes) {
   const absolutePlanPath = path.resolve(requestedPlanPath);
   const sourceDirectory = path.dirname(absolutePlanPath);
@@ -616,7 +693,7 @@ function validatePlanAndSelectSource(plan, requestedSourceId) {
     const wanted = [...expected].sort();
     return observed.length === wanted.length && observed.every((key, index) => key === wanted[index]);
   };
-  const planKeys = [
+  const legacyPlanKeys = [
     "format",
     "item_key",
     "source_snapshot_sha256",
@@ -625,6 +702,7 @@ function validatePlanAndSelectSource(plan, requestedSourceId) {
     "sources",
     "warnings",
   ];
+  const anchoredPlanKeys = [...legacyPlanKeys, "finding_anchor_policy"];
   const sourceKeys = [
     "source_id",
     "url",
@@ -637,12 +715,18 @@ function validatePlanAndSelectSource(plan, requestedSourceId) {
     !plan ||
     typeof plan !== "object" ||
     Array.isArray(plan) ||
-    !hasExactKeys(plan, planKeys) ||
+    !(
+      hasExactKeys(plan, legacyPlanKeys) ||
+      (
+        hasExactKeys(plan, anchoredPlanKeys) &&
+        plan.finding_anchor_policy === "codepoint_sha256_v1"
+      )
+    ) ||
     plan.format !== "paper_reader.secondary-plan.v2-internal" ||
     !isContractIdentifier(plan.item_key) ||
     !/^[0-9a-f]{64}$/.test(plan.source_snapshot_sha256) ||
     plan.usage_boundary !== "cross-check only; must not be cited in evidence_summary" ||
-    !Number.isInteger(plan.eligible_source_count) ||
+    !Number.isSafeInteger(plan.eligible_source_count) ||
     plan.eligible_source_count < 0 ||
     !Array.isArray(plan.sources) ||
     plan.sources.length > 256 ||
@@ -815,10 +899,7 @@ async function runStrictCapture() {
     if (fs.existsSync(output)) {
       throw new Error("capture output already exists");
     }
-    const loadedPlan = readStableJson(planPath, {
-      label: "secondary plan",
-      maxBytes: SECONDARY_PLAN_MAX_BYTES,
-    });
+    const loadedPlan = readStableCanonicalPlan(planPath);
     source = validatePlanAndSelectSource(loadedPlan.payload, sourceId);
     binding = validateRunPlanBinding(planPath, loadedPlan.payload, loadedPlan.rawBytes);
     policy = new PublicNetworkPolicy({
