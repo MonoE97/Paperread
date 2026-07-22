@@ -84,6 +84,10 @@ _SAFE_WHILE_PENDING = {
     "write.preview",
     "user.verify-zotero-write-read-only",
 }
+_PENDING_ACTIONS_THAT_END_WORKER_CLAIM = {
+    "worker.finish",
+    "worker.release",
+}
 
 _PENDING_PUBLIC_ACTION: dict[str, str] = {
     "local-prepare.run.reserve": "local-prepare.run",
@@ -249,6 +253,34 @@ def _pending_action(view: RunView) -> _NextAction | None:
         },
         required_inputs=required_inputs,
     )
+
+
+def _pending_invalidated_safe_candidates(
+    view: RunView,
+    pending: _NextAction,
+) -> set[tuple[str, str | None]]:
+    invalidated: set[tuple[str, str | None]] = set()
+    if (
+        pending.item_id is not None
+        and pending.action in _PENDING_ACTIONS_THAT_END_WORKER_CLAIM
+    ):
+        invalidated.add(("worker.prompt", pending.item_id))
+
+    pending_event = view.pending_event
+    if pending_event is None:  # pragma: no cover - caller has a pending action
+        return invalidated
+    data = pending_event.event.data
+    kind = getattr(data, "kind", None)
+    if kind == "run.recovered":
+        invalidated.update(
+            ("worker.prompt", lease.item_id)
+            for lease in data.expired_worker_leases
+        )
+    elif kind == "worker.lease_expired":
+        invalidated.add(("worker.prompt", data.item_id))
+    elif kind == "write.lease_expired":
+        invalidated.add(("write.preview", data.item_id))
+    return invalidated
 
 
 def _append_worker_actions(
@@ -714,10 +746,12 @@ def derive_next_actions(view: RunView) -> list[NextActionJson]:
         )
     )
     if pending is not None:
+        invalidated = _pending_invalidated_safe_candidates(view, pending)
         safe_read_only = [
             candidate
             for candidate in actions
             if candidate.action in _SAFE_WHILE_PENDING
+            and (candidate.action, candidate.item_id) not in invalidated
         ]
         return [pending.as_json(), *(candidate.as_json() for candidate in safe_read_only)]
     return [candidate.as_json() for candidate in actions]

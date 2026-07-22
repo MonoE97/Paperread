@@ -14,7 +14,11 @@ from paper_reader_batch.v2_cli import app
 from paper_reader_batch.v2_journal import load_run_view
 from paper_reader_batch.v2_manifest import create_pdf_paths_manifest
 from paper_reader_batch.v2_next_actions import ACTION_PRIORITY, derive_next_actions
-from paper_reader_batch.v2_run import derived_reconciliation_request_id, initialize_run
+from paper_reader_batch.v2_run import (
+    derived_reconciliation_request_id,
+    initialize_run,
+    recover_run,
+)
 from paper_reader_batch.v2_worker import claim_worker, worker_prompt
 
 
@@ -603,6 +607,24 @@ def test_pending_event_suppresses_unrelated_mutations_and_replays_exact_public_o
     ]
 
 
+@pytest.mark.parametrize("pending_command", ["worker.release", "worker.finish"])
+def test_pending_same_item_worker_exit_suppresses_prompt(
+    pending_command: str,
+) -> None:
+    view = _view(
+        [_item("001", worker="claimed")],
+        pending_command=pending_command,
+        pending_request_id=RUN_ID,
+        pending_item_id="001",
+    )
+
+    actions = derive_next_actions(view)
+
+    assert [entry["action"] for entry in actions] == [pending_command]
+    assert actions[0]["item_id"] == "001"
+    assert actions[0]["reason_code"] == "pending_event_originating_request_replay_required"
+
+
 def test_real_pending_claim_uses_public_lane_and_keeps_safe_existing_prompt(
     tmp_path: Path,
 ) -> None:
@@ -671,6 +693,110 @@ def test_real_pending_claim_uses_public_lane_and_keeps_safe_existing_prompt(
     assert [(item["lane"], item["action"], item["item_id"]) for item in actions] == [
         ("worker", "worker.claim", None),
         ("worker", "worker.prompt", "001"),
+    ]
+
+
+def test_pending_recovery_suppresses_only_expired_worker_prompts(
+    tmp_path: Path,
+) -> None:
+    skill_root = tmp_path / "skill"
+    skill_root.mkdir()
+    pdfs = []
+    for index in range(2):
+        pdf = tmp_path / f"paper-{index}.pdf"
+        pdf.write_bytes(f"%PDF-1.7\npending recovery {index}\n".encode())
+        pdfs.append(pdf)
+    paths = tmp_path / "paths.txt"
+    paths.write_text("\n".join(str(pdf) for pdf in pdfs), encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    create_pdf_paths_manifest(
+        paths,
+        batch_title="pending recovery next actions",
+        output=manifest,
+        request_id=RUN_ID,
+        skill_root=skill_root,
+        default_concurrency=2,
+        created_at="2026-07-10T00:00:00Z",
+    )
+    run_dir = tmp_path / "run"
+    initialize_run(
+        manifest,
+        request_id=CLAIM_ID,
+        skill_root=skill_root,
+        output=run_dir,
+        initialized_at="2026-07-10T00:00:00Z",
+    )
+    expired = claim_worker(
+        run_dir,
+        worker_id="reader-1",
+        request_id="44444444-4444-4444-8444-444444444444",
+        limit=1,
+        lease_seconds=1,
+        now="2026-07-10T00:00:01Z",
+    ).result["assignments"][0]
+    active = claim_worker(
+        run_dir,
+        worker_id="reader-2",
+        request_id="55555555-5555-4555-8555-555555555555",
+        limit=1,
+        lease_seconds=300,
+        now="2026-07-10T00:00:01Z",
+    ).result["assignments"][0]
+
+    def crash_after_proposal_fsync(stage: str) -> None:
+        if stage == "after_writing_fsync":
+            raise RuntimeError("simulated recovery crash after pending proposal fsync")
+
+    with pytest.raises(RuntimeError, match="simulated recovery crash"):
+        recover_run(
+            run_dir,
+            request_id="66666666-6666-4666-8666-666666666666",
+            now="2026-07-10T00:00:03Z",
+            fault=crash_after_proposal_fsync,
+        )
+
+    view = load_run_view(run_dir)
+    assert view.pending_event is not None
+    assert view.pending_event.event.command == "run.recover"
+    assert [
+        lease.item_id
+        for lease in view.pending_event.event.data.expired_worker_leases
+    ] == [expired["item_id"]]
+
+    actions = derive_next_actions(view)
+    assert actions[0]["action"] == "run.recover"
+    assert [
+        entry["item_id"]
+        for entry in actions
+        if entry["action"] == "worker.prompt"
+    ] == [active["item_id"]]
+
+
+def test_pending_recovery_suppresses_expired_write_preview() -> None:
+    view = _view(
+        [_item("001", worker="succeeded", write="claimed")],
+        pending_command="run.recover",
+        pending_request_id=RUN_ID,
+        pending_item_id="001",
+    )
+    view.pending_event.event.data.kind = "write.lease_expired"
+
+    assert [entry["action"] for entry in derive_next_actions(view)] == [
+        "run.recover"
+    ]
+
+
+def test_pending_scalar_worker_expiry_suppresses_prompt() -> None:
+    view = _view(
+        [_item("001", worker="claimed")],
+        pending_command="run.recover",
+        pending_request_id=RUN_ID,
+        pending_item_id="001",
+    )
+    view.pending_event.event.data.kind = "worker.lease_expired"
+
+    assert [entry["action"] for entry in derive_next_actions(view)] == [
+        "run.recover"
     ]
 
 
